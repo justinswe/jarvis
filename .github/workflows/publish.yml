@@ -14,7 +14,7 @@ jobs:
 
     env:
       DOCKERHUB_REGISTRY: docker.io
-      DOCKERHUB_REPOSITORY: justinswe/dns-controller
+      DOCKERHUB_REPOSITORY: justinswe/jarvis
 
     steps:
       - name: Check out repository
@@ -86,7 +86,7 @@ jobs:
             --finalHashes "${final_hashes}" \
             --output "${impacted_targets}"
 
-          if grep --fixed-strings --line-regexp --quiet '//:dns-controller' "${impacted_targets}"; then
+          if grep --fixed-strings --line-regexp --quiet '//:jarvis' "${impacted_targets}"; then
             echo "impacted=true" >> "${GITHUB_OUTPUT}"
           else
             echo "impacted=false" >> "${GITHUB_OUTPUT}"
