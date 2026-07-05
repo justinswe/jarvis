@@ -1,5 +1,5 @@
 load("@gazelle//:def.bzl", "gazelle")
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("//tools/container/go:defs.bzl", "go_container_image")
 
 MODULE_VERSION = module_version()
@@ -16,10 +16,9 @@ go_library(
     deps = [
         "//pkg/discord",
         "//pkg/genai",
-        "@com_github_gin_gonic_gin//:gin",
         "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
         "@com_github_spf13_cobra//:cobra",
-        "@com_github_spf13_viper//:viper",
         "@org_uber_go_zap//:zap",
     ],
 )
@@ -28,6 +27,13 @@ go_binary(
     name = "jarvis",
     embed = [":jarvis_lib"],
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "jarvis_test",
+    srcs = ["main_test.go"],
+    embed = [":jarvis_lib"],
+    deps = ["@com_github_stretchr_testify//assert"],
 )
 
 platform(

@@ -54,6 +54,8 @@ jobs:
             --output "${bazel_diff}"
           echo "${BAZEL_DIFF_SHA256}  ${bazel_diff}" | sha256sum --check --strict
 
+          bazel mod deps --config=ci
+
           java -jar "${bazel_diff}" generate-hashes \
             --workspacePath "${GITHUB_WORKSPACE}" \
             --bazelPath bazel \
@@ -77,6 +79,7 @@ jobs:
             --workspacePath "${GITHUB_WORKSPACE}" \
             --bazelPath bazel \
             "${starting_hashes}"
+          git restore --worktree MODULE.bazel.lock
           git checkout --detach "${GITHUB_SHA}"
 
           java -jar "${bazel_diff}" get-impacted-targets \
@@ -86,7 +89,8 @@ jobs:
             --finalHashes "${final_hashes}" \
             --output "${impacted_targets}"
 
-          if grep --fixed-strings --line-regexp --quiet '//:jarvis' "${impacted_targets}"; then
+          if grep --fixed-strings --line-regexp --quiet '//:jarvis' "${impacted_targets}" ||
+            ! git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- .github/workflows/publish.yml; then
             echo "impacted=true" >> "${GITHUB_OUTPUT}"
           else
             echo "impacted=false" >> "${GITHUB_OUTPUT}"
@@ -154,13 +158,13 @@ jobs:
       - name: Publish version tag
         if: steps.impact.outputs.impacted == 'true'
         run: |
-          bazel run --stamp \
+          bazel run --config=ci --stamp \
             --@rules_img//img/settings:docker_config_path="${DOCKER_CONFIG}/config.json" \
             //:image_push
 
       - name: Publish latest tag
         if: steps.impact.outputs.impacted == 'true'
         run: |
-          bazel run --stamp \
+          bazel run --config=ci --stamp \
             --@rules_img//img/settings:docker_config_path="${DOCKER_CONFIG}/config.json" \
             //:image_push_latest
