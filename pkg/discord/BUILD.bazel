@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "discord",
+    srcs = ["discord.go"],
+    importpath = "github.com/justinswe/jarvis/pkg/discord",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/genai",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_justinswe_std//app",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "discord_test",
+    srcs = ["discord_test.go"],
+    embed = [":discord"],
+    deps = [
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_stretchr_testify//assert",
+    ],
+)

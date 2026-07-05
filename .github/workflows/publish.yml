@@ -1,0 +1,166 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+
+    env:
+      DOCKERHUB_REGISTRY: docker.io
+      DOCKERHUB_REPOSITORY: justinswe/dns-controller
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Bazelisk
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+
+      - name: Determine whether the binary is impacted
+        id: impact
+        env:
+          BAZEL_DIFF_SHA256: 2d50e8e563db96231d8af046322719c0ca266d54c4a22e59988e82ab9a373060
+          BEFORE_SHA: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bazel_diff="${RUNNER_TEMP}/bazel-diff_deploy.jar"
+          starting_hashes="${RUNNER_TEMP}/starting-hashes.json"
+          final_hashes="${RUNNER_TEMP}/final-hashes.json"
+          impacted_targets="${RUNNER_TEMP}/impacted-targets.txt"
+
+          git ls-files --error-unmatch tools/modules/go.MODULE.bazel >/dev/null
+
+          curl --fail --location --silent --show-error \
+            https://github.com/Tinder/bazel-diff/releases/download/v30.0.0/bazel-diff_deploy.jar \
+            --output "${bazel_diff}"
+          echo "${BAZEL_DIFF_SHA256}  ${bazel_diff}" | sha256sum --check --strict
+
+          java -jar "${bazel_diff}" generate-hashes \
+            --workspacePath "${GITHUB_WORKSPACE}" \
+            --bazelPath bazel \
+            "${final_hashes}"
+
+          if [[ "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            echo "No prior revision is available; treating the binary as impacted."
+            echo "impacted=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git checkout --detach "${BEFORE_SHA}"
+          if [[ ! -f MODULE.bazel ]]; then
+            echo "The prior revision has no Bazel module; treating the binary as impacted."
+            git checkout --detach "${GITHUB_SHA}"
+            echo "impacted=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          java -jar "${bazel_diff}" generate-hashes \
+            --workspacePath "${GITHUB_WORKSPACE}" \
+            --bazelPath bazel \
+            "${starting_hashes}"
+          git checkout --detach "${GITHUB_SHA}"
+
+          java -jar "${bazel_diff}" get-impacted-targets \
+            --workspacePath "${GITHUB_WORKSPACE}" \
+            --bazelPath bazel \
+            --startingHashes "${starting_hashes}" \
+            --finalHashes "${final_hashes}" \
+            --output "${impacted_targets}"
+
+          if grep --fixed-strings --line-regexp --quiet '//:dns-controller' "${impacted_targets}"; then
+            echo "impacted=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "impacted=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Configure Docker credential path
+        if: steps.impact.outputs.impacted == 'true'
+        shell: bash
+        run: |
+          mkdir --parents "${RUNNER_TEMP}/docker-config"
+          echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"
+
+      - name: Verify Docker Hub repository
+        if: steps.impact.outputs.impacted == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DOCKERHUB_USERNAME}" ]]; then
+            echo "Repository variable DOCKERHUB_USERNAME is not configured." >&2
+            exit 1
+          fi
+
+          status="$({ curl --silent --show-error \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            "https://hub.docker.com/v2/repositories/${DOCKERHUB_REPOSITORY}/"; } || true)"
+          if [[ "${status}" != "200" ]]; then
+            echo "Docker Hub repository ${DOCKERHUB_REPOSITORY} is unavailable (HTTP ${status}). Create it and grant ${DOCKERHUB_USERNAME} write access." >&2
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.impact.outputs.impacted == 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # 4.4.0
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify Docker Hub push authorization
+        if: steps.impact.outputs.impacted == 'true'
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status="$({ curl --silent --show-error \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            --user "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+            --get \
+            --data-urlencode 'service=registry.docker.io' \
+            --data-urlencode "scope=repository:${DOCKERHUB_REPOSITORY}:push,pull" \
+            https://auth.docker.io/token; } || true)"
+          if [[ "${status}" != "200" ]]; then
+            echo "Docker Hub denied push access to ${DOCKERHUB_REPOSITORY} (HTTP ${status}). Check the repository namespace and token permissions." >&2
+            exit 1
+          fi
+
+      - name: Publish version tag
+        if: steps.impact.outputs.impacted == 'true'
+        run: |
+          bazel run --stamp \
+            --@rules_img//img/settings:docker_config_path="${DOCKER_CONFIG}/config.json" \
+            //:image_push
+
+      - name: Publish latest tag
+        if: steps.impact.outputs.impacted == 'true'
+        run: |
+          bazel run --stamp \
+            --@rules_img//img/settings:docker_config_path="${DOCKER_CONFIG}/config.json" \
+            //:image_push_latest

@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "genai",
+    srcs = ["handler.go"],
+    importpath = "github.com/justinswe/jarvis/pkg/genai",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_justinswe_std//app",
+        "@org_golang_google_genai//:genai",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "genai_test",
+    srcs = ["handler_test.go"],
+    embed = [":genai"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@org_golang_google_genai//:genai",
+    ],
+)

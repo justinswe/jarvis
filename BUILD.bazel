@@ -1,0 +1,53 @@
+load("@gazelle//:def.bzl", "gazelle")
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("//tools/container/go:defs.bzl", "go_container_image")
+
+MODULE_VERSION = module_version()
+
+gazelle(
+    name = "gazelle",
+)
+
+go_library(
+    name = "jarvis_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/justinswe/jarvis",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//pkg/discord",
+        "//pkg/genai",
+        "@com_github_gin_gonic_gin//:gin",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_viper//:viper",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_binary(
+    name = "jarvis",
+    embed = [":jarvis_lib"],
+    visibility = ["//visibility:public"],
+)
+
+platform(
+    name = "linux_amd64",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+)
+
+go_container_image(
+    name = "image",
+    additional_tags = {
+        "latest": "latest",
+    },
+    base = "@distroless_base_debian13_nonroot",
+    binary = ":jarvis",
+    platform = ":linux_amd64",
+    registry = "index.docker.io",
+    repository = "justinswe/dns-controller",
+    tag = MODULE_VERSION,
+    visibility = ["//visibility:public"],
+)
