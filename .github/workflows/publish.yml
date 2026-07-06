@@ -1,6 +1,7 @@
 name: Publish
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -46,6 +47,12 @@ jobs:
           starting_hashes="${RUNNER_TEMP}/starting-hashes.json"
           final_hashes="${RUNNER_TEMP}/final-hashes.json"
           impacted_targets="${RUNNER_TEMP}/impacted-targets.txt"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "Manual dispatch; treating the binary as impacted."
+            echo "impacted=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
 
           git ls-files --error-unmatch tools/modules/go.MODULE.bazel >/dev/null
 

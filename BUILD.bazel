@@ -53,7 +53,7 @@ go_container_image(
     binary = ":jarvis",
     platform = ":linux_amd64",
     registry = "index.docker.io",
-    repository = "justinswe/dns-controller",
+    repository = "justinswe/jarvis",
     tag = MODULE_VERSION,
     visibility = ["//visibility:public"],
 )
