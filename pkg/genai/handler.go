@@ -3,6 +3,7 @@ package genai
 import (
 	"context"
 	"net/url"
+	"reflect"
 	"strings"
 
 	"github.com/justinswe/std/app"
@@ -12,15 +13,17 @@ import (
 )
 
 const (
-	DefaultModel           = "google/gemini-3.5-flash"
-	DefaultMaxOutputTokens = 256
-	MaxOutputTokensLimit   = 512
-	verificationCaveat     = "I couldn't verify this with usable web sources, so please confirm time-sensitive details."
+	DefaultMaxOutputTokens   = 512
+	MaxOutputTokensLimit     = 512
+	selectedModel            = "google/gemini-3.5-flash"
+	verificationCaveat       = "I couldn't verify this with usable web sources."
+	maxToolRounds            = 2
+	maxFunctionCallsPerRound = 2
 )
 
 const (
-	BaseSystemPrompt = "Messages are formatted as \"Name: text\". Do not include your name or any prefixes in responses. Do not emit HTML entities; output raw punctuation. Always answer concisely in under 100 words. Treat CURRENT REQUEST as the primary task, then THREAD HISTORY, then PARENT CHANNEL or CHANNEL HISTORY. Background context may be stale. If context is insufficient, answer from your own knowledge without mentioning that context is missing. Google Search is available: use it only when the user explicitly asks you to search, when current information is needed, or when you cannot answer a factual question confidently. Use the minimum necessary search queries and do not repeat the question or conversation history in queries."
-	DefaultPrompt    = "You are a helpful assistant named Jarvis."
+	BaseSystemPrompt = "Messages are formatted as \"Name: text\". Do not include your name or any prefixes in responses. Do not emit HTML entities; output raw punctuation. Always answer concisely in under 100 words. Treat CURRENT REQUEST as the primary task, then THREAD HISTORY, then PARENT CHANNEL or CHANNEL HISTORY. Background context may be stale. If context is insufficient, answer from your own knowledge without mentioning that context is missing. A current-channel search tool may be available: use it when the user asks about earlier messages in this Discord channel. Google Search is available: use it only when the user explicitly asks you to search the web, when current public information is needed, or when you cannot answer a factual question confidently. Use the minimum necessary search queries and do not repeat the question or conversation history in queries."
+	DefaultPrompt    = "You are a intelligent, witty, and clever assistant named Jarvis."
 )
 
 type Message struct {
@@ -33,11 +36,19 @@ type GenerateRequest struct {
 	RequestID string
 	CallerID  string
 	ChannelID string
+	Tools     []FunctionTool
 }
 
 type Source struct {
 	Title string
 	URL   string
+}
+
+// FunctionTool is a model-callable function available for one generation.
+type FunctionTool interface {
+	Name() string
+	Declaration() *googlegenai.FunctionDeclaration
+	Execute(context.Context, map[string]any) (any, error)
 }
 
 type GenerateResponse struct {
@@ -49,7 +60,6 @@ type GenerateResponse struct {
 type Config struct {
 	ProjectID       string
 	Location        string
-	Model           string
 	DefaultPrompt   string
 	MaxOutputTokens int
 	Temperature     float32
@@ -59,7 +69,6 @@ type generateFunc func(context.Context, string, []*googlegenai.Content, *googleg
 
 type Handler struct {
 	client       *googlegenai.Client
-	model        string
 	cfg          Config
 	systemPrompt string
 	generate     generateFunc
@@ -71,12 +80,6 @@ func New(ctx context.Context, cfg Config) (*Handler, error) {
 	}
 	if cfg.Location == "" {
 		cfg.Location = "global"
-	}
-	if cfg.Model == "" {
-		cfg.Model = DefaultModel
-	}
-	if !strings.Contains(strings.ToLower(cfg.Model), "gemini-3.5-flash") {
-		return nil, errors.Errorf("model %q is incompatible with required MINIMAL thinking; use %s", cfg.Model, DefaultModel)
 	}
 	if cfg.MaxOutputTokens == 0 {
 		cfg.MaxOutputTokens = DefaultMaxOutputTokens
@@ -92,7 +95,7 @@ func New(ctx context.Context, cfg Config) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &Handler{client: client, model: cfg.Model, cfg: cfg, systemPrompt: systemPrompt}
+	h := &Handler{client: client, cfg: cfg, systemPrompt: systemPrompt}
 	h.generate = client.Models.GenerateContent
 	return h, nil
 }
@@ -101,23 +104,28 @@ func (h *Handler) Close() error { return nil }
 
 func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateResponse, error) {
 	app.L().Info("Starting Gemini generation",
-		zap.String("model", h.model),
+		zap.String("model", selectedModel),
 		zap.String("request_id", req.RequestID),
 		zap.String("caller_id", req.CallerID),
 		zap.String("channel_id", req.ChannelID),
 		zap.Int("message_count", len(req.Messages)),
 		zap.Int("max_output_tokens", h.cfg.MaxOutputTokens),
 		zap.Bool("google_search_available", true),
+		zap.Int("function_tool_count", len(req.Tools)),
 	)
 	contents, err := toContents(req.Messages)
 	if err != nil {
 		return GenerateResponse{}, err
 	}
 
-	resp, err := h.generate(ctx, h.model, contents, h.contentConfig(true))
+	registry, err := newToolRegistry(req.Tools)
+	if err != nil {
+		return GenerateResponse{}, err
+	}
+	resp, err := h.generate(ctx, selectedModel, contents, h.contentConfig(true, registry.declarations()))
 	if err != nil {
 		app.L().Warn("Search-enabled generation failed; retrying without tools", zap.Error(err))
-		fallback, fallbackErr := h.generate(ctx, h.model, contents, h.contentConfig(false))
+		fallback, fallbackErr := h.generate(ctx, selectedModel, contents, h.contentConfig(false, nil))
 		if fallbackErr != nil {
 			return GenerateResponse{}, errors.Wrapf(fallbackErr, "generate fallback after search-enabled request failed: %v", err)
 		}
@@ -127,6 +135,12 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 			text += "\n\n" + verificationCaveat
 		}
 		return GenerateResponse{Text: text}, nil
+	}
+	if len(req.Tools) > 0 {
+		resp, err = h.resolveFunctionCalls(ctx, req, registry, contents, resp)
+		if err != nil {
+			return GenerateResponse{}, err
+		}
 	}
 
 	sources := extractSources(resp, 3)
@@ -139,7 +153,7 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 	return GenerateResponse{Text: text, Grounded: grounded, Sources: sources}, nil
 }
 
-func (h *Handler) contentConfig(search bool) *googlegenai.GenerateContentConfig {
+func (h *Handler) contentConfig(search bool, declarations []*googlegenai.FunctionDeclaration) *googlegenai.GenerateContentConfig {
 	cfg := &googlegenai.GenerateContentConfig{
 		SystemInstruction: &googlegenai.Content{Parts: []*googlegenai.Part{{Text: h.systemPrompt}}},
 		MaxOutputTokens:   int32(h.cfg.MaxOutputTokens),
@@ -149,7 +163,133 @@ func (h *Handler) contentConfig(search bool) *googlegenai.GenerateContentConfig 
 	if search {
 		cfg.Tools = []*googlegenai.Tool{{GoogleSearch: &googlegenai.GoogleSearch{}}}
 	}
+	if len(declarations) > 0 {
+		cfg.Tools = append(cfg.Tools, &googlegenai.Tool{FunctionDeclarations: declarations})
+	}
 	return cfg
+}
+
+func (h *Handler) resolveFunctionCalls(ctx context.Context, req GenerateRequest, registry toolRegistry, contents []*googlegenai.Content, resp *googlegenai.GenerateContentResponse) (*googlegenai.GenerateContentResponse, error) {
+	for round := 0; round < maxToolRounds; round++ {
+		calls := resp.FunctionCalls()
+		if len(calls) == 0 {
+			return resp, nil
+		}
+		contents = append(contents, modelToolCallContent(resp), functionResponseContent(ctx, registry, calls))
+		if round == maxToolRounds-1 {
+			break
+		}
+		var err error
+		resp, err = h.generate(ctx, selectedModel, contents, h.contentConfig(true, registry.declarations()))
+		if err != nil {
+			return nil, errors.Wrap(err, "generate after channel search tool response")
+		}
+	}
+	app.L().Warn("Gemini exceeded channel search tool round limit",
+		zap.String("request_id", req.RequestID),
+		zap.String("channel_id", req.ChannelID),
+	)
+	final, err := h.generate(ctx, selectedModel, contents, h.contentConfig(true, nil))
+	if err != nil {
+		return nil, errors.Wrap(err, "generate final response after channel search tool limit")
+	}
+	return final, nil
+}
+
+func modelToolCallContent(resp *googlegenai.GenerateContentResponse) *googlegenai.Content {
+	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
+		return &googlegenai.Content{Role: "model"}
+	}
+	return resp.Candidates[0].Content
+}
+
+func functionResponseContent(ctx context.Context, registry toolRegistry, calls []*googlegenai.FunctionCall) *googlegenai.Content {
+	parts := make([]*googlegenai.Part, 0, len(calls))
+	for i, call := range calls {
+		parts = append(parts, &googlegenai.Part{FunctionResponse: &googlegenai.FunctionResponse{
+			ID:       functionCallID(call),
+			Name:     functionCallName(call),
+			Response: registry.call(ctx, call, i),
+		}})
+	}
+	return &googlegenai.Content{Role: "user", Parts: parts}
+}
+
+type toolRegistry struct {
+	tools map[string]FunctionTool
+	decls []*googlegenai.FunctionDeclaration
+}
+
+func newToolRegistry(tools []FunctionTool) (toolRegistry, error) {
+	registry := toolRegistry{tools: make(map[string]FunctionTool, len(tools)), decls: make([]*googlegenai.FunctionDeclaration, 0, len(tools))}
+	for _, tool := range tools {
+		if isNilTool(tool) {
+			return toolRegistry{}, errors.New("function tool must not be nil")
+		}
+		name := strings.TrimSpace(tool.Name())
+		if name == "" {
+			return toolRegistry{}, errors.New("function tool name is required")
+		}
+		declaration := tool.Declaration()
+		if declaration == nil || declaration.Name != name {
+			return toolRegistry{}, errors.Errorf("function tool declaration name must match %q", name)
+		}
+		if _, ok := registry.tools[name]; ok {
+			return toolRegistry{}, errors.Errorf("duplicate function tool %q", name)
+		}
+		registry.tools[name] = tool
+		registry.decls = append(registry.decls, declaration)
+	}
+	return registry, nil
+}
+
+func (r toolRegistry) declarations() []*googlegenai.FunctionDeclaration {
+	return r.decls
+}
+
+func isNilTool(tool FunctionTool) bool {
+	if tool == nil {
+		return true
+	}
+	v := reflect.ValueOf(tool)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func (r toolRegistry) call(ctx context.Context, call *googlegenai.FunctionCall, index int) map[string]any {
+	if call == nil {
+		return map[string]any{"error": "missing function call"}
+	}
+	if index >= maxFunctionCallsPerRound {
+		return map[string]any{"error": "function call limit exceeded"}
+	}
+	tool, ok := r.tools[call.Name]
+	if !ok {
+		return map[string]any{"error": "unsupported function " + call.Name}
+	}
+	output, err := tool.Execute(ctx, call.Args)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	return map[string]any{"output": output}
+}
+
+func functionCallID(call *googlegenai.FunctionCall) string {
+	if call == nil {
+		return ""
+	}
+	return call.ID
+}
+
+func functionCallName(call *googlegenai.FunctionCall) string {
+	if call == nil {
+		return ""
+	}
+	return call.Name
 }
 
 func composeSystemPrompt(prompt string) string {
@@ -167,7 +307,7 @@ func (h *Handler) logTokenUsage(resp *googlegenai.GenerateContentResponse, req G
 	u := resp.UsageMetadata
 	searchUsed, queryCount := groundingUsage(resp)
 	app.L().Info("Gemini token usage",
-		zap.String("model", h.model),
+		zap.String("model", selectedModel),
 		zap.String("request_id", req.RequestID),
 		zap.String("caller_id", req.CallerID),
 		zap.String("channel_id", req.ChannelID),

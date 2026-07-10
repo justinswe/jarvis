@@ -16,7 +16,7 @@ const (
 	defaultThreadMessages   = 12
 	defaultParentMessages   = 4
 	defaultChannelMessages  = 8
-	defaultHistoryRunes     = 6000
+	defaultHistoryRunes     = 4000
 	defaultMessageTimeout   = 45 * time.Second
 	discordMessageMaxLength = 2000
 )
@@ -45,7 +45,7 @@ type Bot struct {
 	messageTimeout time.Duration
 	ready          atomic.Bool
 
-	fetchMessages  func(string, int, string) ([]*discordgo.Message, error)
+	fetchMessages  func(context.Context, string, int, string) ([]*discordgo.Message, error)
 	sendMessage    func(string, string) (*discordgo.Message, error)
 	startThread    func(string, string, string, int) (*discordgo.Channel, error)
 	addReaction    func(string, string, string) error
@@ -84,10 +84,9 @@ func NewBot(cfg Config, generator Generator) (*Bot, error) {
 		return nil, errors.Wrap(err, "obtain bot account")
 	}
 	b := &Bot{session: s, botID: u.ID, generator: generator, threadLimit: cfg.ThreadMessages,
-		parentLimit: cfg.ParentMessages, channelLimit: cfg.ChannelMessages, historyRunes: cfg.HistoryRunes,
-		messageTimeout: cfg.MessageTimeout}
-	b.fetchMessages = func(id string, limit int, before string) ([]*discordgo.Message, error) {
-		return s.ChannelMessages(id, limit, before, "", "")
+		parentLimit: cfg.ParentMessages, channelLimit: cfg.ChannelMessages, historyRunes: cfg.HistoryRunes, messageTimeout: cfg.MessageTimeout}
+	b.fetchMessages = func(ctx context.Context, id string, limit int, before string) ([]*discordgo.Message, error) {
+		return s.ChannelMessages(id, limit, before, "", "", discordgo.WithContext(ctx))
 	}
 	b.sendMessage = func(channelID, content string) (*discordgo.Message, error) {
 		return s.ChannelMessageSendComplex(channelID, suppressedMessage(content))

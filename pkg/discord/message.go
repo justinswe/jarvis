@@ -54,7 +54,7 @@ func (b *Bot) handleMessage(channel *discordgo.Channel, m *discordgo.MessageCrea
 
 func (b *Bot) processMessage(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, started time.Time) {
 	fields := discordRequestFields(channel, m)
-	messages, err := b.buildPrompt(channel, m)
+	messages, err := b.buildPrompt(ctx, channel, m)
 	if err != nil {
 		app.L().Warn("Failed to build AI request", append(fields, zap.Error(err))...)
 		if errors.Is(err, errEmptyMessageContent) {
@@ -70,6 +70,7 @@ func (b *Bot) processMessage(ctx context.Context, channel *discordgo.Channel, m 
 		RequestID: m.ID,
 		CallerID:  m.Author.ID,
 		ChannelID: m.ChannelID,
+		Tools:     []genai.FunctionTool{b.searchCurrentChannel(m.GuildID, m.ChannelID, m.ID)},
 	})
 	if err != nil {
 		app.L().Warn("Gemini generation failed", append(fields,
