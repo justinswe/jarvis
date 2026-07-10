@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -14,7 +15,7 @@ type contextSection struct {
 	messages []*discordgo.Message
 }
 
-func (b *Bot) buildPrompt(channel *discordgo.Channel, m *discordgo.MessageCreate) ([]genai.Message, error) {
+func (b *Bot) buildPrompt(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate) ([]genai.Message, error) {
 	current := sanitizeContent(m.Content, b.botID)
 	if current == "" {
 		return nil, errEmptyMessageContent
@@ -22,21 +23,21 @@ func (b *Bot) buildPrompt(channel *discordgo.Channel, m *discordgo.MessageCreate
 	var sections []contextSection
 	if isThreadChannel(channel) {
 		sections = append(sections,
-			contextSection{"THREAD HISTORY", b.fetchHistory(m.ChannelID, b.threadLimit, m.ID)},
-			contextSection{"PARENT CHANNEL", b.fetchHistory(channel.ParentID, b.parentLimit, "")},
+			contextSection{"THREAD HISTORY", b.fetchHistory(ctx, m.ChannelID, b.threadLimit, m.ID)},
+			contextSection{"PARENT CHANNEL", b.fetchHistory(ctx, channel.ParentID, b.parentLimit, "")},
 		)
 	} else {
-		sections = append(sections, contextSection{"CHANNEL HISTORY", b.fetchHistory(m.ChannelID, b.channelLimit, m.ID)})
+		sections = append(sections, contextSection{"CHANNEL HISTORY", b.fetchHistory(ctx, m.ChannelID, b.channelLimit, m.ID)})
 	}
 	content := buildContext(sections, current, b.historyRunes)
 	return []genai.Message{{Role: "user", Content: content}}, nil
 }
 
-func (b *Bot) fetchHistory(channelID string, limit int, before string) []*discordgo.Message {
+func (b *Bot) fetchHistory(ctx context.Context, channelID string, limit int, before string) []*discordgo.Message {
 	if channelID == "" || b.fetchMessages == nil {
 		return nil
 	}
-	messages, err := b.fetchMessages(channelID, limit, before)
+	messages, err := b.fetchMessages(ctx, channelID, limit, before)
 	if err != nil {
 		return nil
 	}

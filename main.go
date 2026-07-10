@@ -17,11 +17,11 @@ import (
 )
 
 type flags struct {
-	port, projectID, location, modelName, defaultPrompt, discordBotToken string
-	threadMessages, parentMessages, channelMessages, historyRunes        int
-	maxOutputTokens                                                      int
-	temperature                                                          float64
-	messageTimeout                                                       time.Duration
+	port, projectID, location, defaultPrompt, discordBotToken     string
+	threadMessages, parentMessages, channelMessages, historyRunes int
+	maxOutputTokens                                               int
+	temperature                                                   float64
+	messageTimeout                                                time.Duration
 }
 
 const serviceName = "jarvis"
@@ -40,7 +40,6 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.port, "port", "8080", "HTTP server port")
 	rootCmd.Flags().StringVar(&cfg.projectID, "project-id", "", "GCP project ID")
 	rootCmd.Flags().StringVar(&cfg.location, "location", "global", "Vertex AI location")
-	rootCmd.Flags().StringVar(&cfg.modelName, "model-name", llm.DefaultModel, "Vertex AI model")
 	rootCmd.Flags().StringVar(&cfg.defaultPrompt, "default-prompt", llm.DefaultPrompt, "Bot identity and personality prompt")
 	rootCmd.Flags().IntVar(&cfg.threadMessages, "thread-context-window", 15, "Prior thread messages")
 	rootCmd.Flags().IntVar(&cfg.parentMessages, "parent-context-window", 10, "Prior parent-channel messages")
@@ -69,7 +68,6 @@ func run(cmd *cobra.Command, _ []string) error {
 	generator, err := llm.New(ctx, llm.Config{
 		ProjectID:       cfg.projectID,
 		Location:        cfg.location,
-		Model:           cfg.modelName,
 		DefaultPrompt:   cfg.defaultPrompt,
 		MaxOutputTokens: cfg.maxOutputTokens,
 		Temperature:     float32(cfg.temperature),
