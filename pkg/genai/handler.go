@@ -16,7 +16,7 @@ const (
 	DefaultMaxOutputTokens   = 512
 	MaxOutputTokensLimit     = 512
 	selectedModel            = "google/gemini-3.5-flash"
-	verificationCaveat       = "I couldn't verify this with usable web sources."
+	verificationCaveat       = "I couldn't verify this with the web."
 	maxToolRounds            = 2
 	maxFunctionCallsPerRound = 2
 )
