@@ -20,7 +20,7 @@ const (
 )
 
 type channelSearchTool struct {
-	bot                          *Bot
+	processor                    *Processor
 	guildID, channelID, beforeID string
 }
 
@@ -39,8 +39,8 @@ type channelSearchMessage struct {
 	URL       string `json:"url"`
 }
 
-func (b *Bot) searchCurrentChannel(guildID, channelID, beforeID string) genai.FunctionTool {
-	return channelSearchTool{bot: b, guildID: guildID, channelID: channelID, beforeID: beforeID}
+func (p *Processor) searchCurrentChannel(guildID, channelID, beforeID string) genai.FunctionTool {
+	return channelSearchTool{processor: p, guildID: guildID, channelID: channelID, beforeID: beforeID}
 }
 
 func (channelSearchTool) Name() string { return channelSearchToolName }
@@ -60,15 +60,15 @@ func (t channelSearchTool) Execute(ctx context.Context, args map[string]any) (an
 	if !ok {
 		return nil, errors.New("query must be a string")
 	}
-	return t.bot.searchChannel(ctx, t.guildID, t.channelID, t.beforeID, query)
+	return t.processor.searchChannel(ctx, t.guildID, t.channelID, t.beforeID, query)
 }
 
-func (b *Bot) searchChannel(ctx context.Context, guildID, channelID, beforeID, query string) (channelSearchResponse, error) {
+func (p *Processor) searchChannel(ctx context.Context, guildID, channelID, beforeID, query string) (channelSearchResponse, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return channelSearchResponse{}, errors.New("query is required")
 	}
-	if channelID == "" || b.fetchMessages == nil {
+	if channelID == "" {
 		return channelSearchResponse{}, errors.New("channel search is unavailable")
 	}
 
@@ -81,7 +81,7 @@ func (b *Bot) searchChannel(ctx context.Context, guildID, channelID, beforeID, q
 		default:
 		}
 		pageLimit := min(discordMessagePageLimit, channelSearchMessages-resp.SearchedMessages)
-		messages, err := b.fetchMessages(ctx, channelID, pageLimit, beforeID)
+		messages, err := p.client.Messages(ctx, channelID, pageLimit, beforeID)
 		if err != nil {
 			return channelSearchResponse{}, errors.Wrap(err, "fetch channel messages")
 		}
@@ -90,7 +90,7 @@ func (b *Bot) searchChannel(ctx context.Context, guildID, channelID, beforeID, q
 		}
 		for _, message := range messages {
 			resp.SearchedMessages++
-			if match := searchResult(guildID, channelID, b.botID, message, needle); match != nil {
+			if match := searchResult(guildID, channelID, p.botID, message, needle); match != nil {
 				resp.Results = append(resp.Results, *match)
 				if len(resp.Results) == channelSearchResults {
 					break

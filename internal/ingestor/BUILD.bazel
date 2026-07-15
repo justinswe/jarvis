@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ingestor",
+    srcs = [
+        "controller.go",
+        "publisher.go",
+        "service.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/internal/ingestor",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/timestamppb",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "ingestor_test",
+    srcs = [
+        "controller_test.go",
+        "publisher_test.go",
+    ],
+    embed = [":ingestor"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//proto",
+    ],
+)

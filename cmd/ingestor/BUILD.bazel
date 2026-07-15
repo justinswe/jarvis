@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "ingestor_lib",
+    srcs = [
+        "config.go",
+        "main.go",
+        "run.go",
+        "server.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/cmd/ingestor",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/ingestor",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_spf13_cobra//:cobra",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_binary(
+    name = "ingestor",
+    embed = [":ingestor_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "ingestor_test",
+    srcs = ["ingestor_test.go"],
+    embed = [":ingestor_lib"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

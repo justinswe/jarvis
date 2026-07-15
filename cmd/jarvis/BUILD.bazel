@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "jarvis_lib",
+    srcs = [
+        "config.go",
+        "main.go",
+        "process.go",
+        "run.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/cmd/jarvis",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_spf13_cobra//:cobra",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_binary(
+    name = "jarvis",
+    embed = [":jarvis_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "jarvis_test",
+    srcs = ["jarvis_test.go"],
+    embed = [":jarvis_lib"],
+    deps = [
+        "@com_github_justinswe_std//errors",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

@@ -1,39 +1,42 @@
 load("@gazelle//:def.bzl", "gazelle")
-load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@rules_buf//buf:defs.bzl", "buf_format")
+load("@rules_multirun//:defs.bzl", "command", "multirun")
 load("//tools/container/go:defs.bzl", "go_container_image")
 
 MODULE_VERSION = module_version()
+
+exports_files(["buf.yaml"])
+
+buf_format(
+    name = "buf_format",
+)
 
 gazelle(
     name = "gazelle",
 )
 
-go_library(
-    name = "jarvis_lib",
-    srcs = ["main.go"],
-    importpath = "github.com/justinswe/jarvis",
-    visibility = ["//visibility:private"],
-    deps = [
-        "//pkg/discord",
-        "//pkg/genai",
-        "@com_github_justinswe_std//app",
-        "@com_github_justinswe_std//errors",
-        "@com_github_spf13_cobra//:cobra",
-        "@org_uber_go_zap//:zap",
+command(
+    name = "ingestor",
+    arguments = [
+        "--port=8080",
+        "--worker-url=http://127.0.0.1:8081/v1/messages:process",
     ],
+    command = "//cmd/ingestor:ingestor",
 )
 
-go_binary(
+command(
+    name = "worker",
+    arguments = ["--port=8081"],
+    command = "//cmd/worker:worker",
+)
+
+multirun(
     name = "jarvis",
-    embed = [":jarvis_lib"],
-    visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "jarvis_test",
-    srcs = ["main_test.go"],
-    embed = [":jarvis_lib"],
-    deps = ["@com_github_stretchr_testify//assert"],
+    commands = [
+        "ingestor",
+        "worker",
+    ],
+    jobs = 0,  # Set to 0 to run in parallel, defaults to sequential
 )
 
 platform(
@@ -45,12 +48,40 @@ platform(
 )
 
 go_container_image(
+    name = "ingestor_image",
+    base = "@distroless_base_debian13_nonroot",
+    binary = "//cmd/ingestor",
+    platform = ":linux_amd64",
+    registry = "index.docker.io",
+    repository = "justinswe/jarvis-ingestor",
+    tag = MODULE_VERSION,
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+go_container_image(
+    name = "worker_image",
+    base = "@distroless_base_debian13_nonroot",
+    binary = "//cmd/worker",
+    platform = ":linux_amd64",
+    registry = "index.docker.io",
+    repository = "justinswe/jarvis-worker",
+    tag = MODULE_VERSION,
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+go_container_image(
     name = "image",
+    additional_binaries = {
+        "/app/ingestor": "//cmd/ingestor",
+        "/app/worker": "//cmd/worker",
+    },
     additional_tags = {
         "latest": "latest",
     },
     base = "@distroless_base_debian13_nonroot",
-    binary = ":jarvis",
+    binary = "//cmd/jarvis",
     platform = ":linux_amd64",
     registry = "index.docker.io",
     repository = "justinswe/jarvis",

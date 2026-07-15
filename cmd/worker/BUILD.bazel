@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "worker_lib",
+    srcs = [
+        "config.go",
+        "main.go",
+        "run.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/cmd/worker",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/config",
+        "//internal/dynamostore",
+        "//internal/worker",
+        "//pkg/discord",
+        "//pkg/genai",
+        "@com_github_aws_aws_sdk_go_v2_config//:config",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_spf13_cobra//:cobra",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_binary(
+    name = "worker",
+    embed = [":worker_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "worker_test",
+    srcs = ["worker_test.go"],
+    embed = [":worker_lib"],
+    deps = [
+        "//internal/config",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
