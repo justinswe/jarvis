@@ -26,6 +26,23 @@ func testTool(name string, exec func(context.Context, map[string]any) (any, erro
 	return fakeTool{name: name, decl: &googlegenai.FunctionDeclaration{Name: name}, exec: exec}
 }
 
+func TestToContentsAddsLowResolutionImage(t *testing.T) {
+	contents, err := toContents([]Message{{Role: "user", Image: &Image{Data: []byte("image"), MIMEType: "image/png"}}})
+	require.NoError(t, err)
+	require.Len(t, contents, 1)
+	require.Len(t, contents[0].Parts, 1)
+	assert.Equal(t, []byte("image"), contents[0].Parts[0].InlineData.Data)
+	require.NotNil(t, contents[0].Parts[0].MediaResolution)
+	assert.Equal(t, googlegenai.PartMediaResolutionLevelMediaResolutionLow, contents[0].Parts[0].MediaResolution.Level)
+}
+
+func TestRuntimeSystemPromptIncludesTrustedVersionAndMutationRule(t *testing.T) {
+	prompt := composeRuntimeSystemPrompt("guild prompt", "v0.6.0", false)
+	assert.Contains(t, prompt, "You are Jarvis version v0.6.0")
+	assert.Contains(t, prompt, "only after its mutation tool returns a successful result")
+	assert.Contains(t, prompt, "guild prompt")
+}
+
 func response(text string, metadata *googlegenai.GroundingMetadata) *googlegenai.GenerateContentResponse {
 	return &googlegenai.GenerateContentResponse{Candidates: []*googlegenai.Candidate{{Content: &googlegenai.Content{Parts: []*googlegenai.Part{{Text: text}}}, GroundingMetadata: metadata}}}
 }

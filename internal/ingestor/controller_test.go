@@ -29,6 +29,8 @@ func TestControllerNormalizesDiscordMessage(t *testing.T) {
 		Author:           &discordgo.User{ID: "user", Username: "alice", GlobalName: "Alice"},
 		Mentions:         []*discordgo.User{{ID: "bot"}, nil},
 		MessageReference: &discordgo.MessageReference{MessageID: "parent", ChannelID: "channel"},
+		Attachments: []*discordgo.MessageAttachment{{ID: "image", Filename: "photo.png", ContentType: "image/png", Size: 42,
+			URL: "https://cdn.discordapp.com/attachments/a/b/photo.png", ProxyURL: "https://media.discordapp.net/attachments/a/b/photo.png", Width: 10, Height: 20}},
 	}
 	controller.HandleMessage(context.Background(), &discordgo.MessageCreate{Message: message})
 
@@ -39,6 +41,9 @@ func TestControllerNormalizesDiscordMessage(t *testing.T) {
 	assert.Equal(t, []string{"bot"}, event.MentionedUserIds)
 	assert.Equal(t, "parent", event.Reference.MessageId)
 	assert.Equal(t, time.Unix(10, 0).UTC(), event.IngestedAt.AsTime())
+	require.Len(t, event.Attachments, 1)
+	assert.Equal(t, "photo.png", event.Attachments[0].Filename)
+	assert.Equal(t, int64(42), event.Attachments[0].Size)
 }
 
 func TestControllerIgnoresIncompleteGatewayEvent(t *testing.T) {

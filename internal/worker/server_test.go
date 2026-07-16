@@ -51,6 +51,8 @@ func validRequest() *discordv1.IngestMessageRequest {
 		Author:           &discordv1.MessageAuthor{Id: "user", Username: "alice"},
 		MentionedUserIds: []string{"bot"},
 		Reference:        &discordv1.MessageReference{MessageId: "parent", ChannelId: "channel"},
+		Attachments: []*discordv1.MessageAttachment{{Id: "image", Filename: "photo.png", ContentType: "image/png", Size: 42,
+			Url: "https://cdn.discordapp.com/attachments/a/b/photo.png", Width: 10, Height: 20}},
 	}}
 }
 
@@ -63,6 +65,8 @@ func TestHTTPWorkerProcessesRawProtobuf(t *testing.T) {
 	assert.Equal(t, discordgo.MessageTypeReply, processor.message.Type)
 	assert.Equal(t, "parent", processor.message.MessageReference.MessageID)
 	assert.Equal(t, "bot", processor.message.Mentions[0].ID)
+	require.Len(t, processor.message.Attachments, 1)
+	assert.Equal(t, "photo.png", processor.message.Attachments[0].Filename)
 }
 
 func TestHTTPWorkerRecordsBeforeProcessing(t *testing.T) {

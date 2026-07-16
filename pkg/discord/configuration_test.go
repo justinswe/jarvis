@@ -18,6 +18,7 @@ import (
 type fakeConfigManager struct {
 	value     config.GuildConfig
 	loadErr   error
+	addErr    error
 	lastActor string
 }
 
@@ -37,12 +38,56 @@ func (m *fakeConfigManager) Update(_ context.Context, _ string, actor string, pa
 }
 
 func (m *fakeConfigManager) AddAdmin(_ context.Context, _ string, actor, userID string) (config.GuildConfig, error) {
+	if m.addErr != nil {
+		return config.GuildConfig{}, m.addErr
+	}
 	m.lastActor = actor
 	if !slices.Contains(m.value.AdminUserIDs, userID) {
 		m.value.AdminUserIDs = append(m.value.AdminUserIDs, userID)
 		m.value.Version++
 	}
 	return m.value, nil
+}
+
+func TestRootAddAdminCommandPersistsBeforeConfirming(t *testing.T) {
+	manager := &fakeConfigManager{value: config.GuildConfig{Settings: testSettings()}}
+	generator := &fakeGenerator{}
+	var sent string
+	processor := &Processor{botID: "bot", generator: generator, client: &fakeClient{sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
+		sent = content
+		return &discordgo.Message{}, nil
+	}}, manager: manager, rootUsers: map[string]struct{}{"u": {}}}
+	m := targetedMessage("message", "add <@!123456789012345678> as a Jarvis administrator.")
+	m.Mentions = append(m.Mentions, &discordgo.User{ID: "123456789012345678"})
+	require.NoError(t, processor.Process(context.Background(), m))
+	assert.Contains(t, manager.value.AdminUserIDs, "123456789012345678")
+	assert.Equal(t, "u", manager.lastActor)
+	assert.Contains(t, sent, "is now a Jarvis administrator")
+	assert.Nil(t, generator.request)
+}
+
+func TestRootAddAdminCommandDoesNotClaimDatabaseFailureAsSuccess(t *testing.T) {
+	manager := &fakeConfigManager{value: config.GuildConfig{Settings: testSettings()}, addErr: errors.New("database failed")}
+	var sent string
+	processor := &Processor{botID: "bot", client: &fakeClient{sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
+		sent = content
+		return &discordgo.Message{}, nil
+	}}, manager: manager, rootUsers: map[string]struct{}{"u": {}}}
+	m := targetedMessage("message", "add <@123456789012345678> as admin")
+	m.Mentions = append(m.Mentions, &discordgo.User{ID: "123456789012345678"})
+	require.NoError(t, processor.Process(context.Background(), m))
+	assert.NotContains(t, sent, "is now")
+	assert.Contains(t, sent, "could not persist")
+}
+
+func TestUserCreatedThreadUsesRollingActivationEvidence(t *testing.T) {
+	current := targetedMessage("current", "next question")
+	current.Mentions = nil
+	client := &fakeClient{messages: func(context.Context, string, int, string) ([]*discordgo.Message, error) {
+		return []*discordgo.Message{{ID: "prior", Author: &discordgo.User{ID: "bot", Bot: true}, Content: "prior answer"}}, nil
+	}}
+	processor := &Processor{botID: "bot", client: client}
+	assert.True(t, processor.isTargeted(context.Background(), current, &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread, OwnerID: "user"}))
 }
 
 func (m *fakeConfigManager) RemoveAdmin(_ context.Context, _ string, actor, userID string) (config.GuildConfig, error) {
@@ -56,28 +101,32 @@ func TestConfigurationToolsAreExposedOnlyToAdministrators(t *testing.T) {
 	manager := &fakeConfigManager{value: config.GuildConfig{Settings: testSettings()}}
 	message := targetedMessage("message", "show the configuration")
 	tests := []struct {
-		name        string
-		guildConfig config.GuildConfig
-		rootUsers   map[string]struct{}
-		permissions int64
-		want        bool
+		name          string
+		guildConfig   config.GuildConfig
+		rootUsers     map[string]struct{}
+		permissions   int64
+		permissionErr error
+		want          bool
+		wantTools     int
 	}{
 		{name: "ordinary user"},
-		{name: "delegated administrator", guildConfig: config.GuildConfig{Settings: testSettings(), AdminUserIDs: []string{"u"}}, want: true},
-		{name: "root user", rootUsers: map[string]struct{}{"u": {}}, want: true},
-		{name: "Discord administrator", permissions: discordgo.PermissionAdministrator, want: true},
-		{name: "Discord guild manager", permissions: discordgo.PermissionManageGuild, want: true},
+		{name: "delegated administrator", guildConfig: config.GuildConfig{Settings: testSettings(), AdminUserIDs: []string{"u"}}, want: true, wantTools: 2},
+		{name: "root user", rootUsers: map[string]struct{}{"u": {}}, want: true, wantTools: 5},
+		{name: "Discord administrator", permissions: discordgo.PermissionAdministrator, want: true, wantTools: 2},
+		{name: "Discord guild manager", permissions: discordgo.PermissionManageGuild, want: true, wantTools: 2},
+		{name: "Discord owner permission set", permissions: discordgo.PermissionAll, want: true, wantTools: 2},
+		{name: "permission lookup failure", permissionErr: errors.New("lookup failed")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			client := &fakeClient{permissions: func(context.Context, string, string) (int64, error) {
-				return test.permissions, nil
+				return test.permissions, test.permissionErr
 			}}
 			processor := &Processor{client: client, manager: manager, rootUsers: test.rootUsers}
 			tools, authorized := processor.configurationTools(context.Background(), message, test.guildConfig)
 			assert.Equal(t, test.want, authorized)
 			if test.want {
-				assert.Len(t, tools, 5)
+				assert.Len(t, tools, test.wantTools)
 			} else {
 				assert.Empty(t, tools)
 			}
@@ -87,15 +136,12 @@ func TestConfigurationToolsAreExposedOnlyToAdministrators(t *testing.T) {
 
 func TestConfigurationToolSchemasLimitProtectedSettingsToRootUsers(t *testing.T) {
 	base := configurationTool{action: updateServerConfigurationToolName, authorized: true}
+	assert.Empty(t, base.Declaration().Parameters.Properties)
+	base.root = true
 	maxOutputTokens := base.Declaration().Parameters.Properties["max_output_tokens"]
 	require.NotNil(t, maxOutputTokens.Maximum)
 	assert.Equal(t, float64(genai.MaxOutputTokensLimit), *maxOutputTokens.Maximum)
 	assert.Contains(t, maxOutputTokens.Description, "including thinking")
-	for _, field := range []string{"prompt", "thread_context_window", "parent_context_window", "message_retention_days"} {
-		assert.NotContains(t, base.Declaration().Parameters.Properties, field)
-	}
-	assert.Contains(t, base.Declaration().Parameters.Properties, "channel_context_window")
-	base.root = true
 	for _, field := range []string{"prompt", "thread_context_window", "parent_context_window", "message_retention_days"} {
 		assert.Contains(t, base.Declaration().Parameters.Properties, field)
 	}
@@ -140,6 +186,11 @@ func TestConfigurationToolsUpdateAndDelegate(t *testing.T) {
 		require.ErrorAs(t, err, &executionErr)
 		assert.Equal(t, "authorization_denied", executionErr.Code)
 	}
+	nonRoot.action = addServerAdminToolName
+	_, err = nonRoot.Execute(context.Background(), map[string]any{"user_id": "123456789012345679"})
+	var denied *genai.ExecutionError
+	require.ErrorAs(t, err, &denied)
+	assert.Equal(t, "authorization_denied", denied.Code)
 
 	add := root
 	add.action = addServerAdminToolName
@@ -170,8 +221,8 @@ func TestSetGuildPromptToolSetsAndClearsPrompt(t *testing.T) {
 	require.NoError(t, err)
 	response := result.(configurationResponse)
 	assert.Equal(t, "Use guild terminology.", response.GuildPrompt)
-	assert.Equal(t, []string{"guild_prompt"}, response.ChangedFields)
-	assert.Equal(t, "Jarvis", response.Prompt)
+	assert.Empty(t, response.ChangedFields)
+	assert.Empty(t, response.Prompt)
 
 	result, err = tool.Execute(context.Background(), map[string]any{"guild_prompt": ""})
 	require.NoError(t, err)

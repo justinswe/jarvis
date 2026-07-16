@@ -20,8 +20,15 @@ const incompleteContextNotice = "CONTEXT NOTICE: Stored conversation history cou
 
 func (p *Processor) buildPrompt(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, settings config.ServerSettings) ([]genai.Message, error) {
 	current := sanitizeContent(m.Content, p.botID)
-	if current == "" {
+	image, imageAttachmentNotice := p.currentImage(ctx, m.Attachments)
+	if current == "" && image == nil && imageAttachmentNotice == "" {
 		return nil, errEmptyMessageContent
+	}
+	if current == "" {
+		current = "Please respond to the attached image."
+	}
+	if imageAttachmentNotice != "" {
+		current += "\n\n" + imageAttachmentNotice
 	}
 	var sections []contextSection
 	incomplete := false
@@ -42,7 +49,7 @@ func (p *Processor) buildPrompt(ctx context.Context, channel *discordgo.Channel,
 	if incomplete {
 		content = incompleteContextNotice + "\n\n" + content
 	}
-	return []genai.Message{{Role: "user", Content: content}}, nil
+	return []genai.Message{{Role: "user", Content: content, Image: image}}, nil
 }
 
 func (p *Processor) fetchHistory(ctx context.Context, guildID, channelID string, limit int, before string) ([]*discordgo.Message, error) {

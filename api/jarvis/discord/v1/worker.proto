@@ -22,6 +22,19 @@ message DiscordMessageCreateEvent {
   repeated string mentioned_user_ids = 7;
   MessageReference reference = 8;
   google.protobuf.Timestamp ingested_at = 9;
+  repeated MessageAttachment attachments = 10;
+}
+
+// MessageAttachment contains metadata for a Discord message attachment.
+message MessageAttachment {
+  string id = 1;
+  string filename = 2;
+  string content_type = 3;
+  int64 size = 4;
+  string url = 5;
+  string proxy_url = 6;
+  int32 width = 7;
+  int32 height = 8;
 }
 
 // MessageKind identifies message types Jarvis understands.

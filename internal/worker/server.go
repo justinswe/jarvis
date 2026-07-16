@@ -169,6 +169,16 @@ func discordMessage(req *discordv1.IngestMessageRequest) (*discordgo.MessageCrea
 			message.Mentions = append(message.Mentions, &discordgo.User{ID: userID})
 		}
 	}
+	for _, attachment := range event.Attachments {
+		if attachment == nil {
+			continue
+		}
+		message.Attachments = append(message.Attachments, &discordgo.MessageAttachment{
+			ID: attachment.Id, Filename: attachment.Filename, ContentType: attachment.ContentType,
+			Size: int(attachment.Size), URL: attachment.Url, ProxyURL: attachment.ProxyUrl,
+			Width: int(attachment.Width), Height: int(attachment.Height),
+		})
+	}
 	if event.Reference != nil {
 		message.MessageReference = &discordgo.MessageReference{
 			MessageID: event.Reference.MessageId,

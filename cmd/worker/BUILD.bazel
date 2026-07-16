@@ -13,6 +13,7 @@ go_library(
         "//internal/awsidentity",
         "//internal/config",
         "//internal/dynamostore",
+        "//internal/version",
         "//internal/worker",
         "//pkg/discord",
         "//pkg/genai",
@@ -28,6 +29,7 @@ go_binary(
     name = "worker",
     embed = [":worker_lib"],
     visibility = ["//visibility:public"],
+    x_defs = {"github.com/justinswe/jarvis/internal/version.Value": module_version()},
 )
 
 go_test(

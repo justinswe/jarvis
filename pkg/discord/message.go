@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 
 var errEmptyMessageContent = errors.New("empty message content")
 
+var addAdminCommand = regexp.MustCompile(`(?i)^(?:please )?add <@!?(\d{17,20})> as (?:a )?(?:jarvis )?admin(?:istrator)?\.?$`)
+
 const reactionCleanupTimeout = 5 * time.Second
 
 // Process handles one message event and returns after all Discord side effects finish.
@@ -30,6 +34,9 @@ func (p *Processor) Process(ctx context.Context, m *discordgo.MessageCreate) err
 		return errors.Wrap(err, "fetch Discord channel")
 	}
 	if !p.isTargeted(ctx, m, channel) {
+		return nil
+	}
+	if handled := p.handleAddAdminCommand(ctx, m); handled {
 		return nil
 	}
 
@@ -61,6 +68,39 @@ func (p *Processor) Process(ctx context.Context, m *discordgo.MessageCreate) err
 	return p.processMessage(processCtx, ctx, channel, m, guildConfig, started)
 }
 
+func (p *Processor) handleAddAdminCommand(ctx context.Context, m *discordgo.MessageCreate) bool {
+	command := strings.TrimSpace(sanitizeContent(m.Content, p.botID))
+	match := addAdminCommand.FindStringSubmatch(command)
+	if match == nil {
+		return false
+	}
+	if _, root := p.rootUsers[m.Author.ID]; !root {
+		_ = p.sendMessageChunks(ctx, m.ChannelID, "Only a Jarvis root user can add administrators.")
+		return true
+	}
+	var targets []string
+	for _, mention := range m.Mentions {
+		if mention != nil && mention.ID != "" && mention.ID != p.botID {
+			targets = append(targets, mention.ID)
+		}
+	}
+	if len(targets) != 1 || targets[0] != match[1] {
+		_ = p.sendMessageChunks(ctx, m.ChannelID, "Please mention exactly one Discord user to add as a Jarvis administrator.")
+		return true
+	}
+	if p.manager == nil {
+		_ = p.sendMessageChunks(ctx, m.ChannelID, "Administrator persistence is disabled, so no change was made.")
+		return true
+	}
+	updated, err := p.manager.AddAdmin(ctx, m.GuildID, m.Author.ID, targets[0])
+	if err != nil || !slices.Contains(updated.AdminUserIDs, targets[0]) {
+		_ = p.sendMessageChunks(ctx, m.ChannelID, "I could not persist that administrator change, so no success is being reported.")
+		return true
+	}
+	_ = p.sendMessageChunks(ctx, m.ChannelID, fmt.Sprintf("<@%s> is now a Jarvis administrator.", targets[0]))
+	return true
+}
+
 func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, guildConfig config.GuildConfig, started time.Time) error {
 	fields := discordRequestFields(channel, m)
 	settings := guildConfig.Settings
@@ -86,6 +126,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			Temperature:      settings.Temperature,
 			WebSearchEnabled: settings.WebSearchEnabled,
 			ThinkingLevel:    googlegenai.ThinkingLevelMedium,
+			Version:          p.version,
 		},
 	}
 	request.Tools = append(request.Tools, p.reactToMessage(m.ChannelID, m.ID))
@@ -161,18 +202,30 @@ func (p *Processor) isTargeted(ctx context.Context, m *discordgo.MessageCreate, 
 	if mentionsBot(m.Mentions, p.botID) {
 		return true
 	}
+	if ref := m.MessageReference; ref != nil && ref.ChannelID == m.ChannelID {
+		referenced, err := p.client.Message(ctx, m.ChannelID, ref.MessageID)
+		if err == nil && referenced.Author != nil && referenced.Author.ID == p.botID {
+			return true
+		}
+	}
 	if !isThreadChannel(channel) {
 		return false
 	}
 	if channel.OwnerID == p.botID {
 		return true
 	}
-	ref := m.MessageReference
-	if ref == nil || ref.ChannelID != m.ChannelID {
+	messages, err := p.client.Messages(ctx, m.ChannelID, 100, m.ID)
+	if err != nil {
+		app.L().Debug("Failed to inspect thread activation history", zap.String("guild_id", m.GuildID),
+			zap.String("channel_id", m.ChannelID), zap.String("message_id", m.ID), zap.Error(err))
 		return false
 	}
-	referenced, err := p.client.Message(ctx, m.ChannelID, ref.MessageID)
-	return err == nil && referenced.Author != nil && referenced.Author.ID == p.botID
+	for _, message := range messages {
+		if message != nil && ((message.Author != nil && message.Author.ID == p.botID) || mentionsBot(message.Mentions, p.botID)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Processor) sendReply(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, reply string) error {

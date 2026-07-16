@@ -6,6 +6,7 @@ go_library(
         "configuration.go",
         "context.go",
         "formatting.go",
+        "image.go",
         "message.go",
         "reaction.go",
         "search.go",

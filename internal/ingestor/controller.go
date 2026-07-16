@@ -70,6 +70,16 @@ func (c *Controller) request(event *discordgo.MessageCreate) *discordv1.IngestMe
 			normalized.MentionedUserIds = append(normalized.MentionedUserIds, mention.ID)
 		}
 	}
+	for _, attachment := range message.Attachments {
+		if attachment == nil {
+			continue
+		}
+		normalized.Attachments = append(normalized.Attachments, &discordv1.MessageAttachment{
+			Id: attachment.ID, Filename: attachment.Filename, ContentType: attachment.ContentType,
+			Size: int64(attachment.Size), Url: attachment.URL, ProxyUrl: attachment.ProxyURL,
+			Width: int32(attachment.Width), Height: int32(attachment.Height),
+		})
+	}
 	if message.MessageReference != nil {
 		normalized.Reference = &discordv1.MessageReference{
 			MessageId: message.MessageReference.MessageID,

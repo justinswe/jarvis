@@ -1,7 +1,10 @@
 package discord
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
 type fakeGenerator struct {
 	response genai.GenerateResponse
@@ -164,6 +171,46 @@ func TestBuildPromptUsesConfiguredHistoryLimits(t *testing.T) {
 	_, err := p.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "parent"}, m, settings)
 	require.NoError(t, err)
 	assert.Equal(t, []int{12, 4}, calls)
+}
+
+func TestBuildPromptLoadsCurrentImageOnly(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"image/png"}},
+			Body: io.NopCloser(bytes.NewReader([]byte("png"))), Request: request}, nil
+	})}
+	processor := &Processor{botID: "bot", client: &fakeClient{}, imageClient: client}
+	m := targetedMessage("m", "describe this")
+	m.Attachments = []*discordgo.MessageAttachment{{Filename: "photo.png", ContentType: "image/png", Size: 3,
+		URL: "https://cdn.discordapp.com/attachments/a/b/photo.png"}}
+	messages, err := processor.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, m, testSettings())
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	require.NotNil(t, messages[0].Image)
+	assert.Equal(t, []byte("png"), messages[0].Image.Data)
+}
+
+func TestBuildPromptContinuesWithSafeImageFailureNotice(t *testing.T) {
+	processor := &Processor{botID: "bot", client: &fakeClient{}}
+	m := targetedMessage("m", "")
+	m.Attachments = []*discordgo.MessageAttachment{{Filename: "bad\nname.gif", ContentType: "image/gif",
+		URL: "https://example.com/secret"}}
+	messages, err := processor.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, m, testSettings())
+	require.NoError(t, err)
+	assert.Nil(t, messages[0].Image)
+	assert.Contains(t, messages[0].Content, "IMAGE ATTACHMENT NOTICE: badname.gif")
+	assert.Contains(t, messages[0].Content, "unsupported_format")
+	assert.NotContains(t, messages[0].Content, "example.com")
+}
+
+func TestAllowedImageURL(t *testing.T) {
+	for _, raw := range []string{"https://cdn.discordapp.com/a", "https://media.discordapp.net/a"} {
+		request, err := http.NewRequest(http.MethodGet, raw, nil)
+		require.NoError(t, err)
+		assert.True(t, allowedImageURL(request.URL))
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://cdn.discordapp.com.evil.test/a", nil)
+	require.NoError(t, err)
+	assert.False(t, allowedImageURL(request.URL))
 }
 
 func TestBuildPromptIncludesConfiguredParentChannelMessages(t *testing.T) {

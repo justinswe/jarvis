@@ -31,25 +31,27 @@ type configurationTool struct {
 	actorID    string
 	authorized bool
 	root       bool
+	access     string
 	action     string
 }
 
 type configurationResponse struct {
 	Source                string   `json:"source"`
 	Version               int64    `json:"version"`
-	Prompt                string   `json:"prompt"`
+	AccessClass           string   `json:"access_class"`
+	Prompt                string   `json:"prompt,omitempty"`
 	GuildPrompt           string   `json:"guild_prompt"`
-	ThreadMessages        int      `json:"thread_context_window"`
-	ParentMessages        int      `json:"parent_context_window"`
-	ChannelMessages       int      `json:"channel_context_window"`
-	HistoryRunes          int      `json:"history_runes"`
-	MaxOutputTokens       int      `json:"max_output_tokens"`
-	Temperature           float32  `json:"temperature"`
-	MessageTimeoutSeconds int64    `json:"message_timeout_seconds"`
-	MessageRetentionDays  int      `json:"message_retention_days"`
-	WebSearchEnabled      bool     `json:"web_search_enabled"`
-	ChannelSearchEnabled  bool     `json:"channel_search_enabled"`
-	AdminUserIDs          []string `json:"admin_user_ids"`
+	ThreadMessages        int      `json:"thread_context_window,omitempty"`
+	ParentMessages        int      `json:"parent_context_window,omitempty"`
+	ChannelMessages       int      `json:"channel_context_window,omitempty"`
+	HistoryRunes          int      `json:"history_runes,omitempty"`
+	MaxOutputTokens       int      `json:"max_output_tokens,omitempty"`
+	Temperature           float32  `json:"temperature,omitempty"`
+	MessageTimeoutSeconds int64    `json:"message_timeout_seconds,omitempty"`
+	MessageRetentionDays  int      `json:"message_retention_days,omitempty"`
+	WebSearchEnabled      bool     `json:"web_search_enabled,omitempty"`
+	ChannelSearchEnabled  bool     `json:"channel_search_enabled,omitempty"`
+	AdminUserIDs          []string `json:"admin_user_ids,omitempty"`
 	ChangedFields         []string `json:"changed_fields,omitempty"`
 }
 
@@ -58,26 +60,40 @@ func (p *Processor) configurationTools(ctx context.Context, m *discordgo.Message
 		return nil, false
 	}
 	_, root := p.rootUsers[m.Author.ID]
-	authorized := root || guildConfig.IsAdmin(m.Author.ID)
+	access := ""
+	if root {
+		access = "root"
+	} else if guildConfig.IsAdmin(m.Author.ID) {
+		access = "delegated_admin"
+	}
+	authorized := access != ""
 	if !authorized {
 		permissions, err := p.client.UserChannelPermissions(ctx, m.Author.ID, m.ChannelID)
 		if err != nil {
 			app.L().Debug("Failed to resolve Discord administrator permissions",
-				zap.String("guild_id", m.GuildID), zap.String("user_id", m.Author.ID), zap.Error(err))
-		} else {
-			authorized = permissions&discordgo.PermissionAdministrator != 0 || permissions&discordgo.PermissionManageGuild != 0
+				zap.String("guild_id", m.GuildID), zap.String("user_id", m.Author.ID),
+				zap.String("channel_id", m.ChannelID), zap.Error(err))
+		} else if permissions&discordgo.PermissionAdministrator != 0 || permissions&discordgo.PermissionManageGuild != 0 {
+			authorized = true
+			access = "discord_admin"
 		}
 	}
 	if !authorized {
 		return nil, false
 	}
-	base := configurationTool{manager: p.manager, guildID: m.GuildID, actorID: m.Author.ID, authorized: true, root: root}
+	base := configurationTool{manager: p.manager, guildID: m.GuildID, actorID: m.Author.ID, authorized: true, root: root, access: access}
+	if root {
+		return []genai.FunctionTool{
+			configurationToolWithAction(base, getServerConfigurationToolName),
+			configurationToolWithAction(base, updateServerConfigurationToolName),
+			configurationToolWithAction(base, setGuildPromptToolName),
+			configurationToolWithAction(base, addServerAdminToolName),
+			configurationToolWithAction(base, removeServerAdminToolName),
+		}, true
+	}
 	return []genai.FunctionTool{
 		configurationToolWithAction(base, getServerConfigurationToolName),
-		configurationToolWithAction(base, updateServerConfigurationToolName),
 		configurationToolWithAction(base, setGuildPromptToolName),
-		configurationToolWithAction(base, addServerAdminToolName),
-		configurationToolWithAction(base, removeServerAdminToolName),
 	}, true
 }
 
@@ -98,6 +114,11 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 			Parameters: objectSchema(nil, nil),
 		}
 	case updateServerConfigurationToolName:
+		if !t.root {
+			return &googlegenai.FunctionDeclaration{
+				Name: t.action, Description: "Root-only server configuration update.", Parameters: objectSchema(nil, nil),
+			}
+		}
 		properties := map[string]*googlegenai.Schema{
 			"channel_context_window": integerSchema("Prior ordinary channel messages included in context.", 1, 100),
 			"history_runes":          integerMinimumSchema("Combined history rune budget.", 1),
@@ -109,15 +130,13 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 			"web_search_enabled":      booleanSchema("Whether Google Search may be used for this server."),
 			"channel_search_enabled":  booleanSchema("Whether recent current-channel search may be used for this server."),
 		}
-		if t.root {
-			properties["prompt"] = stringSchema("Root-controlled bot identity and base personality prompt for this server.")
-			properties["thread_context_window"] = integerSchema("Prior thread messages included in context.", 1, 100)
-			properties["parent_context_window"] = integerSchema("Prior parent-channel messages included in thread context.", 1, 100)
-			properties["message_retention_days"] = integerSchema(
-				"Retention for newly ingested messages in whole days. Only root users may change this value.",
-				1, config.MaxMessageRetentionDays,
-			)
-		}
+		properties["prompt"] = stringSchema("Root-controlled bot identity and base personality prompt for this server.")
+		properties["thread_context_window"] = integerSchema("Prior thread messages included in context.", 1, 100)
+		properties["parent_context_window"] = integerSchema("Prior parent-channel messages included in thread context.", 1, 100)
+		properties["message_retention_days"] = integerSchema(
+			"Retention for newly ingested messages in whole days. Only root users may change this value.",
+			1, config.MaxMessageRetentionDays,
+		)
 		return &googlegenai.FunctionDeclaration{
 			Name: t.action,
 			Description: "Update one or more Jarvis settings for the current Discord server. " +
@@ -169,24 +188,20 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(loaded, nil), nil
+		return responseFromConfig(loaded, nil, t.root, t.access), nil
 	case updateServerConfigurationToolName:
+		if !t.root {
+			return nil, genai.NewExecutionError("authorization_denied", "Only a root user may change operational settings.", nil)
+		}
 		patch, changed, err := configurationPatch(args)
 		if err != nil {
 			return nil, genai.NewExecutionError("invalid_configuration", err.Error(), err)
-		}
-		if patchRequiresRoot(patch) && !t.root {
-			return nil, genai.NewExecutionError(
-				"authorization_denied",
-				"Only a root user may change the base prompt, thread or parent context windows, or message retention.",
-				nil,
-			)
 		}
 		updated, err := t.manager.Update(ctx, t.guildID, t.actorID, patch)
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(updated, changed), nil
+		return responseFromConfig(updated, changed, true, t.access), nil
 	case setGuildPromptToolName:
 		guildPrompt, err := guildPromptArgument(args["guild_prompt"])
 		if err != nil {
@@ -196,8 +211,11 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(updated, []string{"guild_prompt"}), nil
+		return responseFromConfig(updated, []string{"guild_prompt"}, t.root, t.access), nil
 	case addServerAdminToolName, removeServerAdminToolName:
+		if !t.root {
+			return nil, genai.NewExecutionError("authorization_denied", "Only a root user may manage delegated administrators.", nil)
+		}
 		userID, err := discordUserID(args["user_id"])
 		if err != nil {
 			return nil, genai.NewExecutionError("invalid_user_id", err.Error(), err)
@@ -211,14 +229,10 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(updated, []string{"admin_user_ids"}), nil
+		return responseFromConfig(updated, []string{"admin_user_ids"}, true, t.access), nil
 	default:
 		return nil, genai.NewExecutionError("unsupported_function", "The requested configuration operation is unavailable.", nil)
 	}
-}
-
-func patchRequiresRoot(patch config.Patch) bool {
-	return patch.Prompt != nil || patch.ThreadMessages != nil || patch.ParentMessages != nil || patch.MessageRetentionDays != nil
 }
 
 func configurationPatch(args map[string]any) (config.Patch, []string, error) {
@@ -271,21 +285,32 @@ func configurationPatch(args map[string]any) (config.Patch, []string, error) {
 	return patch, changed, nil
 }
 
-func responseFromConfig(value config.GuildConfig, changed []string) configurationResponse {
+func responseFromConfig(value config.GuildConfig, changed []string, root bool, access string) configurationResponse {
 	settings := value.Settings
 	source := "dynamodb"
 	if value.Version == 0 {
 		source = "defaults"
 	}
-	return configurationResponse{
-		Source: source, Version: value.Version, Prompt: settings.Prompt, GuildPrompt: settings.GuildPrompt,
-		ThreadMessages: settings.ThreadMessages,
-		ParentMessages: settings.ParentMessages, ChannelMessages: settings.ChannelMessages, HistoryRunes: settings.HistoryRunes,
-		MaxOutputTokens: settings.MaxOutputTokens, Temperature: settings.Temperature,
-		MessageTimeoutSeconds: int64(settings.MessageTimeout / time.Second), MessageRetentionDays: settings.MessageRetentionDays,
-		WebSearchEnabled: settings.WebSearchEnabled, ChannelSearchEnabled: settings.ChannelSearchEnabled,
-		AdminUserIDs: slices.Clone(value.AdminUserIDs), ChangedFields: changed,
+	response := configurationResponse{
+		Source: source, Version: value.Version, AccessClass: access, GuildPrompt: settings.GuildPrompt,
 	}
+	if !root {
+		return response
+	}
+	response.Prompt = settings.Prompt
+	response.ThreadMessages = settings.ThreadMessages
+	response.ParentMessages = settings.ParentMessages
+	response.ChannelMessages = settings.ChannelMessages
+	response.HistoryRunes = settings.HistoryRunes
+	response.MaxOutputTokens = settings.MaxOutputTokens
+	response.Temperature = settings.Temperature
+	response.MessageTimeoutSeconds = int64(settings.MessageTimeout / time.Second)
+	response.MessageRetentionDays = settings.MessageRetentionDays
+	response.WebSearchEnabled = settings.WebSearchEnabled
+	response.ChannelSearchEnabled = settings.ChannelSearchEnabled
+	response.AdminUserIDs = slices.Clone(value.AdminUserIDs)
+	response.ChangedFields = changed
+	return response
 }
 
 func guildPromptArgument(value any) (string, error) {
@@ -313,6 +338,10 @@ func discordUserID(value any) (string, error) {
 		return "", errors.New("user_id must be a string")
 	}
 	userID = strings.TrimSpace(userID)
+	if strings.HasPrefix(userID, "<@") && strings.HasSuffix(userID, ">") {
+		userID = strings.TrimSuffix(strings.TrimPrefix(userID, "<@"), ">")
+		userID = strings.TrimPrefix(userID, "!")
+	}
 	if len(userID) < 17 || len(userID) > 20 || strings.IndexFunc(userID, func(r rune) bool { return !unicode.IsDigit(r) }) >= 0 {
 		return "", errors.New("user_id must be a 17-20 digit Discord user ID")
 	}

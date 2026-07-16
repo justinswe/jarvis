@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -39,13 +40,15 @@ type Client interface {
 
 // Processor handles Discord messages without owning a Gateway connection.
 type Processor struct {
-	client    Client
-	botID     string
-	generator Generator
-	configs   config.Provider
-	history   History
-	manager   config.Manager
-	rootUsers map[string]struct{}
+	client      Client
+	botID       string
+	generator   Generator
+	configs     config.Provider
+	history     History
+	manager     config.Manager
+	rootUsers   map[string]struct{}
+	version     string
+	imageClient *http.Client
 }
 
 // ProcessorConfig contains the worker-owned dependencies for Discord request processing.
@@ -56,6 +59,8 @@ type ProcessorConfig struct {
 	History         History
 	ConfigManager   config.Manager
 	RootUserIDs     []string
+	Version         string
+	ImageHTTPClient *http.Client
 }
 
 // NewProcessor creates a request processor backed only by Discord REST APIs.
@@ -88,9 +93,13 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 			rootUsers[userID] = struct{}{}
 		}
 	}
+	imageClient := cfg.ImageHTTPClient
+	if imageClient == nil {
+		imageClient = newImageHTTPClient()
+	}
 	return &Processor{
 		client: restClient{session: session}, botID: user.ID, generator: cfg.Generator, configs: cfg.Configs,
-		history: cfg.History, manager: cfg.ConfigManager, rootUsers: rootUsers,
+		history: cfg.History, manager: cfg.ConfigManager, rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
 	}, nil
 }
 

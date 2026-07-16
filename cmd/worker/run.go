@@ -13,6 +13,7 @@ import (
 	"github.com/justinswe/jarvis/internal/awsidentity"
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/internal/dynamostore"
+	"github.com/justinswe/jarvis/internal/version"
 	workerservice "github.com/justinswe/jarvis/internal/worker"
 	"github.com/justinswe/jarvis/pkg/discord"
 	llm "github.com/justinswe/jarvis/pkg/genai"
@@ -106,6 +107,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		History:         history,
 		ConfigManager:   manager,
 		RootUserIDs:     cfg.rootUserIDs,
+		Version:         version.Value,
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize Discord processor")
