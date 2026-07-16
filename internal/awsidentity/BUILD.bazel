@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "awsidentity",
+    srcs = ["awsidentity.go"],
+    importpath = "github.com/justinswe/jarvis/internal/awsidentity",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_config//:config",
+        "@com_github_aws_aws_sdk_go_v2_credentials//stscreds",
+        "@com_github_aws_aws_sdk_go_v2_service_sts//:sts",
+        "@com_github_justinswe_std//errors",
+        "@com_google_cloud_go_auth//:auth",
+        "@com_google_cloud_go_auth//credentials/idtoken",
+    ],
+)
+
+go_test(
+    name = "awsidentity_test",
+    srcs = ["awsidentity_test.go"],
+    embed = [":awsidentity"],
+    deps = [
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_service_sts//:sts",
+        "@com_github_aws_aws_sdk_go_v2_service_sts//types",
+        "@com_github_justinswe_std//errors",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@com_google_cloud_go_auth//:auth",
+    ],
+)

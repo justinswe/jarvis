@@ -10,10 +10,16 @@ DynamoDB is disabled by default. Every flag is also available through the app pa
 | --- | --- | --- | --- |
 | `--dynamodb-enabled` | `DYNAMODB_ENABLED` | `false` | Enable message storage, DynamoDB history, and mutable guild configuration. |
 | `--dynamodb-table` | `DYNAMODB_TABLE` | `jarvis` | Existing table name. |
+| `--aws-role-arn` | `AWS_ROLE_ARN` | empty | AWS role assumed with a Google identity token. |
+| `--aws-web-identity-audience` | `AWS_WEB_IDENTITY_AUDIENCE` | empty | Audience placed in the Google identity token exchanged with AWS. |
 | `--message-retention-days` | `MESSAGE_RETENTION_DAYS` | `30` | Default retention for new message items. |
 | `--root-user-ids` | `ROOT_USER_IDS` | empty | Discord user IDs with cross-guild configuration access. Repeat the flag or use the app package's string-slice environment format. |
 
-The AWS SDK uses its normal credential and region resolution. If database initialization or a request-time data operation fails, the worker logs the failure and continues processing. With integration disabled, configuration comes from command flags and history comes from Discord REST. With integration enabled, history comes only from DynamoDB; a partial or failed history read is explicitly marked as incomplete in the model context and never falls back to Discord.
+Jarvis supports two AWS authentication modes. When the role ARN and web identity audience are both set, the worker retrieves a short-lived Google ID token from the attached Google Cloud service account and exchanges it through AWS STS `AssumeRoleWithWebIdentity`. Both the Google token and resulting AWS credentials are cached and refreshed before expiration. Configure both values together; setting only one is an error. Do not mount Google service-account keys or configure static AWS access keys for this mode.
+
+When both federation settings are empty, the AWS SDK uses its normal credential chain for local profiles, environment credentials, ECS, or EC2. Region resolution remains native to the AWS SDK, including `AWS_REGION`.
+
+When DynamoDB is enabled, AWS configuration, initial credential retrieval, and repository initialization must succeed before the worker starts. Request-time data failures after successful startup remain fail-open. With integration disabled, configuration comes from command flags and history comes from Discord REST. With integration enabled, history comes only from DynamoDB; a partial or failed history read is explicitly marked as incomplete in the model context and never falls back to Discord.
 
 ## Table contract
 
