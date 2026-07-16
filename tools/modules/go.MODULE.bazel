@@ -14,14 +14,18 @@ go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
 use_repo(
     go_deps,
+    "com_github_aws_aws_sdk_go_v2",
     "com_github_aws_aws_sdk_go_v2_config",
+    "com_github_aws_aws_sdk_go_v2_credentials",
     "com_github_aws_aws_sdk_go_v2_feature_dynamodb_attributevalue",
     "com_github_aws_aws_sdk_go_v2_service_dynamodb",
+    "com_github_aws_aws_sdk_go_v2_service_sts",
     "com_github_bwmarrin_discordgo",
     "com_github_justinswe_std",
     "com_github_klauspost_compress",
     "com_github_spf13_cobra",
     "com_github_stretchr_testify",
+    "com_google_cloud_go_auth",
     "org_golang_google_genai",
     "org_golang_google_grpc",
     "org_golang_google_protobuf",

@@ -10,12 +10,12 @@ go_library(
     importpath = "github.com/justinswe/jarvis/cmd/worker",
     visibility = ["//visibility:private"],
     deps = [
+        "//internal/awsidentity",
         "//internal/config",
         "//internal/dynamostore",
         "//internal/worker",
         "//pkg/discord",
         "//pkg/genai",
-        "@com_github_aws_aws_sdk_go_v2_config//:config",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
         "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",

@@ -10,7 +10,7 @@ import (
 
 type workerConfig struct {
 	host, port, projectID, location, defaultPrompt, discordBotToken string
-	dynamodbTable                                                   string
+	dynamodbTable, awsRoleARN, awsWebIdentityAudience               string
 	rootUserIDs                                                     []string
 	dynamodbEnabled                                                 bool
 	threadMessages, parentMessages, channelMessages, historyRunes   int
@@ -59,6 +59,8 @@ func newRootCommand() *cobra.Command {
 	flags.IntVar(&cfg.messageRetentionDays, "message-retention-days", cfg.messageRetentionDays, "Default message retention in days")
 	flags.BoolVar(&cfg.dynamodbEnabled, "dynamodb-enabled", cfg.dynamodbEnabled, "Enable DynamoDB message history and server configuration")
 	flags.StringVar(&cfg.dynamodbTable, "dynamodb-table", cfg.dynamodbTable, "DynamoDB table name")
+	flags.StringVar(&cfg.awsRoleARN, "aws-role-arn", cfg.awsRoleARN, "AWS IAM role assumed through Google workload identity")
+	flags.StringVar(&cfg.awsWebIdentityAudience, "aws-web-identity-audience", cfg.awsWebIdentityAudience, "Audience for the Google identity token exchanged with AWS")
 	flags.StringSliceVar(&cfg.rootUserIDs, "root-user-ids", cfg.rootUserIDs, "Discord user IDs with cross-server root access")
 	return command
 }
