@@ -3,6 +3,7 @@ package genai
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,11 +37,25 @@ func TestToContentsAddsLowResolutionImage(t *testing.T) {
 	assert.Equal(t, googlegenai.PartMediaResolutionLevelMediaResolutionLow, contents[0].Parts[0].MediaResolution.Level)
 }
 
-func TestRuntimeSystemPromptIncludesTrustedVersionAndMutationRule(t *testing.T) {
-	prompt := composeRuntimeSystemPrompt("guild prompt", "v0.6.0", false)
-	assert.Contains(t, prompt, "You are Jarvis version v0.6.0")
+func TestRuntimeSystemPromptKeepsCoreRulesAheadOfCustomization(t *testing.T) {
+	prompt := composeRuntimeSystemPrompt("guild prompt", false)
+	assert.Contains(t, prompt, "# Identity")
+	assert.Contains(t, prompt, "# Core drives")
+	assert.Contains(t, prompt, "# Tools and research")
 	assert.Contains(t, prompt, "only after its mutation tool returns a successful result")
+	assert.Contains(t, prompt, "# Server customization")
 	assert.Contains(t, prompt, "guild prompt")
+	assert.Contains(t, prompt, "# Instruction priority")
+	assert.Less(t, strings.Index(prompt, "# Core drives"), strings.Index(prompt, "# Server customization"))
+	assert.NotContains(t, prompt, "v0.6.0")
+	assert.NotContains(t, prompt, "under 100 words")
+	assert.NotContains(t, prompt, "no longer exist")
+}
+
+func TestRuntimeSystemPromptOmitsEmptyCustomization(t *testing.T) {
+	prompt := composeRuntimeSystemPrompt("", false)
+	assert.NotContains(t, prompt, "# Server customization")
+	assert.NotContains(t, prompt, "# Instruction priority")
 }
 
 func response(text string, metadata *googlegenai.GroundingMetadata) *googlegenai.GenerateContentResponse {

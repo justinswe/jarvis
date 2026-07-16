@@ -47,7 +47,7 @@ func newRootCommand() *cobra.Command {
 	flags.StringVar(&cfg.port, "port", cfg.port, "HTTP worker port")
 	flags.StringVar(&cfg.projectID, "project-id", cfg.projectID, "GCP project ID")
 	flags.StringVar(&cfg.location, "location", cfg.location, "Vertex AI location")
-	flags.StringVar(&cfg.defaultPrompt, "default-prompt", cfg.defaultPrompt, "Bot identity and personality prompt")
+	flags.StringVar(&cfg.defaultPrompt, "default-prompt", cfg.defaultPrompt, "Additional server customization prompt")
 	flags.IntVar(&cfg.threadMessages, "thread-context-window", cfg.threadMessages, "Prior thread messages")
 	flags.IntVar(&cfg.parentMessages, "parent-context-window", cfg.parentMessages, "Prior parent-channel messages")
 	flags.IntVar(&cfg.channelMessages, "channel-context-window", cfg.channelMessages, "Prior ordinary channel messages")

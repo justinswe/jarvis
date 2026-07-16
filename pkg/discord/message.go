@@ -126,9 +126,9 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			Temperature:      settings.Temperature,
 			WebSearchEnabled: settings.WebSearchEnabled,
 			ThinkingLevel:    googlegenai.ThinkingLevelMedium,
-			Version:          p.version,
 		},
 	}
+	request.Tools = append(request.Tools, p.runtimeContext())
 	request.Tools = append(request.Tools, p.reactToMessage(m.ChannelID, m.ID))
 	if settings.ChannelSearchEnabled {
 		request.Tools = append(request.Tools, p.searchCurrentChannel(m.GuildID, m.ChannelID, m.ID))

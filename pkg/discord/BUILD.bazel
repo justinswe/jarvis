@@ -9,6 +9,7 @@ go_library(
         "image.go",
         "message.go",
         "reaction.go",
+        "runtime_context.go",
         "search.go",
         "session.go",
     ],
@@ -16,6 +17,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/config",
+        "//internal/version",
         "//pkg/genai",
         "@com_github_bwmarrin_discordgo//:discordgo",
         "@com_github_justinswe_std//app",
@@ -31,6 +33,7 @@ go_test(
         "configuration_test.go",
         "discord_test.go",
         "reaction_test.go",
+        "runtime_context_test.go",
     ],
     embed = [":discord"],
     deps = [

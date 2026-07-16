@@ -317,7 +317,7 @@ func TestProcessUsesPerServerSettings(t *testing.T) {
 	settings := testSettings()
 	settings.GuildPrompt = "Use guild terminology."
 	provider := &countingProvider{settings: settings}
-	p := &Processor{botID: "bot", generator: generator, client: client, configs: provider}
+	p := &Processor{botID: "bot", generator: generator, client: client, configs: provider, version: "v0.6.0"}
 	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "question")))
 	assert.Equal(t, "guild", provider.guildID)
 	require.NotNil(t, generator.request)
@@ -325,19 +325,24 @@ func TestProcessUsesPerServerSettings(t *testing.T) {
 	assert.Equal(t, "Jarvis\n\nGuild-specific instructions:\nUse guild terminology.", generator.request.Config.Prompt)
 	assert.Equal(t, 256, generator.request.Config.MaxOutputTokens)
 	assert.True(t, generator.request.Config.WebSearchEnabled)
-	require.Len(t, generator.request.Tools, 2)
-	assert.Equal(t, messageReactionToolName, generator.request.Tools[0].Name())
-	assert.Equal(t, channelSearchToolName, generator.request.Tools[1].Name())
+	require.Len(t, generator.request.Tools, 3)
+	assert.Equal(t, runtimeContextToolName, generator.request.Tools[0].Name())
+	runtimeResult, err := generator.request.Tools[0].Execute(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "v0.6.0", runtimeResult.(runtimeContextResponse).Version)
+	assert.Equal(t, messageReactionToolName, generator.request.Tools[1].Name())
+	assert.Equal(t, channelSearchToolName, generator.request.Tools[2].Name())
 }
 
-func TestProcessExposesReactionToolWhenChannelSearchIsDisabled(t *testing.T) {
+func TestProcessExposesRuntimeAndReactionToolsWhenChannelSearchIsDisabled(t *testing.T) {
 	settings := testSettings()
 	settings.ChannelSearchEnabled = false
 	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
 	p := &Processor{botID: "bot", generator: generator, client: &fakeClient{}, configs: &countingProvider{settings: settings}}
 	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "question")))
-	require.Len(t, generator.request.Tools, 1)
-	assert.Equal(t, messageReactionToolName, generator.request.Tools[0].Name())
+	require.Len(t, generator.request.Tools, 2)
+	assert.Equal(t, runtimeContextToolName, generator.request.Tools[0].Name())
+	assert.Equal(t, messageReactionToolName, generator.request.Tools[1].Name())
 }
 
 func TestProcessSkipsConfigurationForUntargetedMessages(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/internal/config"
+	"github.com/justinswe/jarvis/internal/version"
 	"github.com/justinswe/jarvis/pkg/genai"
 	"github.com/justinswe/std/errors"
 )
@@ -78,6 +79,9 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 	}
 	if cfg.Generator == nil {
 		return nil, errors.New("generator is required")
+	}
+	if strings.TrimSpace(cfg.Version) == "" {
+		cfg.Version = version.Value
 	}
 	session, err := discordgo.New("Bot " + cfg.DiscordBotToken)
 	if err != nil {

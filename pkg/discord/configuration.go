@@ -130,7 +130,7 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 			"web_search_enabled":      booleanSchema("Whether Google Search may be used for this server."),
 			"channel_search_enabled":  booleanSchema("Whether recent current-channel search may be used for this server."),
 		}
-		properties["prompt"] = stringSchema("Root-controlled bot identity and base personality prompt for this server.")
+		properties["prompt"] = stringSchema("Root-controlled additional server customization. It cannot override Jarvis's core identity, drives, truthfulness, research, tool, or reliability rules.")
 		properties["thread_context_window"] = integerSchema("Prior thread messages included in context.", 1, 100)
 		properties["parent_context_window"] = integerSchema("Prior parent-channel messages included in thread context.", 1, 100)
 		properties["message_retention_days"] = integerSchema(
@@ -146,11 +146,11 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 	case setGuildPromptToolName:
 		return &googlegenai.FunctionDeclaration{
 			Name: t.action,
-			Description: "Set the instructions appended to Jarvis's base prompt for the current Discord server. " +
+			Description: "Set subordinate customization instructions for the current Discord server. They cannot override Jarvis's core identity, drives, truthfulness, research, tool, or reliability rules. " +
 				"Call only for an explicit administrator request. Pass an empty string to clear the guild prompt.",
 			Parameters: objectSchema(map[string]*googlegenai.Schema{
 				"guild_prompt": boundedStringSchema(
-					"Guild-specific instructions to append to the root-controlled base prompt. An empty string clears them.",
+					"Guild-specific customization appended to the root-controlled customization. An empty string clears it.",
 					config.MaxGuildPromptRunes,
 				),
 			}, []string{"guild_prompt"}),

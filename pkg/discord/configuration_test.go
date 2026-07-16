@@ -257,7 +257,7 @@ func TestProcessUsesHighThinkingWhenAdminToolsAreExposed(t *testing.T) {
 	require.NoError(t, processor.Process(context.Background(), targetedMessage("message", "show the configuration")))
 	require.NotNil(t, generator.request)
 	assert.Equal(t, googlegenai.ThinkingLevelHigh, generator.request.Config.ThinkingLevel)
-	require.Len(t, generator.request.Tools, 7)
-	assert.Equal(t, getServerConfigurationToolName, generator.request.Tools[2].Name())
-	assert.Equal(t, setGuildPromptToolName, generator.request.Tools[4].Name())
+	require.Len(t, generator.request.Tools, 8)
+	assert.Equal(t, getServerConfigurationToolName, generator.request.Tools[3].Name())
+	assert.Equal(t, setGuildPromptToolName, generator.request.Tools[5].Name())
 }
