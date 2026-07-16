@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
 )
 
@@ -15,34 +16,55 @@ type contextSection struct {
 	messages []*discordgo.Message
 }
 
-func (b *Bot) buildPrompt(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate) ([]genai.Message, error) {
-	current := sanitizeContent(m.Content, b.botID)
+const incompleteContextNotice = "CONTEXT NOTICE: Stored conversation history could not be fully loaded; the supplied history may be incomplete."
+
+func (p *Processor) buildPrompt(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, settings config.ServerSettings) ([]genai.Message, error) {
+	current := sanitizeContent(m.Content, p.botID)
 	if current == "" {
 		return nil, errEmptyMessageContent
 	}
 	var sections []contextSection
+	incomplete := false
 	if isThreadChannel(channel) {
+		threadMessages, threadErr := p.fetchHistory(ctx, m.GuildID, m.ChannelID, settings.ThreadMessages, m.ID)
+		parentMessages, parentErr := p.fetchHistory(ctx, m.GuildID, channel.ParentID, settings.ParentMessages, "")
+		incomplete = threadErr != nil || parentErr != nil
 		sections = append(sections,
-			contextSection{"THREAD HISTORY", b.fetchHistory(ctx, m.ChannelID, b.threadLimit, m.ID)},
-			contextSection{"PARENT CHANNEL", b.fetchHistory(ctx, channel.ParentID, b.parentLimit, "")},
+			contextSection{"THREAD HISTORY", threadMessages},
+			contextSection{"PARENT CHANNEL", parentMessages},
 		)
 	} else {
-		sections = append(sections, contextSection{"CHANNEL HISTORY", b.fetchHistory(ctx, m.ChannelID, b.channelLimit, m.ID)})
+		channelMessages, channelErr := p.fetchHistory(ctx, m.GuildID, m.ChannelID, settings.ChannelMessages, m.ID)
+		incomplete = channelErr != nil
+		sections = append(sections, contextSection{"CHANNEL HISTORY", channelMessages})
 	}
-	content := buildContext(sections, current, b.historyRunes)
+	content := buildContext(sections, current, settings.HistoryRunes)
+	if incomplete {
+		content = incompleteContextNotice + "\n\n" + content
+	}
 	return []genai.Message{{Role: "user", Content: content}}, nil
 }
 
-func (b *Bot) fetchHistory(ctx context.Context, channelID string, limit int, before string) []*discordgo.Message {
-	if channelID == "" || b.fetchMessages == nil {
-		return nil
+func (p *Processor) fetchHistory(ctx context.Context, guildID, channelID string, limit int, before string) ([]*discordgo.Message, error) {
+	if channelID == "" {
+		return nil, nil
 	}
-	messages, err := b.fetchMessages(ctx, channelID, limit, before)
+	var messages []*discordgo.Message
+	var err error
+	if p.history != nil {
+		messages, err = p.history.Messages(ctx, guildID, channelID, limit, before)
+	} else {
+		messages, err = p.client.Messages(ctx, channelID, limit, before)
+	}
 	if err != nil {
-		return nil
+		if p.history == nil {
+			return nil, nil
+		}
+		slices.Reverse(messages)
+		return messages, err
 	}
 	slices.Reverse(messages)
-	return messages
+	return messages, nil
 }
 
 func buildContext(sections []contextSection, current string, budget int) string {

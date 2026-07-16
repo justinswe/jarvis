@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"regexp"
@@ -20,16 +21,15 @@ func appendSources(text string, sources []genai.Source) string {
 		if len(links) == 3 {
 			break
 		}
-		title := strings.NewReplacer("[", "", "]", "", "\n", " ").Replace(strings.TrimSpace(source.Title))
 		url := strings.TrimSpace(source.URL)
-		if title != "" && url != "" {
-			links = append(links, fmt.Sprintf("[%s](%s)", title, url))
+		if url != "" {
+			links = append(links, fmt.Sprintf("[%d](%s)", len(links)+1, url))
 		}
 	}
 	if len(links) == 0 {
 		return text
 	}
-	return strings.TrimSpace(text) + "\n\nSources: " + strings.Join(links, " · ")
+	return strings.TrimSpace(text) + "\n\n-# Sources: " + strings.Join(links, " · ")
 }
 
 func sanitizeContent(content, botID string) string {
@@ -79,15 +79,12 @@ func safeThreadName(username, globalName string) string {
 	return name
 }
 
-func (b *Bot) sendMessageChunks(channelID, content string) error {
+func (p *Processor) sendMessageChunks(ctx context.Context, channelID, content string) error {
 	if strings.TrimSpace(content) == "" {
 		return errors.New("cannot send empty message content")
 	}
-	if b.sendMessage == nil {
-		return errors.New("discord send function is not configured")
-	}
 	for i, chunk := range splitMessageForDiscord(content, discordMessageMaxLength) {
-		if _, err := b.sendMessage(channelID, chunk); err != nil {
+		if _, err := p.client.SendMessage(ctx, channelID, chunk); err != nil {
 			return errors.Wrapf(err, "send chunk %d", i+1)
 		}
 	}

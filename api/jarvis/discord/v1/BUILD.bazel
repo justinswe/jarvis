@@ -1,0 +1,37 @@
+# gazelle:ignore
+# Gazelle does not preserve the Buf lint target in this package.
+
+load("@rules_buf//buf:defs.bzl", "buf_lint_test")
+load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+
+proto_library(
+    name = "worker_proto",
+    srcs = ["worker.proto"],
+    strip_import_prefix = "/api",
+    visibility = ["//visibility:public"],
+    deps = ["@com_google_protobuf//:timestamp_proto"],
+)
+
+go_proto_library(
+    name = "worker_go_proto",
+    compilers = ["@rules_go//proto:go_proto"],
+    importpath = "github.com/justinswe/jarvis/api/jarvis/discord/v1",
+    proto = ":worker_proto",
+    visibility = ["//visibility:public"],
+)
+
+buf_lint_test(
+    name = "worker_proto_lint",
+    config = "//:buf.yaml",
+    module = "api",
+    targets = [":worker_proto"],
+)
+
+go_library(
+    name = "discord",
+    embed = [":worker_go_proto"],
+    importpath = "github.com/justinswe/jarvis/api/jarvis/discord/v1",
+    visibility = ["//visibility:public"],
+)

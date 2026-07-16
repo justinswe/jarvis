@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dynamostore",
+    srcs = ["repository.go"],
+    importpath = "github.com/justinswe/jarvis/internal/dynamostore",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "//internal/config",
+        "@com_github_aws_aws_sdk_go_v2_feature_dynamodb_attributevalue//:attributevalue",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//types",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_klauspost_compress//zstd",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "dynamostore_test",
+    srcs = ["repository_test.go"],
+    embed = [":dynamostore"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "//internal/config",
+        "@com_github_aws_aws_sdk_go_v2_feature_dynamodb_attributevalue//:attributevalue",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//types",
+        "@com_github_justinswe_std//errors",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//types/known/timestamppb",
+    ],
+)

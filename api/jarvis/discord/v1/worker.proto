@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package jarvis.discord.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/justinswe/jarvis/api/jarvis/discord/v1;discordv1";
+
+// IngestMessageRequest contains a normalized Discord message event.
+message IngestMessageRequest {
+  DiscordMessageCreateEvent event = 1;
+}
+
+// DiscordMessageCreateEvent is the stable transport representation of a Discord message.
+message DiscordMessageCreateEvent {
+  string message_id = 1;
+  string guild_id = 2;
+  string channel_id = 3;
+  string content = 4;
+  MessageKind kind = 5;
+  MessageAuthor author = 6;
+  repeated string mentioned_user_ids = 7;
+  MessageReference reference = 8;
+  google.protobuf.Timestamp ingested_at = 9;
+}
+
+// MessageKind identifies message types Jarvis understands.
+enum MessageKind {
+  MESSAGE_KIND_UNSPECIFIED = 0;
+  MESSAGE_KIND_DEFAULT = 1;
+  MESSAGE_KIND_REPLY = 2;
+}
+
+// MessageAuthor contains the author fields needed by the worker.
+message MessageAuthor {
+  string id = 1;
+  string username = 2;
+  string global_name = 3;
+  bool bot = 4;
+}
+
+// MessageReference identifies the message targeted by a reply.
+message MessageReference {
+  string message_id = 1;
+  string channel_id = 2;
+}

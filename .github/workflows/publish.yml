@@ -96,7 +96,7 @@ jobs:
             --finalHashes "${final_hashes}" \
             --output "${impacted_targets}"
 
-          if grep --fixed-strings --line-regexp --quiet '//:jarvis' "${impacted_targets}" ||
+          if grep --fixed-strings --line-regexp --quiet '//:image' "${impacted_targets}" ||
             ! git diff --quiet "${BEFORE_SHA}" "${GITHUB_SHA}" -- .github/workflows/publish.yml; then
             echo "impacted=true" >> "${GITHUB_OUTPUT}"
           else

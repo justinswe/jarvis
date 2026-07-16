@@ -2,105 +2,132 @@ package discord
 
 import (
 	"context"
-	"sync/atomic"
-	"time"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
-	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
-	"go.uber.org/zap"
 )
 
 const (
-	defaultThreadMessages   = 12
-	defaultParentMessages   = 4
-	defaultChannelMessages  = 8
 	defaultHistoryRunes     = 4000
-	defaultMessageTimeout   = 45 * time.Second
 	discordMessageMaxLength = 2000
 )
 
+// Generator produces a response for a normalized conversation.
 type Generator interface {
 	Generate(context.Context, genai.GenerateRequest) (genai.GenerateResponse, error)
 }
 
-type Config struct {
-	Token           string
-	ThreadMessages  int
-	ParentMessages  int
-	ChannelMessages int
-	HistoryRunes    int
-	MessageTimeout  time.Duration
+// History reads prior Discord messages for prompt construction.
+type History interface {
+	Messages(context.Context, string, string, int, string) ([]*discordgo.Message, error)
 }
 
-type Bot struct {
-	session        *discordgo.Session
-	botID          string
-	generator      Generator
-	threadLimit    int
-	parentLimit    int
-	channelLimit   int
-	historyRunes   int
-	messageTimeout time.Duration
-	ready          atomic.Bool
-
-	fetchMessages  func(context.Context, string, int, string) ([]*discordgo.Message, error)
-	sendMessage    func(string, string) (*discordgo.Message, error)
-	startThread    func(string, string, string, int) (*discordgo.Channel, error)
-	addReaction    func(string, string, string) error
-	removeReaction func(string, string, string, string) error
+// Client contains the Discord REST operations used while processing a message.
+type Client interface {
+	Channel(context.Context, string) (*discordgo.Channel, error)
+	Message(context.Context, string, string) (*discordgo.Message, error)
+	Messages(context.Context, string, int, string) ([]*discordgo.Message, error)
+	SendMessage(context.Context, string, string) (*discordgo.Message, error)
+	StartThread(context.Context, string, string, string, int) (*discordgo.Channel, error)
+	AddReaction(context.Context, string, string, string) error
+	RemoveReaction(context.Context, string, string, string, string) error
+	UserChannelPermissions(context.Context, string, string) (int64, error)
 }
 
-func NewBot(cfg Config, generator Generator) (*Bot, error) {
-	if cfg.Token == "" {
+// Processor handles Discord messages without owning a Gateway connection.
+type Processor struct {
+	client    Client
+	botID     string
+	generator Generator
+	configs   config.Provider
+	history   History
+	manager   config.Manager
+	rootUsers map[string]struct{}
+}
+
+// ProcessorConfig contains the worker-owned dependencies for Discord request processing.
+type ProcessorConfig struct {
+	DiscordBotToken string
+	Configs         config.Provider
+	Generator       Generator
+	History         History
+	ConfigManager   config.Manager
+	RootUserIDs     []string
+}
+
+// NewProcessor creates a request processor backed only by Discord REST APIs.
+func NewProcessor(ctx context.Context, token string, configs config.Provider, generator Generator) (*Processor, error) {
+	return NewProcessorWithConfig(ctx, ProcessorConfig{DiscordBotToken: token, Configs: configs, Generator: generator})
+}
+
+// NewProcessorWithConfig creates a processor with optional database history and configuration tools.
+func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processor, error) {
+	if cfg.DiscordBotToken == "" {
 		return nil, errors.New("discord bot token is required")
 	}
-	if generator == nil {
+	if cfg.Configs == nil {
+		return nil, errors.New("configuration provider is required")
+	}
+	if cfg.Generator == nil {
 		return nil, errors.New("generator is required")
 	}
-	if cfg.ThreadMessages <= 0 {
-		cfg.ThreadMessages = defaultThreadMessages
-	}
-	if cfg.ParentMessages <= 0 {
-		cfg.ParentMessages = defaultParentMessages
-	}
-	if cfg.ChannelMessages <= 0 {
-		cfg.ChannelMessages = defaultChannelMessages
-	}
-	if cfg.HistoryRunes <= 0 {
-		cfg.HistoryRunes = defaultHistoryRunes
-	}
-	if cfg.MessageTimeout <= 0 {
-		cfg.MessageTimeout = defaultMessageTimeout
-	}
-
-	s, err := discordgo.New("Bot " + cfg.Token)
+	session, err := discordgo.New("Bot " + cfg.DiscordBotToken)
 	if err != nil {
-		return nil, errors.Wrap(err, "create Discord session")
+		return nil, errors.Wrap(err, "create Discord REST client")
 	}
-	u, err := s.User("@me")
+	user, err := session.User("@me", discordgo.WithContext(ctx))
 	if err != nil {
 		return nil, errors.Wrap(err, "obtain bot account")
 	}
-	b := &Bot{session: s, botID: u.ID, generator: generator, threadLimit: cfg.ThreadMessages,
-		parentLimit: cfg.ParentMessages, channelLimit: cfg.ChannelMessages, historyRunes: cfg.HistoryRunes, messageTimeout: cfg.MessageTimeout}
-	b.fetchMessages = func(ctx context.Context, id string, limit int, before string) ([]*discordgo.Message, error) {
-		return s.ChannelMessages(id, limit, before, "", "", discordgo.WithContext(ctx))
+	rootUsers := make(map[string]struct{}, len(cfg.RootUserIDs))
+	for _, userID := range cfg.RootUserIDs {
+		if userID = strings.TrimSpace(userID); userID != "" {
+			rootUsers[userID] = struct{}{}
+		}
 	}
-	b.sendMessage = func(channelID, content string) (*discordgo.Message, error) {
-		return s.ChannelMessageSendComplex(channelID, suppressedMessage(content))
-	}
-	b.startThread = func(channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
-		return s.MessageThreadStart(channelID, messageID, name, archiveDuration)
-	}
-	b.addReaction = func(channelID, messageID, emoji string) error {
-		return s.MessageReactionAdd(channelID, messageID, emoji)
-	}
-	b.removeReaction = func(channelID, messageID, emoji, userID string) error {
-		return s.MessageReactionRemove(channelID, messageID, emoji, userID)
-	}
-	return b, nil
+	return &Processor{
+		client: restClient{session: session}, botID: user.ID, generator: cfg.Generator, configs: cfg.Configs,
+		history: cfg.History, manager: cfg.ConfigManager, rootUsers: rootUsers,
+	}, nil
+}
+
+type restClient struct {
+	session *discordgo.Session
+}
+
+func (c restClient) Channel(ctx context.Context, channelID string) (*discordgo.Channel, error) {
+	return c.session.Channel(channelID, discordgo.WithContext(ctx))
+}
+
+func (c restClient) Message(ctx context.Context, channelID, messageID string) (*discordgo.Message, error) {
+	return c.session.ChannelMessage(channelID, messageID, discordgo.WithContext(ctx))
+}
+
+func (c restClient) Messages(ctx context.Context, channelID string, limit int, beforeID string) ([]*discordgo.Message, error) {
+	return c.session.ChannelMessages(channelID, limit, beforeID, "", "", discordgo.WithContext(ctx))
+}
+
+func (c restClient) SendMessage(ctx context.Context, channelID, content string) (*discordgo.Message, error) {
+	return c.session.ChannelMessageSendComplex(channelID, suppressedMessage(content), discordgo.WithContext(ctx))
+}
+
+func (c restClient) StartThread(ctx context.Context, channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {
+	return c.session.MessageThreadStart(channelID, messageID, name, archiveDuration, discordgo.WithContext(ctx))
+}
+
+func (c restClient) AddReaction(ctx context.Context, channelID, messageID, emoji string) error {
+	return c.session.MessageReactionAdd(channelID, messageID, emoji, discordgo.WithContext(ctx))
+}
+
+func (c restClient) RemoveReaction(ctx context.Context, channelID, messageID, emoji, userID string) error {
+	return c.session.MessageReactionRemove(channelID, messageID, emoji, userID, discordgo.WithContext(ctx))
+}
+
+func (c restClient) UserChannelPermissions(ctx context.Context, userID, channelID string) (int64, error) {
+	return c.session.UserChannelPermissions(userID, channelID, discordgo.WithContext(ctx))
 }
 
 func suppressedMessage(content string) *discordgo.MessageSend {
@@ -108,24 +135,4 @@ func suppressedMessage(content string) *discordgo.MessageSend {
 		Content: content,
 		Flags:   discordgo.MessageFlagsSuppressEmbeds,
 	}
-}
-
-func (b *Bot) Ready() bool { return b.ready.Load() }
-
-func (b *Bot) Start(ctx context.Context) error {
-	b.session.AddHandler(b.messageCreate)
-	b.session.AddHandler(func(_ *discordgo.Session, _ *discordgo.Ready) { b.ready.Store(true) })
-	b.session.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { b.ready.Store(true) })
-	b.session.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { b.ready.Store(false) })
-	b.session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentsMessageContent
-	if err := b.session.Open(); err != nil {
-		return errors.Wrap(err, "open Discord connection")
-	}
-	app.L().Info("Discord bot connected", zap.String("bot_id", b.botID))
-	<-ctx.Done()
-	b.ready.Store(false)
-	if err := b.session.Close(); err != nil {
-		return errors.Wrap(err, "close Discord connection")
-	}
-	return nil
 }
