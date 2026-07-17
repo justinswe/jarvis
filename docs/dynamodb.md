@@ -19,7 +19,7 @@ Jarvis supports two AWS authentication modes. When the role ARN and web identity
 
 When both federation settings are empty, the AWS SDK uses its normal credential chain for local profiles, environment credentials, ECS, or EC2. Region resolution remains native to the AWS SDK, including `AWS_REGION`.
 
-When DynamoDB is enabled, AWS configuration, initial credential retrieval, and repository initialization must succeed before the worker starts. Request-time data failures after successful startup remain fail-open. With integration disabled, configuration comes from command flags and history comes from Discord REST. With integration enabled, history comes only from DynamoDB; a partial or failed history read is explicitly marked as incomplete in the model context and never falls back to Discord.
+When DynamoDB is enabled, AWS configuration, initial credential retrieval, and repository initialization must succeed before the worker starts. Request-time data failures after successful startup remain fail-open. With integration disabled, configuration comes from command flags and prompt history comes from Discord REST. With integration enabled, history comes only from DynamoDB; a partial or failed history read is explicitly marked as incomplete in the model context and never falls back to Discord. Current-channel search is exposed only when DynamoDB and the guild's `channel_search_enabled` setting are both enabled; it never falls back to Discord REST.
 
 ## Table contract
 
@@ -50,6 +50,16 @@ For content over 100 UTF-8 bytes, Jarvis produces a zstd candidate and stores it
 
 Message writes are conditional and deterministic, making duplicate delivery of the same channel/message pair idempotent. History queries are bounded by the request's configured context window, ordered newest first in storage, and returned chronologically to the model.
 
+The stored record is a creation-time snapshot. Jarvis does not ingest Discord message update or delete events, so search can return original content that was later edited or deleted in Discord.
+
+### Current-channel search
+
+The `search_current_channel` model tool queries only the current channel or thread partition. It accepts any combination of case-insensitive message text, an exact author ID/mention/username/display name, an inclusive RFC3339 start time, and an exclusive RFC3339 end time. At least one criterion is required. Results include direct Discord links and author IDs.
+
+Search reads stored messages newest first in pages of 100, excludes the current request, and stops after the newest eight matches. The selected matches are returned chronologically. A rare or absent query can therefore read every unexpired item in a channel, while a common query normally stops early. Expired records remain excluded even while DynamoDB TTL deletion is pending.
+
+Usable messages returned alongside a DynamoDB or decode error are supplied to the model with `incomplete:true`; a failure before any usable page returns a sanitized `channel_search_unavailable` error. Search never mixes DynamoDB and Discord REST results. No secondary index or backfill is required, but read cost and latency grow with the amount of eligible channel history.
+
 ### Guild configuration item
 
 | Attribute | Type | Value |
@@ -64,7 +74,7 @@ Message writes are conditional and deterministic, making duplicate delivery of t
 | `history_runes`, `max_output_tokens` | Number | Context-rune budget and total generated-token budget, including thinking and visible text. |
 | `message_timeout_seconds` | Number | Processing deadline. |
 | `message_retention_days` | Number | Retention for new messages, 1 through 3650 days. |
-| `web_search_enabled`, `channel_search_enabled` | Boolean | Tool availability settings. |
+| `web_search_enabled`, `channel_search_enabled` | Boolean | Web-search eligibility and DynamoDB current-channel-search eligibility. |
 | `admin_user_ids` | String set | Delegated Jarvis configuration administrators. |
 | `version` | Number | Optimistic concurrency version. |
 | `updated_at` | Number | Unix milliseconds. |
@@ -105,4 +115,4 @@ The worker identity needs these actions on only the configured table:
 - `dynamodb:PutItem`
 - `dynamodb:Query`
 
-Table creation, backups, point-in-time recovery, encryption policy, alarms, and TTL enablement remain deployment responsibilities. Monitor conditional-check failures, throttling, read/write latency, item size, and TTL backlog. Message content is user data; choose retention, encryption, backup, and access policies appropriate for the deployment.
+Table creation, backups, point-in-time recovery, encryption policy, alarms, and TTL enablement remain deployment responsibilities. Monitor conditional-check failures, throttling, read/write latency, item size, TTL backlog, channel-search duration, scanned-message count, incomplete searches, and worker timeouts. Search logs record filter presence and counts but exclude criteria and message content. Message content is user data; choose retention, encryption, backup, and access policies appropriate for the deployment.

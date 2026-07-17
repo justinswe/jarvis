@@ -2,6 +2,8 @@
 
 Jarvis makes Google Search available when the guild configuration enables web search. A deterministic current-request classifier requires grounding for explicit web requests and clearly volatile facts. It inspects only `CURRENT REQUEST`, not historical transcript text, and does not make a separate model call.
 
+Explicit requests to search the current channel or retrieve earlier messages instead require the `search_current_channel` function and successful channel-history evidence. They do not trigger Google Search unless the request also explicitly asks for web or external research. If DynamoDB-backed channel search is disabled or fails before returning usable history, Jarvis returns a channel-history verification fallback rather than guessing. Requests that need both channel history and web research retain both requirements.
+
 ## Verification policy
 
 Grounding enforcement starts when Search was attempted or the request policy requires grounding:
@@ -41,4 +43,4 @@ Every Gemini attempt has an `attempt` value such as `initial`, `tool_followup`, 
 - `search_entry_point_present`
 - `grounding_outcome`
 
-Function-tool rounds log requested, executed, succeeded, and failed counts. DEBUG logs add exposed tool names, per-call timing and outcome, and grounding source domains. Logs intentionally exclude search query text, full source URLs, function arguments, and function outputs.
+Function-tool rounds log requested, executed, succeeded, and failed counts. Stored channel searches additionally log duration, scanned and returned counts, filter-presence booleans, truncation, and incompleteness. DEBUG logs add exposed tool names, per-call timing and outcome, and grounding source domains. Logs intentionally exclude search query text, author criteria, full source URLs, function arguments, function outputs, and message content.

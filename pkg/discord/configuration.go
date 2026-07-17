@@ -126,7 +126,7 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 			),
 			"message_timeout_seconds": integerMinimumSchema("Overall processing timeout in whole seconds.", 1),
 			"web_search_enabled":      booleanSchema("Whether Google Search may be used for this server."),
-			"channel_search_enabled":  booleanSchema("Whether recent current-channel search may be used for this server."),
+			"channel_search_enabled":  booleanSchema("Whether stored current-channel search may be used when DynamoDB is enabled."),
 		}
 		properties["prompt"] = stringSchema("Root-controlled additional server customization. It cannot override Jarvis's core identity, drives, truthfulness, research, tool, or reliability rules.")
 		properties["thread_context_window"] = integerSchema("Prior thread messages included in context.", 1, 100)

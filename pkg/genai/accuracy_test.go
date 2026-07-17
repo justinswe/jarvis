@@ -36,6 +36,18 @@ func runtimeTestTool(executionError error) evidenceTestTool {
 	}
 }
 
+func channelSearchTestTool(executionError error) evidenceTestTool {
+	return evidenceTestTool{
+		fakeTool: testTool(ChannelSearchFunctionName, func(context.Context, map[string]any) (any, error) {
+			if executionError != nil {
+				return nil, executionError
+			}
+			return map[string]any{"results": []any{}}, nil
+		}),
+		evidence: Evidence{Kind: EvidenceKindChannelHistory, Tool: ChannelSearchFunctionName},
+	}
+}
+
 func codeExecutionResponse(text string, outcome googlegenai.Outcome) *googlegenai.GenerateContentResponse {
 	return &googlegenai.GenerateContentResponse{Candidates: []*googlegenai.Candidate{{Content: &googlegenai.Content{
 		Role: "model",
@@ -63,6 +75,11 @@ func TestClassifyAccuracyPolicyUsesOnlyCurrentIntent(t *testing.T) {
 		{name: "contractions", request: "What's Apple's price right now?", want: AccuracyPolicy{GroundingRequired: true}},
 		{name: "implicit officeholder", request: "Who is the president of Freedonia?", want: AccuracyPolicy{GroundingRequired: true}},
 		{name: "today research", request: "What happened in markets today?", want: AccuracyPolicy{RequiredFunctionNames: []string{runtimeContextFunctionName}, GroundingRequired: true, RuntimeContextRelevant: true}},
+		{name: "channel search", request: "Search this channel for deploy.", want: AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}}},
+		{name: "earlier message", request: "Find Alice's earlier message about launch.", want: AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}}},
+		{name: "what was said here", request: "What did Alice say here before?", want: AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}}},
+		{name: "channel and web", request: "Search this channel and the web for deploy guidance.", want: AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}, GroundingRequired: true}},
+		{name: "channel today", request: "Search this channel for messages from today.", want: AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName, runtimeContextFunctionName}, RuntimeContextRelevant: true}},
 		{name: "calculation", request: "Calculate 17 * 29 exactly.", want: AccuracyPolicy{CodeExecutionEnabled: true}},
 		{name: "conversion", request: "Convert 10 km to miles.", want: AccuracyPolicy{CodeExecutionEnabled: true}},
 		{name: "statistics", request: "What is the average of 4, 8, and 15?", want: AccuracyPolicy{CodeExecutionEnabled: true}},
@@ -75,6 +92,26 @@ func TestClassifyAccuracyPolicyUsesOnlyCurrentIntent(t *testing.T) {
 			assert.Equal(t, test.want, ClassifyAccuracyPolicy(test.request))
 		})
 	}
+}
+
+func TestChannelHistoryValidationRequiresRecordedEvidence(t *testing.T) {
+	policy := AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}}
+	assert.Equal(t, "missing_channel_history_evidence", accuracyValidationFailure(
+		"Alice said deploy at noon.", "What did Alice say here before?", "", policy, nil,
+	))
+	assert.Empty(t, accuracyValidationFailure(
+		"Alice said deploy at noon.", "What did Alice say here before?", "", policy,
+		[]Evidence{{Kind: EvidenceKindChannelHistory, Tool: ChannelSearchFunctionName}},
+	))
+	assert.Equal(t, channelHistoryFailureFallback, accuracyFallback(policy, "missing_channel_history_evidence"))
+}
+
+func TestMergeAccuracyPoliciesUnionsRequiredFunctions(t *testing.T) {
+	got := mergeAccuracyPolicies(
+		AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}},
+		AccuracyPolicy{RequiredFunctionNames: []string{runtimeContextFunctionName, ChannelSearchFunctionName}},
+	)
+	assert.Equal(t, []string{ChannelSearchFunctionName, runtimeContextFunctionName}, got.RequiredFunctionNames)
 }
 
 func TestCurrentRequestExcludesHistoricalTranscript(t *testing.T) {
@@ -184,6 +221,91 @@ func TestGenerateForcesOnlyRequiredRuntimeFunctionThenReturnsToAuto(t *testing.T
 	assert.Equal(t, 2, calls)
 	require.Len(t, got.Evidence, 1)
 	assert.Equal(t, EvidenceKindRuntimeContext, got.Evidence[0].Kind)
+}
+
+func TestGenerateForcesChannelSearchWithoutGoogleSearch(t *testing.T) {
+	calls := 0
+	h := testHandler(func(_ context.Context, _ string, contents []*googlegenai.Content, cfg *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+		calls++
+		switch calls {
+		case 1:
+			require.Len(t, cfg.Tools, 1)
+			require.Len(t, cfg.Tools[0].FunctionDeclarations, 1)
+			assert.Equal(t, ChannelSearchFunctionName, cfg.Tools[0].FunctionDeclarations[0].Name)
+			assert.Nil(t, cfg.Tools[0].GoogleSearch)
+			assert.Equal(t, googlegenai.FunctionCallingConfigModeAny, cfg.ToolConfig.FunctionCallingConfig.Mode)
+			return toolResponse(&googlegenai.FunctionCall{ID: "history", Name: ChannelSearchFunctionName, Args: map[string]any{"query": "deploy"}}), nil
+		case 2:
+			require.Len(t, contents, 3)
+			require.Len(t, cfg.Tools, 1)
+			assert.Nil(t, cfg.Tools[0].GoogleSearch)
+			return response("Alice mentioned the deploy window.", nil), nil
+		default:
+			return nil, errors.New("unexpected generation call")
+		}
+	})
+	got, err := h.Generate(context.Background(), GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "Search this channel for deploy."}},
+		Tools:    []FunctionTool{channelSearchTestTool(nil)},
+		Config:   &RequestConfig{MaxOutputTokens: 512, WebSearchEnabled: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Alice mentioned the deploy window.", got.Text)
+	assert.Equal(t, 2, calls)
+	require.Len(t, got.Evidence, 1)
+	assert.Equal(t, EvidenceKindChannelHistory, got.Evidence[0].Kind)
+}
+
+func TestGenerateRequiresChannelSearchAndWebGrounding(t *testing.T) {
+	calls := 0
+	h := testHandler(func(_ context.Context, _ string, _ []*googlegenai.Content, cfg *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+		calls++
+		switch calls {
+		case 1:
+			require.Len(t, cfg.Tools, 1)
+			assert.Equal(t, ChannelSearchFunctionName, cfg.Tools[0].FunctionDeclarations[0].Name)
+			return toolResponse(&googlegenai.FunctionCall{ID: "history", Name: ChannelSearchFunctionName, Args: map[string]any{"query": "deploy"}}), nil
+		case 2:
+			require.Len(t, cfg.Tools, 2)
+			assert.NotNil(t, cfg.Tools[0].GoogleSearch)
+			return response("The stored note agrees with the external guidance.", &googlegenai.GroundingMetadata{
+				WebSearchQueries: []string{"deploy guidance"},
+				GroundingChunks: []*googlegenai.GroundingChunk{{Web: &googlegenai.GroundingChunkWeb{
+					URI: "https://example.com/deploy-guidance",
+				}}},
+			}), nil
+		default:
+			return nil, errors.New("unexpected generation call")
+		}
+	})
+	got, err := h.Generate(context.Background(), GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "Search this channel and the web for deploy guidance."}},
+		Tools:    []FunctionTool{channelSearchTestTool(nil)},
+		Config:   &RequestConfig{MaxOutputTokens: 512, WebSearchEnabled: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "The stored note agrees with the external guidance.", got.Text)
+	assert.True(t, got.Grounded)
+	require.Len(t, got.Evidence, 2)
+	assert.Equal(t, EvidenceKindChannelHistory, got.Evidence[0].Kind)
+	assert.Equal(t, EvidenceKindWeb, got.Evidence[1].Kind)
+	require.Len(t, got.Sources, 1)
+}
+
+func TestGenerateReturnsChannelHistoryFallbackWhenRequiredToolIsUnavailable(t *testing.T) {
+	calls := 0
+	h := testHandler(func(_ context.Context, _ string, _ []*googlegenai.Content, cfg *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+		calls++
+		assert.Empty(t, cfg.Tools)
+		return response("Alice said deploy at noon.", nil), nil
+	})
+	got, err := h.Generate(context.Background(), GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "Search this channel for deploy."}},
+		Config:   &RequestConfig{MaxOutputTokens: 512, WebSearchEnabled: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, channelHistoryFailureFallback, got.Text)
+	assert.Equal(t, 1, calls)
 }
 
 func TestGenerateRequiresGroundingWhenSearchWasNeverAttempted(t *testing.T) {

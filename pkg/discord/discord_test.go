@@ -45,13 +45,17 @@ type fakeClient struct {
 }
 
 type fakeHistory struct {
-	messages []*discordgo.Message
-	err      error
-	calls    int
+	messages     []*discordgo.Message
+	err          error
+	messagesFunc func(context.Context, string, string, int, string) ([]*discordgo.Message, error)
+	calls        int
 }
 
-func (h *fakeHistory) Messages(context.Context, string, string, int, string) ([]*discordgo.Message, error) {
+func (h *fakeHistory) Messages(ctx context.Context, guildID, channelID string, limit int, before string) ([]*discordgo.Message, error) {
 	h.calls++
+	if h.messagesFunc != nil {
+		return h.messagesFunc(ctx, guildID, channelID, limit, before)
+	}
 	return h.messages, h.err
 }
 
@@ -263,12 +267,13 @@ func TestBuildPromptUsesPartialDatabaseHistoryWithoutDiscordFallback(t *testing.
 	assert.Zero(t, discordCalls)
 }
 
-func TestSearchCurrentChannelScansBoundedRecentMessages(t *testing.T) {
+func TestSearchCurrentChannelPagesStoredHistoryWithoutDiscordFallback(t *testing.T) {
 	var calls []string
-	client := &fakeClient{messages: func(_ context.Context, channelID string, limit int, before string) ([]*discordgo.Message, error) {
+	history := &fakeHistory{messagesFunc: func(_ context.Context, guildID, channelID string, limit int, before string) ([]*discordgo.Message, error) {
+		assert.Equal(t, "guild", guildID)
 		assert.Equal(t, "channel", channelID)
 		calls = append(calls, before)
-		assert.LessOrEqual(t, limit, channelSearchMessages)
+		assert.Equal(t, channelSearchPageSize, limit)
 		switch before {
 		case "current":
 			return []*discordgo.Message{timedMessage("4", "deploy now", "2026-07-08T12:04:00Z"), timedMessage("3", "unrelated", "2026-07-08T12:03:00Z")}, nil
@@ -278,45 +283,136 @@ func TestSearchCurrentChannelScansBoundedRecentMessages(t *testing.T) {
 			return nil, nil
 		}
 	}}
-	p := &Processor{client: client}
-	got, err := p.searchChannel(context.Background(), "guild", "channel", "current", "deploy")
+	discordCalls := 0
+	client := &fakeClient{messages: func(context.Context, string, int, string) ([]*discordgo.Message, error) {
+		discordCalls++
+		return nil, nil
+	}}
+	p := &Processor{client: client, history: history}
+	got, err := p.searchChannel(context.Background(), "guild", "channel", "current", channelSearchCriteria{query: "deploy"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"current", "3", "1"}, calls)
+	assert.Zero(t, discordCalls)
 	assert.Equal(t, 4, got.SearchedMessages)
 	assert.False(t, got.Truncated)
+	assert.False(t, got.Incomplete)
 	require.Len(t, got.Results, 3)
 	assert.Equal(t, "1", got.Results[0].ID)
 	assert.Equal(t, "4", got.Results[2].ID)
+	assert.Equal(t, "u", got.Results[2].AuthorID)
 	assert.Equal(t, "https://discord.com/channels/guild/channel/4", got.Results[2].URL)
 }
 
-func TestSearchCurrentChannelSanitizesAndRequiresQuery(t *testing.T) {
-	client := &fakeClient{messages: func(_ context.Context, _ string, _ int, before string) ([]*discordgo.Message, error) {
+func TestSearchCurrentChannelSanitizesAndAcceptsOptionalCriteria(t *testing.T) {
+	history := &fakeHistory{messagesFunc: func(_ context.Context, _, _ string, _ int, before string) ([]*discordgo.Message, error) {
 		if before != "current" {
 			return nil, nil
 		}
 		return []*discordgo.Message{message("1", "<@bot> see <#123> &amp; deploy")}, nil
 	}}
-	p := &Processor{botID: "bot", client: client}
-	got, err := p.searchChannel(context.Background(), "", "channel", "current", "deploy")
+	p := &Processor{botID: "bot", history: history}
+	got, err := p.searchChannel(context.Background(), "", "channel", "current", channelSearchCriteria{author: "<@u>"})
 	require.NoError(t, err)
 	require.Len(t, got.Results, 1)
 	assert.Equal(t, "see this channel & deploy", got.Results[0].Content)
 	assert.Equal(t, "https://discord.com/channels/@me/channel/1", got.Results[0].URL)
-	_, err = p.searchChannel(context.Background(), "", "channel", "current", "")
-	assert.ErrorContains(t, err, "query is required")
 }
 
-func TestSearchCurrentChannelPassesCancellationToFetch(t *testing.T) {
+func TestSearchCurrentChannelAppliesAuthorAndTimeFilters(t *testing.T) {
+	alice := timedMessage("3", "DEPLOY later", "2026-07-08T12:03:00Z")
+	alice.Author = &discordgo.User{ID: "alice-id", Username: "alice", GlobalName: "Alice Smith"}
+	tooOld := timedMessage("2", "deploy old", "2026-07-08T12:02:59Z")
+	tooOld.Author = alice.Author
+	bob := timedMessage("4", "deploy by Bob", "2026-07-08T12:04:00Z")
+	bob.Author = &discordgo.User{ID: "bob-id", Username: "bob"}
+	atEnd := timedMessage("5", "deploy at exclusive end", "2026-07-08T12:05:00Z")
+	atEnd.Author = alice.Author
+	history := &fakeHistory{messagesFunc: func(_ context.Context, _, _ string, _ int, before string) ([]*discordgo.Message, error) {
+		if before == "current" {
+			return []*discordgo.Message{atEnd, bob, alice, tooOld}, nil
+		}
+		return nil, nil
+	}}
+	start, err := time.Parse(time.RFC3339, "2026-07-08T12:03:00Z")
+	require.NoError(t, err)
+	end, err := time.Parse(time.RFC3339, "2026-07-08T12:05:00Z")
+	require.NoError(t, err)
+	p := &Processor{history: history}
+	got, err := p.searchChannel(context.Background(), "guild", "channel", "current", channelSearchCriteria{
+		query: "deploy", author: "Alice Smith", start: &start, end: &end,
+	})
+	require.NoError(t, err)
+	require.Len(t, got.Results, 1)
+	assert.Equal(t, "3", got.Results[0].ID)
+	assert.Equal(t, "2026-07-08T12:03:00Z", got.StartTime)
+	assert.Equal(t, "2026-07-08T12:05:00Z", got.EndTime)
+}
+
+func TestSearchCurrentChannelStopsAtNewestEightMatches(t *testing.T) {
+	messages := []*discordgo.Message{
+		message("9", "match"), message("8", "match"), message("7", "match"),
+		message("6", "match"), message("5", "match"), message("4", "match"),
+		message("3", "match"), message("2", "match"), message("1", "match"),
+	}
+	history := &fakeHistory{messagesFunc: func(_ context.Context, _, _ string, _ int, _ string) ([]*discordgo.Message, error) {
+		return messages, nil
+	}}
+	p := &Processor{history: history}
+	got, err := p.searchChannel(context.Background(), "guild", "channel", "current", channelSearchCriteria{query: "match"})
+	require.NoError(t, err)
+	assert.True(t, got.Truncated)
+	assert.Equal(t, 8, got.SearchedMessages)
+	require.Len(t, got.Results, 8)
+	assert.Equal(t, "2", got.Results[0].ID)
+	assert.Equal(t, "9", got.Results[7].ID)
+	assert.Equal(t, 1, history.calls)
+}
+
+func TestSearchCurrentChannelReturnsUsablePartialResults(t *testing.T) {
+	history := &fakeHistory{messages: []*discordgo.Message{message("1", "deploy")}, err: errors.New("partial decode")}
+	p := &Processor{history: history}
+	got, err := p.searchChannel(context.Background(), "guild", "channel", "current", channelSearchCriteria{query: "deploy"})
+	require.NoError(t, err)
+	assert.True(t, got.Incomplete)
+	require.Len(t, got.Results, 1)
+
+	p.history = &fakeHistory{err: errors.New("database down")}
+	_, err = p.searchChannel(context.Background(), "guild", "channel", "current", channelSearchCriteria{query: "deploy"})
+	var executionErr *genai.ExecutionError
+	require.ErrorAs(t, err, &executionErr)
+	assert.Equal(t, "channel_search_unavailable", executionErr.Code)
+}
+
+func TestParseChannelSearchCriteriaValidatesInputs(t *testing.T) {
+	criteria, err := parseChannelSearchCriteria(map[string]any{
+		"author": " alice ", "start_time": "2026-07-08T12:03:00-07:00", "end_time": "2026-07-08T20:00:00Z",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "alice", criteria.author)
+	assert.Equal(t, "2026-07-08T19:03:00Z", criteria.start.Format(time.RFC3339))
+
+	for _, args := range []map[string]any{
+		nil,
+		{"query": 1},
+		{"start_time": "not-a-time"},
+		{"start_time": "2026-07-09T00:00:00Z", "end_time": "2026-07-08T00:00:00Z"},
+		{"unknown": "value"},
+	} {
+		_, err := parseChannelSearchCriteria(args)
+		assert.Error(t, err)
+	}
+}
+
+func TestSearchCurrentChannelPassesCancellationToHistory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	fetched := false
-	client := &fakeClient{messages: func(got context.Context, _ string, _ int, _ string) ([]*discordgo.Message, error) {
+	history := &fakeHistory{messagesFunc: func(got context.Context, _, _ string, _ int, _ string) ([]*discordgo.Message, error) {
 		fetched = true
 		return nil, got.Err()
 	}}
-	p := &Processor{client: client}
-	_, err := p.searchChannel(ctx, "guild", "channel", "current", "deploy")
+	p := &Processor{history: history}
+	_, err := p.searchChannel(ctx, "guild", "channel", "current", channelSearchCriteria{query: "deploy"})
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.False(t, fetched)
 }
@@ -327,7 +423,7 @@ func TestProcessUsesPerServerSettings(t *testing.T) {
 	settings := testSettings()
 	settings.GuildPrompt = "Use guild terminology."
 	provider := &countingProvider{settings: settings}
-	p := &Processor{botID: "bot", generator: generator, client: client, configs: provider, version: "v0.6.0"}
+	p := &Processor{botID: "bot", generator: generator, client: client, configs: provider, history: &fakeHistory{}, version: "v0.6.0"}
 	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "question")))
 	assert.Equal(t, "guild", provider.guildID)
 	require.NotNil(t, generator.request)
@@ -361,6 +457,15 @@ func TestProcessExposesRuntimeAndReactionToolsWhenChannelSearchIsDisabled(t *tes
 	settings.ChannelSearchEnabled = false
 	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
 	p := &Processor{botID: "bot", generator: generator, client: &fakeClient{}, configs: &countingProvider{settings: settings}}
+	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "question")))
+	require.Len(t, generator.request.Tools, 2)
+	assert.Equal(t, runtimeContextToolName, generator.request.Tools[0].Name())
+	assert.Equal(t, messageReactionToolName, generator.request.Tools[1].Name())
+}
+
+func TestProcessDoesNotExposeChannelSearchWithoutDynamoDBHistory(t *testing.T) {
+	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
+	p := &Processor{botID: "bot", generator: generator, client: &fakeClient{}, configs: testProvider(t)}
 	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "question")))
 	require.Len(t, generator.request.Tools, 2)
 	assert.Equal(t, runtimeContextToolName, generator.request.Tools[0].Name())

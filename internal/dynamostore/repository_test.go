@@ -191,6 +191,43 @@ func TestMessagesReturnsPartialDecodedHistory(t *testing.T) {
 	assert.Equal(t, strings.Repeat("a", 101), messages[0].Content)
 }
 
+func TestMessagesUsesExclusiveBeforeCursorAcrossSearchPages(t *testing.T) {
+	repository, err := New(&fakeDynamoClient{}, "table", repositoryDefaults())
+	require.NoError(t, err)
+	defer repository.Close()
+	repository.now = func() time.Time { return time.Unix(2000, 0) }
+
+	attributes := func(messageID string) map[string]dynamodbtypes.AttributeValue {
+		event := messageEvent("deploy")
+		event.MessageId = messageID
+		event.GuildId = "guild"
+		item, content := repository.messageItem(event, 30)
+		return marshalMessageAttributes(t, item, content)
+	}
+	var beforeValues []string
+	repository.client = &fakeDynamoClient{query: func(_ context.Context, input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+		before := input.ExpressionAttributeValues[":before"].(*dynamodbtypes.AttributeValueMemberS).Value
+		beforeValues = append(beforeValues, before)
+		switch before {
+		case messageSortKey("123456789012345680"):
+			return &dynamodb.QueryOutput{Items: []map[string]dynamodbtypes.AttributeValue{attributes("123456789012345679")}}, nil
+		case messageSortKey("123456789012345679"):
+			return &dynamodb.QueryOutput{Items: []map[string]dynamodbtypes.AttributeValue{attributes("123456789012345678")}}, nil
+		default:
+			return &dynamodb.QueryOutput{}, nil
+		}
+	}}
+
+	newer, err := repository.Messages(context.Background(), "guild", "channel", 1, "123456789012345680")
+	require.NoError(t, err)
+	require.Len(t, newer, 1)
+	older, err := repository.Messages(context.Background(), "guild", "channel", 1, newer[0].ID)
+	require.NoError(t, err)
+	require.Len(t, older, 1)
+	assert.Equal(t, "123456789012345678", older[0].ID)
+	assert.Equal(t, []string{messageSortKey("123456789012345680"), messageSortKey("123456789012345679")}, beforeValues)
+}
+
 func TestConfigurationMutationMaterializesDefaultsAndDelegates(t *testing.T) {
 	var stored map[string]dynamodbtypes.AttributeValue
 	client := &fakeDynamoClient{}

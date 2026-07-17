@@ -10,6 +10,8 @@ import (
 
 const (
 	runtimeContextFunctionName = "get_runtime_context"
+	// ChannelSearchFunctionName is the model-facing current-channel history tool.
+	ChannelSearchFunctionName = "search_current_channel"
 
 	EvidenceKindRuntimeContext = "runtime_context"
 	EvidenceKindChannelHistory = "channel_history"
@@ -23,6 +25,7 @@ const (
 	groundingDisabledFallback     = "I couldn't verify that current information because web search is disabled for this server."
 	provenanceFailureFallback     = "No source was preserved for that earlier claim, so I can't verify where it came from."
 	runtimeVerificationFallback   = "I couldn't verify the current runtime value, so I don't want to guess."
+	channelHistoryFailureFallback = "I couldn't search stored channel history, so I don't want to guess about earlier messages."
 	timezoneClarificationFallback = "Which IANA timezone should I use, such as `America/Los_Angeles` or `Europe/London`?"
 
 	accuracyRetryPrompt      = "This is the single accuracy correction. Use only successful tool results and recorded evidence in the supplied conversation. Correct every conflicting runtime value. Never invent an internal clock, source, search, tool call, or evidence. If provenance was not preserved in a Sources or Evidence used footer, say so explicitly."
@@ -39,10 +42,14 @@ var (
 	localTimePattern          = regexp.MustCompile(`(?i)\b(?:my|local)\s+(?:time|date|day)\b|\b(?:time|date|day)\b[^.!?]*\b(?:for me|locally)\b`)
 	ianaTimezonePattern       = regexp.MustCompile(`\b[A-Z][A-Za-z_+-]*/[A-Z][A-Za-z_+-]+(?:/[A-Z][A-Za-z_+-]+)?\b`)
 
-	explicitSearchPattern   = regexp.MustCompile(`(?i)\b(?:search|browse|look up|lookup|research|verify|fact[ -]?check|cite|find sources?)\b`)
-	volatilePattern         = regexp.MustCompile(`(?i)\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b.*\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b|\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b.*\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b|\b(?:weather|forecast|news|stock price|sports score|election results?)\b`)
-	implicitVolatilePattern = regexp.MustCompile(`(?i)\bwho (?:is|are) (?:the )?(?:president|prime minister|governor|mayor|ceo|officeholder)\b|\bwhat(?:'s| is) (?:the )?(?:price|score|standings|weather|forecast|news)\b`)
-	todayPattern            = regexp.MustCompile(`(?i)\b(?:today|tonight)\b`)
+	explicitSearchPattern    = regexp.MustCompile(`(?i)\b(?:search|browse|look up|lookup|research|verify|fact[ -]?check|cite|find sources?)\b`)
+	volatilePattern          = regexp.MustCompile(`(?i)\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b.*\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b|\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b.*\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b|\b(?:weather|forecast|news|stock price|sports score|election results?)\b`)
+	implicitVolatilePattern  = regexp.MustCompile(`(?i)\bwho (?:is|are) (?:the )?(?:president|prime minister|governor|mayor|ceo|officeholder)\b|\bwhat(?:'s| is) (?:the )?(?:price|score|standings|weather|forecast|news)\b`)
+	todayPattern             = regexp.MustCompile(`(?i)\b(?:today|tonight)\b`)
+	channelScopePattern      = regexp.MustCompile(`(?i)\b(?:this|the|current) channel\b|\bchannel (?:history|messages?)\b`)
+	channelLookupPattern     = regexp.MustCompile(`(?i)\b(?:search|find|look up|lookup|what did|who said|when did|where did)\b`)
+	historicalMessagePattern = regexp.MustCompile(`(?i)\b(?:earlier|previous|past|older) (?:channel )?messages?\b|\bwhat did\b[^.!?\n]{0,80}\b(?:say|post|write|mention|share)(?:d)?\b[^.!?\n]{0,40}\b(?:here|earlier|before)\b`)
+	webScopePattern          = regexp.MustCompile(`(?i)\b(?:web|internet|online|google|websites?|external sources?)\b`)
 
 	computationPattern = regexp.MustCompile(`(?i)\b(?:calculate|compute|evaluate|solve|equation|exact(?:ly)?|statistics?|standard deviation|variance|median|percentile|unit conversion|convert\s+[-+]?\d+(?:\.\d+)?|data analysis|analy[sz]e (?:this )?(?:data|dataset))\b|\b(?:mean|average|sum|correlation|regression)\b[^.!?]*\d|\bhow many\s+(?:millimeters?|centimeters?|meters?|kilometers?|inches?|feet|yards?|miles?|grams?|kilograms?|ounces?|pounds?)\s+(?:are\s+)?in\b|[-+]?\d+(?:\.\d+)?\s*(?:\+|-|\*|/|\^|=)\s*[-+]?\d`)
 	numericPattern     = regexp.MustCompile(`\d`)
@@ -102,16 +109,22 @@ func ClassifyAccuracyPolicy(request string) AccuracyPolicy {
 	policy := AccuracyPolicy{}
 	if runtimeIntentPattern.MatchString(unquoted) || localTimePattern.MatchString(unquoted) {
 		policy.RuntimeContextRelevant = true
-		policy.RequiredFunctionNames = []string{runtimeContextFunctionName}
+		policy.RequiredFunctionNames = appendRequiredFunction(policy.RequiredFunctionNames, runtimeContextFunctionName)
 	}
-	policy.GroundingRequired = explicitSearchPattern.MatchString(unquoted) || volatilePattern.MatchString(unquoted) || implicitVolatilePattern.MatchString(unquoted)
+	channelHistory := channelHistoryIntent(unquoted)
+	if channelHistory {
+		policy.RequiredFunctionNames = appendRequiredFunction(policy.RequiredFunctionNames, ChannelSearchFunctionName)
+	}
+	explicitWebSearch := explicitSearchPattern.MatchString(unquoted) && (!channelHistory || webScopePattern.MatchString(unquoted))
+	policy.GroundingRequired = explicitWebSearch || (channelHistory && webScopePattern.MatchString(unquoted)) ||
+		volatilePattern.MatchString(unquoted) || implicitVolatilePattern.MatchString(unquoted)
 	if runtimeVersionOnlyPattern.MatchString(unquoted) && !explicitSearchPattern.MatchString(unquoted) {
 		policy.GroundingRequired = false
 	}
 	if todayPattern.MatchString(unquoted) && !policy.RuntimeContextRelevant {
-		policy.GroundingRequired = true
+		policy.GroundingRequired = policy.GroundingRequired || !channelHistory
 		policy.RuntimeContextRelevant = true
-		policy.RequiredFunctionNames = []string{runtimeContextFunctionName}
+		policy.RequiredFunctionNames = appendRequiredFunction(policy.RequiredFunctionNames, runtimeContextFunctionName)
 	}
 	policy.CodeExecutionEnabled = computationPattern.MatchString(unquoted)
 	if strings.Contains(strings.ToLower(unquoted), "time complexity") && !numericPattern.MatchString(unquoted) {
@@ -121,10 +134,25 @@ func ClassifyAccuracyPolicy(request string) AccuracyPolicy {
 	return policy
 }
 
+func channelHistoryIntent(request string) bool {
+	return historicalMessagePattern.MatchString(request) ||
+		(channelScopePattern.MatchString(request) && channelLookupPattern.MatchString(request))
+}
+
+func appendRequiredFunction(names []string, name string) []string {
+	for _, existing := range names {
+		if existing == name {
+			return names
+		}
+	}
+	return append(names, name)
+}
+
 func mergeAccuracyPolicies(configured, classified AccuracyPolicy) AccuracyPolicy {
 	result := configured
-	if len(result.RequiredFunctionNames) == 0 {
-		result.RequiredFunctionNames = append([]string(nil), classified.RequiredFunctionNames...)
+	result.RequiredFunctionNames = append([]string(nil), result.RequiredFunctionNames...)
+	for _, name := range classified.RequiredFunctionNames {
+		result.RequiredFunctionNames = appendRequiredFunction(result.RequiredFunctionNames, name)
 	}
 	result.GroundingRequired = result.GroundingRequired || classified.GroundingRequired
 	result.CodeExecutionEnabled = result.CodeExecutionEnabled || classified.CodeExecutionEnabled
@@ -191,6 +219,11 @@ func accuracyValidationFailure(text, request, history string, policy AccuracyPol
 		return ""
 	}
 
+	if requiredFunction(policy, ChannelSearchFunctionName) {
+		if _, ok := evidenceByKind(evidence, EvidenceKindChannelHistory); !ok {
+			return "missing_channel_history_evidence"
+		}
+	}
 	runtimeEvidence, hasRuntimeEvidence := evidenceByKind(evidence, EvidenceKindRuntimeContext)
 	if policy.RuntimeContextRelevant {
 		if !hasRuntimeEvidence {
@@ -205,6 +238,15 @@ func accuracyValidationFailure(text, request, history string, policy AccuracyPol
 		return "unsolicited_runtime_claim"
 	}
 	return ""
+}
+
+func requiredFunction(policy AccuracyPolicy, name string) bool {
+	for _, required := range policy.RequiredFunctionNames {
+		if required == name {
+			return true
+		}
+	}
+	return false
 }
 
 func volunteeredRuntimeClaim(text, request string) bool {
@@ -394,6 +436,8 @@ func accuracyFallback(policy AccuracyPolicy, failure string) string {
 	switch {
 	case policy.ProvenanceInquiry:
 		return provenanceFailureFallback
+	case failure == "missing_channel_history_evidence":
+		return channelHistoryFailureFallback
 	case strings.HasPrefix(failure, "missing_runtime") || strings.HasPrefix(failure, "runtime_") || failure == "invalid_runtime_evidence":
 		return runtimeVerificationFallback
 	default:

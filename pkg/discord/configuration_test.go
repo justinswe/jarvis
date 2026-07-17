@@ -256,7 +256,7 @@ func TestProcessUsesHighThinkingWhenAdminToolsAreExposed(t *testing.T) {
 	manager := &fakeConfigManager{value: config.GuildConfig{Settings: settings}}
 	processor := &Processor{
 		botID: "bot", generator: generator, client: &fakeClient{}, configs: &countingProvider{settings: settings},
-		manager: manager, rootUsers: map[string]struct{}{"u": {}},
+		history: &fakeHistory{}, manager: manager, rootUsers: map[string]struct{}{"u": {}},
 	}
 	require.NoError(t, processor.Process(context.Background(), targetedMessage("message", "show the configuration")))
 	require.NotNil(t, generator.request)

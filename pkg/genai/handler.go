@@ -77,7 +77,7 @@ Prior Jarvis statements are unverified history, not authoritative facts. A prior
 # Tools and research
 Use tools only when relevant and base claims on their returned results. Never claim to have searched, viewed, changed, or verified something unless the corresponding tool succeeded.
 Call get_runtime_context when asked about Jarvis's identity or version, when asked for the current time, date, or weekday, or when the current date materially affects research. Do not fetch or mention runtime facts in unrelated answers.
-Use a current-channel search tool when the user asks about earlier messages in this Discord channel. Use a message reaction tool when a lightweight reaction improves the interaction, but never instead of a substantive answer when one is needed.
+Use the current-channel search tool when the user asks about earlier messages in this Discord channel. Do not substitute Google Search for stored channel history. Use a message reaction tool when a lightweight reaction improves the interaction, but never instead of a substantive answer when one is needed.
 If a tool returns an error, do not repeat the same failed call. Briefly explain what could not be completed or verified, then answer every unaffected part.
 
 # Output
@@ -308,7 +308,7 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 		functionMode = googlegenai.FunctionCallingConfigModeNone
 		if len(declarations) > 0 {
 			functionMode = googlegenai.FunctionCallingConfigModeAny
-			allowedFunctionNames = append([]string(nil), policy.RequiredFunctionNames...)
+			allowedFunctionNames = functionDeclarationNames(declarations)
 		}
 		searchEnabled = false
 		codeExecutionEnabled = false
@@ -380,7 +380,7 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 			zap.String("validation_failure", failure),
 			zap.Bool("accuracy_retry_available", !trace.accuracyRecoveryUsed),
 		)
-		if failure == "missing_runtime_evidence" || trace.accuracyRecoveryUsed {
+		if failure == "missing_runtime_evidence" || failure == "missing_channel_history_evidence" || trace.accuracyRecoveryUsed {
 			resp = textResponse(accuracyFallback(policy, failure))
 			terminalFallback = true
 		} else {
@@ -648,7 +648,7 @@ func (h *Handler) resolveFunctionCalls(ctx context.Context, req GenerateRequest,
 		resp, err = h.generateAttempt(ctx, req, generationConfig, contents, generationAttempt{
 			kind:                 attemptToolFollowup,
 			toolRound:            round + 1,
-			searchEnabled:        generationConfig.WebSearchEnabled,
+			searchEnabled:        functionFollowupSearchEnabled(generationConfig),
 			declarations:         declarations,
 			functionMode:         functionMode,
 			codeExecutionEnabled: generationConfig.AccuracyPolicy.CodeExecutionEnabled,
@@ -658,6 +658,10 @@ func (h *Handler) resolveFunctionCalls(ctx context.Context, req GenerateRequest,
 		}
 	}
 	return resp, contents, nil
+}
+
+func functionFollowupSearchEnabled(config RequestConfig) bool {
+	return config.WebSearchEnabled && (config.AccuracyPolicy.GroundingRequired || len(config.AccuracyPolicy.RequiredFunctionNames) == 0)
 }
 
 func (h *Handler) recoverEmptyResponse(ctx context.Context, req GenerateRequest, generationConfig RequestConfig, contents []*googlegenai.Content, resp *googlegenai.GenerateContentResponse, toolDisabledFallback bool, trace *generationTrace) (responseRecovery, error) {
@@ -870,7 +874,7 @@ func (h *Handler) finalizeFunctionCalls(ctx context.Context, req GenerateRequest
 	final, err := h.generateAttempt(ctx, req, generationConfig, contents, generationAttempt{
 		kind:                 attemptToolFinalization,
 		toolRound:            maxToolRounds,
-		searchEnabled:        generationConfig.WebSearchEnabled,
+		searchEnabled:        functionFollowupSearchEnabled(generationConfig),
 		functionMode:         googlegenai.FunctionCallingConfigModeNone,
 		codeExecutionEnabled: generationConfig.AccuracyPolicy.CodeExecutionEnabled,
 	}, trace)
@@ -896,7 +900,7 @@ func (h *Handler) finalizeFunctionCalls(ctx context.Context, req GenerateRequest
 	recovery, err := h.generateAttempt(ctx, req, generationConfig, contents, generationAttempt{
 		kind:                 attemptToolErrorRecovery,
 		toolRound:            maxToolRounds + 1,
-		searchEnabled:        generationConfig.WebSearchEnabled,
+		searchEnabled:        functionFollowupSearchEnabled(generationConfig),
 		functionMode:         googlegenai.FunctionCallingConfigModeNone,
 		codeExecutionEnabled: generationConfig.AccuracyPolicy.CodeExecutionEnabled,
 	}, trace)
