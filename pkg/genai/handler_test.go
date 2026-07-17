@@ -131,9 +131,9 @@ func TestAnalyzeGroundingPrioritizesSupportedValidSources(t *testing.T) {
 		SearchEntryPoint:  &googlegenai.SearchEntryPoint{RenderedContent: "<div>suggestion</div>"},
 		GroundingSupports: []*googlegenai.GroundingSupport{{GroundingChunkIndices: []int32{2, 0}}},
 		GroundingChunks: []*googlegenai.GroundingChunk{
-			{Web: &googlegenai.GroundingChunkWeb{Title: "One", URI: "HTTPS://ONE.example/a#fragment"}},
+			{Web: &googlegenai.GroundingChunkWeb{Title: "One", Domain: "one.example", URI: "HTTPS://ONE.example/a#fragment"}},
 			{Web: &googlegenai.GroundingChunkWeb{Title: "Invalid", URI: "ftp://invalid.example"}},
-			{Web: &googlegenai.GroundingChunkWeb{Title: "Two", URI: "https://two.example/b"}},
+			{Web: &googlegenai.GroundingChunkWeb{Title: "Two", Domain: "two.example", URI: "https://two.example/b"}},
 			{Web: &googlegenai.GroundingChunkWeb{Title: "Duplicate", URI: "https://one.example/a"}},
 		},
 	})
@@ -150,7 +150,7 @@ func TestAnalyzeGroundingPrioritizesSupportedValidSources(t *testing.T) {
 	assert.Equal(t, 2, diagnostics.validSourceCount)
 	assert.Equal(t, 1, diagnostics.invalidSourceCount)
 	assert.Equal(t, 1, diagnostics.duplicateSourceCount)
-	assert.Equal(t, []Source{{Title: "Two", URL: "https://two.example/b"}, {Title: "One", URL: "https://one.example/a"}}, diagnostics.sources)
+	assert.Equal(t, []Source{{Title: "Two", Domain: "two.example", URL: "https://two.example/b"}, {Title: "One", Domain: "one.example", URL: "https://one.example/a"}}, diagnostics.sources)
 	assert.Equal(t, []string{"one.example", "two.example"}, diagnostics.sourceDomains)
 }
 

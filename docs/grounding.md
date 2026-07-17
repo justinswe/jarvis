@@ -17,10 +17,10 @@ Optional Search requests for which Gemini emits no search query retain the model
 Up to three unique sources are appended to the Discord response in a compact footer:
 
 ```text
--# Sources: [1](https://example.com) · [2](https://example.org)
+-# Sources: [example.com](https://example.com) · [example.org](https://example.org)
 ```
 
-Discord cannot render the exact HTML/CSS Google Search suggestion supplied in `SearchEntryPoint.RenderedContent`. Jarvis logs when that content is present but intentionally uses the Discord-native numbered footer instead.
+Discord cannot render the exact HTML/CSS Google Search suggestion supplied in `SearchEntryPoint.RenderedContent`. Jarvis logs when that content is present but intentionally uses a Discord-native domain-labeled footer instead.
 
 Successful non-web evidence is appended separately so it persists in Discord and DynamoDB history:
 

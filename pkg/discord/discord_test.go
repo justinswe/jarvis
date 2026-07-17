@@ -560,8 +560,31 @@ func TestReactionCleanupSurvivesRequestCancellation(t *testing.T) {
 }
 
 func TestAppendSources(t *testing.T) {
-	got := appendSources("answer", []genai.Source{{Title: "One", URL: "https://one"}, {Title: "Two", URL: "https://two"}, {Title: "Three", URL: "https://three"}, {Title: "Four", URL: "https://four"}})
-	assert.Equal(t, "answer\n\n-# Sources: [1](https://one) · [2](https://two) · [3](https://three)", got)
+	got := appendSources("answer", []genai.Source{
+		{Domain: "news.Example.com", URL: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/one"},
+		{Domain: "www.bbc.co.uk", URL: "https://two.example/article"},
+		{URL: "https://updates.three.example.org/article"},
+		{Domain: "four.example", URL: "https://four.example/article"},
+	})
+	assert.Equal(t, "answer\n\n-# Sources: [example.com](https://vertexaisearch.cloud.google.com/grounding-api-redirect/one) · [bbc.co.uk](https://two.example/article) · [example.org](https://updates.three.example.org/article)", got)
+}
+
+func TestAppendSourcesSkipsInvalidURLs(t *testing.T) {
+	got := appendSources("answer", []genai.Source{
+		{Domain: "ignored.example", URL: "ftp://ignored.example/article"},
+		{Domain: "ignored.example", URL: "://invalid"},
+		{URL: "https://192.0.2.1/article"},
+		{URL: "https://localhost/article"},
+	})
+	assert.Equal(t, "answer\n\n-# Sources: [192.0.2.1](https://192.0.2.1/article) · [localhost](https://localhost/article)", got)
+}
+
+func TestAppendSourcesPreservesRepeatedDomains(t *testing.T) {
+	got := appendSources("answer", []genai.Source{
+		{Domain: "news.example.com", URL: "https://example.com/one"},
+		{Domain: "www.example.com", URL: "https://example.com/two"},
+	})
+	assert.Equal(t, "answer\n\n-# Sources: [example.com](https://example.com/one) · [example.com](https://example.com/two)", got)
 }
 
 func TestAppendEvidenceUsesCompactNonWebFooter(t *testing.T) {

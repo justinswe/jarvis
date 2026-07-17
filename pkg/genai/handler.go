@@ -120,8 +120,9 @@ type RequestConfig struct {
 }
 
 type Source struct {
-	Title string
-	URL   string
+	Title  string
+	Domain string
+	URL    string
 }
 
 // FunctionTool is a model-callable function available for one generation.
@@ -1387,7 +1388,11 @@ func analyzeGrounding(resp *googlegenai.GenerateContentResponse, sourceLimit int
 			if title == "" {
 				title = domain
 			}
-			diagnostics.sources = append(diagnostics.sources, Source{Title: title, URL: normalizedURL})
+			diagnostics.sources = append(diagnostics.sources, Source{
+				Title:  title,
+				Domain: strings.TrimSpace(chunk.Web.Domain),
+				URL:    normalizedURL,
+			})
 		}
 	}
 

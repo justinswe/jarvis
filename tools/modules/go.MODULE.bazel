@@ -29,5 +29,6 @@ use_repo(
     "org_golang_google_genai",
     "org_golang_google_grpc",
     "org_golang_google_protobuf",
+    "org_golang_x_net",
     "org_uber_go_zap",
 )
