@@ -8,6 +8,7 @@ go_library(
         "formatting.go",
         "image.go",
         "message.go",
+        "queue.go",
         "reaction.go",
         "runtime_context.go",
         "search.go",
@@ -33,6 +34,7 @@ go_test(
     srcs = [
         "configuration_test.go",
         "discord_test.go",
+        "queue_test.go",
         "reaction_test.go",
         "runtime_context_test.go",
     ],

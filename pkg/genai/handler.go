@@ -612,14 +612,14 @@ func (h *Handler) requestConfig(requestConfig *RequestConfig) (RequestConfig, er
 			Prompt:           h.cfg.DefaultPrompt,
 			MaxOutputTokens:  h.cfg.MaxOutputTokens,
 			WebSearchEnabled: true,
-			ThinkingLevel:    googlegenai.ThinkingLevelHigh,
+			ThinkingLevel:    googlegenai.ThinkingLevelMedium,
 		}, nil
 	}
 	if requestConfig.MaxOutputTokens < 1 || requestConfig.MaxOutputTokens > MaxOutputTokensLimit {
 		return RequestConfig{}, errors.Errorf("max-output-tokens must be between 1 and %d", MaxOutputTokensLimit)
 	}
 	if requestConfig.ThinkingLevel == "" {
-		requestConfig.ThinkingLevel = googlegenai.ThinkingLevelHigh
+		requestConfig.ThinkingLevel = googlegenai.ThinkingLevelMedium
 	}
 	if requestConfig.ThinkingLevel != googlegenai.ThinkingLevelMedium && requestConfig.ThinkingLevel != googlegenai.ThinkingLevelHigh {
 		return RequestConfig{}, errors.New("thinking level must be MEDIUM or HIGH")

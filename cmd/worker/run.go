@@ -113,7 +113,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 	}
 
 	address := cfg.address()
-	app.L().Info("Starting stateless worker", zap.String("address", address))
+	app.L().Info("Starting worker", zap.String("address", address))
 	return workerservice.Serve(ctx, address, processor, recorder)
 }
 
