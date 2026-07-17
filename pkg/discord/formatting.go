@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/pkg/genai"
 	"github.com/justinswe/std/errors"
+	"golang.org/x/net/publicsuffix"
 )
 
 var botPrefixPattern = regexp.MustCompile(`(?i)^(?:\s*(?:jarvis|jarvischat)\s*[:\-]\s*)+`)
@@ -21,15 +24,49 @@ func appendSources(text string, sources []genai.Source) string {
 		if len(links) == 3 {
 			break
 		}
-		url := strings.TrimSpace(source.URL)
-		if url != "" {
-			links = append(links, fmt.Sprintf("[%d](%s)", len(links)+1, url))
+		link, ok := formatSourceLink(source)
+		if ok {
+			links = append(links, link)
 		}
 	}
 	if len(links) == 0 {
 		return text
 	}
 	return strings.TrimSpace(text) + "\n\n-# Sources: " + strings.Join(links, " · ")
+}
+
+// formatSourceLink creates a Discord link labeled with its source domain.
+func formatSourceLink(source genai.Source) (string, bool) {
+	rawURL := strings.TrimSpace(source.URL)
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.User != nil || parsedURL.Host == "" {
+		return "", false
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return "", false
+	}
+
+	domain := baseDomain(source.Domain)
+	if domain == "" {
+		domain = baseDomain(parsedURL.Hostname())
+	}
+	if domain == "" {
+		return "", false
+	}
+	return fmt.Sprintf("[%s](%s)", domain, rawURL), true
+}
+
+// baseDomain reduces a hostname to its registrable domain when possible.
+func baseDomain(raw string) string {
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if domain == "" || net.ParseIP(domain) != nil {
+		return domain
+	}
+	registrableDomain, err := publicsuffix.EffectiveTLDPlusOne(domain)
+	if err != nil {
+		return domain
+	}
+	return registrableDomain
 }
 
 func appendEvidence(text string, evidence []genai.Evidence) string {
