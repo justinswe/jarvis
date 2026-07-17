@@ -430,7 +430,6 @@ type guildConfigItem struct {
 	ChannelMessages       int      `dynamodbav:"channel_messages"`
 	HistoryRunes          int      `dynamodbav:"history_runes"`
 	MaxOutputTokens       int      `dynamodbav:"max_output_tokens"`
-	Temperature           float32  `dynamodbav:"temperature"`
 	MessageTimeoutSeconds int64    `dynamodbav:"message_timeout_seconds"`
 	MessageRetentionDays  int      `dynamodbav:"message_retention_days"`
 	WebSearchEnabled      bool     `dynamodbav:"web_search_enabled"`
@@ -448,8 +447,8 @@ func newGuildConfigItem(guildID, actorID string, value config.GuildConfig, updat
 		Prompt: settings.Prompt, GuildPrompt: settings.GuildPrompt,
 		ThreadMessages: settings.ThreadMessages, ParentMessages: settings.ParentMessages,
 		ChannelMessages: settings.ChannelMessages, HistoryRunes: settings.HistoryRunes, MaxOutputTokens: settings.MaxOutputTokens,
-		Temperature: settings.Temperature, MessageTimeoutSeconds: int64(settings.MessageTimeout / time.Second),
-		MessageRetentionDays: settings.MessageRetentionDays, WebSearchEnabled: settings.WebSearchEnabled,
+		MessageTimeoutSeconds: int64(settings.MessageTimeout / time.Second),
+		MessageRetentionDays:  settings.MessageRetentionDays, WebSearchEnabled: settings.WebSearchEnabled,
 		ChannelSearchEnabled: settings.ChannelSearchEnabled, AdminUserIDs: value.AdminUserIDs, Version: value.Version,
 		UpdatedAtMillis: updatedAt.UTC().UnixMilli(), UpdatedByUserID: actorID,
 	}
@@ -461,7 +460,7 @@ func (i guildConfigItem) config() config.GuildConfig {
 			Prompt: i.Prompt, GuildPrompt: i.GuildPrompt,
 			ThreadMessages: i.ThreadMessages, ParentMessages: i.ParentMessages,
 			ChannelMessages: i.ChannelMessages, HistoryRunes: i.HistoryRunes, MaxOutputTokens: i.MaxOutputTokens,
-			Temperature: i.Temperature, MessageTimeout: time.Duration(i.MessageTimeoutSeconds) * time.Second,
+			MessageTimeout:       time.Duration(i.MessageTimeoutSeconds) * time.Second,
 			MessageRetentionDays: i.MessageRetentionDays, WebSearchEnabled: i.WebSearchEnabled,
 			ChannelSearchEnabled: i.ChannelSearchEnabled,
 		},

@@ -145,6 +145,7 @@ func TestConfigurationToolSchemasLimitProtectedSettingsToRootUsers(t *testing.T)
 	for _, field := range []string{"prompt", "thread_context_window", "parent_context_window", "message_retention_days"} {
 		assert.Contains(t, base.Declaration().Parameters.Properties, field)
 	}
+	assert.NotContains(t, base.Declaration().Parameters.Properties, "temperature")
 }
 
 func TestConfigurationToolsUpdateAndDelegate(t *testing.T) {
@@ -157,7 +158,6 @@ func TestConfigurationToolsUpdateAndDelegate(t *testing.T) {
 		"message_retention_days": int64(90),
 		"parent_context_window":  int64(6),
 		"prompt":                 "Root-controlled Jarvis",
-		"temperature":            float32(0.5),
 		"thread_context_window":  int64(20),
 	})
 	require.NoError(t, err)
@@ -166,12 +166,16 @@ func TestConfigurationToolsUpdateAndDelegate(t *testing.T) {
 	assert.Equal(t, 90, response.MessageRetentionDays)
 	assert.Equal(t, 6, response.ParentMessages)
 	assert.Equal(t, "Root-controlled Jarvis", response.Prompt)
-	assert.Equal(t, float32(0.5), response.Temperature)
 	assert.Equal(t, 20, response.ThreadMessages)
 	assert.Equal(t, []string{
-		"message_retention_days", "parent_context_window", "prompt", "temperature", "thread_context_window",
+		"message_retention_days", "parent_context_window", "prompt", "thread_context_window",
 	}, response.ChangedFields)
 	assert.Equal(t, "123456789012345678", manager.lastActor)
+
+	_, err = root.Execute(context.Background(), map[string]any{"temperature": float32(0.5)})
+	var removedSetting *genai.ExecutionError
+	require.ErrorAs(t, err, &removedSetting)
+	assert.Equal(t, "invalid_configuration", removedSetting.Code)
 
 	nonRoot := root
 	nonRoot.root = false

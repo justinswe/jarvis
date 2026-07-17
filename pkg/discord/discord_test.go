@@ -15,6 +15,7 @@ import (
 	"github.com/justinswe/std/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	googlegenai "google.golang.org/genai"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -118,7 +119,6 @@ func testSettings() config.ServerSettings {
 		ChannelMessages:      8,
 		HistoryRunes:         6000,
 		MaxOutputTokens:      256,
-		Temperature:          1.2,
 		MessageTimeout:       time.Minute,
 		MessageRetentionDays: config.DefaultMessageRetentionDays,
 		WebSearchEnabled:     true,
@@ -154,6 +154,16 @@ func TestBuildContextPrunesParentThenOldestAndKeepsCurrent(t *testing.T) {
 	assert.NotContains(t, got, "oldold")
 	assert.Contains(t, got, "new thread")
 	assert.Contains(t, got, "CURRENT REQUEST:\nmust stay")
+}
+
+func TestFormatTranscriptIncludesUTCTimestampAndBotMarker(t *testing.T) {
+	user := timedMessage("1", "hello", "2026-07-16T18:30:00-07:00")
+	bot := timedMessage("2", "answer", "2026-07-17T01:31:00Z")
+	bot.Author = &discordgo.User{ID: "bot", Username: "Jarvis", Bot: true}
+	assert.Equal(t,
+		"[2026-07-17T01:30:00Z] alice: hello\n[2026-07-17T01:31:00Z] Jarvis [bot]: answer",
+		formatTranscript([]*discordgo.Message{user, bot}),
+	)
 }
 
 func TestBuildPromptUsesConfiguredHistoryLimits(t *testing.T) {
@@ -233,7 +243,7 @@ func TestBuildPromptIncludesConfiguredParentChannelMessages(t *testing.T) {
 	got, err := p.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "parent"}, m, settings)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	assert.Contains(t, got[0].Content, "PARENT CHANNEL:\nalice: old parent\nalice: new parent")
+	assert.Contains(t, got[0].Content, "PARENT CHANNEL:\n[timestamp unavailable] alice: old parent\n[timestamp unavailable] alice: new parent")
 }
 
 func TestBuildPromptUsesPartialDatabaseHistoryWithoutDiscordFallback(t *testing.T) {
@@ -325,6 +335,8 @@ func TestProcessUsesPerServerSettings(t *testing.T) {
 	assert.Equal(t, "Jarvis\n\nGuild-specific instructions:\nUse guild terminology.", generator.request.Config.Prompt)
 	assert.Equal(t, 256, generator.request.Config.MaxOutputTokens)
 	assert.True(t, generator.request.Config.WebSearchEnabled)
+	assert.Equal(t, googlegenai.ThinkingLevelHigh, generator.request.Config.ThinkingLevel)
+	assert.Equal(t, genai.AccuracyPolicy{}, generator.request.Config.AccuracyPolicy)
 	require.Len(t, generator.request.Tools, 3)
 	assert.Equal(t, runtimeContextToolName, generator.request.Tools[0].Name())
 	runtimeResult, err := generator.request.Tools[0].Execute(context.Background(), nil)
@@ -332,6 +344,16 @@ func TestProcessUsesPerServerSettings(t *testing.T) {
 	assert.Equal(t, "v0.6.0", runtimeResult.(runtimeContextResponse).Version)
 	assert.Equal(t, messageReactionToolName, generator.request.Tools[1].Name())
 	assert.Equal(t, channelSearchToolName, generator.request.Tools[2].Name())
+}
+
+func TestProcessClassifiesOnlySanitizedCurrentRequest(t *testing.T) {
+	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
+	p := &Processor{botID: "bot", generator: generator, client: &fakeClient{}, configs: testProvider(t)}
+	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "What time is it?")))
+	require.NotNil(t, generator.request)
+	assert.Equal(t, genai.AccuracyPolicy{
+		RequiredFunctionNames: []string{runtimeContextToolName}, RuntimeContextRelevant: true,
+	}, generator.request.Config.AccuracyPolicy)
 }
 
 func TestProcessExposesRuntimeAndReactionToolsWhenChannelSearchIsDisabled(t *testing.T) {
@@ -435,6 +457,31 @@ func TestReactionCleanupSurvivesRequestCancellation(t *testing.T) {
 func TestAppendSources(t *testing.T) {
 	got := appendSources("answer", []genai.Source{{Title: "One", URL: "https://one"}, {Title: "Two", URL: "https://two"}, {Title: "Three", URL: "https://three"}, {Title: "Four", URL: "https://four"}})
 	assert.Equal(t, "answer\n\n-# Sources: [1](https://one) · [2](https://two) · [3](https://three)", got)
+}
+
+func TestAppendEvidenceUsesCompactNonWebFooter(t *testing.T) {
+	got := appendEvidence("answer", []genai.Evidence{
+		{Kind: genai.EvidenceKindRuntimeContext},
+		{Kind: genai.EvidenceKindWeb},
+		{Kind: genai.EvidenceKindChannelHistory},
+		{Kind: genai.EvidenceKindRuntimeContext},
+		{Kind: genai.EvidenceKindCodeExecution},
+	})
+	assert.Equal(t, "answer\n\n-# Evidence used: runtime context · channel history · code execution", got)
+}
+
+func TestProcessPersistsEvidenceFooterInDiscordReply(t *testing.T) {
+	var sent string
+	client := &fakeClient{sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
+		sent = content
+		return &discordgo.Message{}, nil
+	}}
+	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "18:30 UTC", Evidence: []genai.Evidence{
+		{Kind: genai.EvidenceKindRuntimeContext}, {Kind: genai.EvidenceKindWeb},
+	}}}
+	p := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t)}
+	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "What time is it?")))
+	assert.Equal(t, "18:30 UTC\n\n-# Evidence used: runtime context", sent)
 }
 
 func TestSplitMessageForDiscord(t *testing.T) {

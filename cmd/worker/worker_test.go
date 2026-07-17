@@ -11,6 +11,7 @@ import (
 
 func TestWorkerConfigDefaults(t *testing.T) {
 	command := newRootCommand()
+	assert.Nil(t, command.Flags().Lookup("temperature"))
 	port, err := command.Flags().GetString("port")
 	require.NoError(t, err)
 	location, err := command.Flags().GetString("location")

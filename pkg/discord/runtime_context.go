@@ -66,6 +66,26 @@ func (t runtimeContextTool) Execute(_ context.Context, args map[string]any) (any
 	}, nil
 }
 
+// Evidence records safe runtime values after a successful execution.
+func (runtimeContextTool) Evidence(output any) (genai.Evidence, bool) {
+	response, ok := output.(runtimeContextResponse)
+	if !ok {
+		return genai.Evidence{}, false
+	}
+	return genai.Evidence{
+		Kind: genai.EvidenceKindRuntimeContext,
+		Tool: runtimeContextToolName,
+		Attributes: map[string]string{
+			"assistant_name": response.AssistantName,
+			"version":        response.Version,
+			"timezone":       response.Timezone,
+			"current_time":   response.CurrentTime,
+			"current_date":   response.CurrentDate,
+			"weekday":        response.Weekday,
+		},
+	}, true
+}
+
 func runtimeTimezone(args map[string]any) (*time.Location, error) {
 	value, exists := args["timezone"]
 	if !exists {

@@ -123,9 +123,9 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		Config: &genai.RequestConfig{
 			Prompt:           settings.EffectivePrompt(),
 			MaxOutputTokens:  settings.MaxOutputTokens,
-			Temperature:      settings.Temperature,
 			WebSearchEnabled: settings.WebSearchEnabled,
-			ThinkingLevel:    googlegenai.ThinkingLevelMedium,
+			ThinkingLevel:    googlegenai.ThinkingLevelHigh,
+			AccuracyPolicy:   genai.ClassifyAccuracyPolicy(sanitizeContent(m.Content, p.botID)),
 		},
 	}
 	request.Tools = append(request.Tools, p.runtimeContext())
@@ -135,7 +135,6 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	}
 	if tools, authorized := p.configurationTools(ctx, m, guildConfig); authorized {
 		request.Tools = append(request.Tools, tools...)
-		request.Config.ThinkingLevel = googlegenai.ThinkingLevelHigh
 	}
 	response, err := p.generator.Generate(ctx, request)
 	if err != nil {
@@ -160,6 +159,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	if response.Grounded && len(response.Sources) > 0 {
 		reply = appendSources(reply, response.Sources)
 	}
+	reply = appendEvidence(reply, response.Evidence)
 	if err := p.sendReply(replyCtx, channel, m, reply); err != nil {
 		app.L().Warn("Failed to post Discord reply", append(fields,
 			zap.Duration("duration", time.Since(started)),
@@ -173,6 +173,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		zap.Duration("duration", time.Since(started)),
 		zap.Bool("grounded", response.Grounded),
 		zap.Int("source_count", len(response.Sources)),
+		zap.Int("evidence_count", len(response.Evidence)),
 		zap.Int("response_runes", len([]rune(reply))),
 	)...)
 	return nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/internal/config"
@@ -131,7 +132,15 @@ func formatTranscript(messages []*discordgo.Message) string {
 		}
 		content := sanitizeContent(message.Content, "")
 		if content != "" {
-			lines = append(lines, fmt.Sprintf("%s: %s", displayName(message.Author), content))
+			timestamp := "timestamp unavailable"
+			if !message.Timestamp.IsZero() {
+				timestamp = message.Timestamp.UTC().Format(time.RFC3339)
+			}
+			author := displayName(message.Author)
+			if message.Author.Bot {
+				author += " [bot]"
+			}
+			lines = append(lines, fmt.Sprintf("[%s] %s: %s", timestamp, author, content))
 		}
 	}
 	return strings.Join(lines, "\n")

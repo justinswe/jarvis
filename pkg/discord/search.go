@@ -63,6 +63,11 @@ func (t channelSearchTool) Execute(ctx context.Context, args map[string]any) (an
 	return t.processor.searchChannel(ctx, t.guildID, t.channelID, t.beforeID, query)
 }
 
+// Evidence records that current-channel history was successfully searched.
+func (channelSearchTool) Evidence(any) (genai.Evidence, bool) {
+	return genai.Evidence{Kind: genai.EvidenceKindChannelHistory, Tool: channelSearchToolName}, true
+}
+
 func (p *Processor) searchChannel(ctx context.Context, guildID, channelID, beforeID, query string) (channelSearchResponse, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {

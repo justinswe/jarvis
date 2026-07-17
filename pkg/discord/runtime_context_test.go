@@ -62,3 +62,17 @@ func TestRuntimeContextDeclarationMakesTimezoneOptional(t *testing.T) {
 	require.Contains(t, declaration.Parameters.Properties, "timezone")
 	assert.Empty(t, declaration.Parameters.Required)
 }
+
+func TestRuntimeContextProducesSafeEvidence(t *testing.T) {
+	tool := runtimeContextTool{version: "v0.6.0", now: func() time.Time {
+		return time.Date(2026, time.July, 16, 18, 30, 45, 0, time.UTC)
+	}}
+	output, err := tool.Execute(context.Background(), nil)
+	require.NoError(t, err)
+	evidence, ok := tool.Evidence(output)
+	require.True(t, ok)
+	assert.Equal(t, genai.EvidenceKindRuntimeContext, evidence.Kind)
+	assert.Equal(t, runtimeContextToolName, evidence.Tool)
+	assert.Equal(t, "2026-07-16T18:30:45Z", evidence.Attributes["current_time"])
+	assert.Equal(t, "v0.6.0", evidence.Attributes["version"])
+}

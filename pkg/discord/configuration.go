@@ -46,7 +46,6 @@ type configurationResponse struct {
 	ChannelMessages       int      `json:"channel_context_window,omitempty"`
 	HistoryRunes          int      `json:"history_runes,omitempty"`
 	MaxOutputTokens       int      `json:"max_output_tokens,omitempty"`
-	Temperature           float32  `json:"temperature,omitempty"`
 	MessageTimeoutSeconds int64    `json:"message_timeout_seconds,omitempty"`
 	MessageRetentionDays  int      `json:"message_retention_days,omitempty"`
 	WebSearchEnabled      bool     `json:"web_search_enabled,omitempty"`
@@ -125,7 +124,6 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 			"max_output_tokens": integerSchema(
 				"Maximum total generated tokens, including thinking and visible text.", 1, genai.MaxOutputTokensLimit,
 			),
-			"temperature":             numberSchema("Gemini sampling temperature.", 0, 2),
 			"message_timeout_seconds": integerMinimumSchema("Overall processing timeout in whole seconds.", 1),
 			"web_search_enabled":      booleanSchema("Whether Google Search may be used for this server."),
 			"channel_search_enabled":  booleanSchema("Whether recent current-channel search may be used for this server."),
@@ -253,8 +251,6 @@ func configurationPatch(args map[string]any) (config.Patch, []string, error) {
 			patch.HistoryRunes, err = intArgument(value, name)
 		case "max_output_tokens":
 			patch.MaxOutputTokens, err = intArgument(value, name)
-		case "temperature":
-			patch.Temperature, err = floatArgument(value, name)
 		case "message_timeout_seconds":
 			var seconds *int
 			seconds, err = intArgument(value, name)
@@ -303,7 +299,6 @@ func responseFromConfig(value config.GuildConfig, changed []string, root bool, a
 	response.ChannelMessages = settings.ChannelMessages
 	response.HistoryRunes = settings.HistoryRunes
 	response.MaxOutputTokens = settings.MaxOutputTokens
-	response.Temperature = settings.Temperature
 	response.MessageTimeoutSeconds = int64(settings.MessageTimeout / time.Second)
 	response.MessageRetentionDays = settings.MessageRetentionDays
 	response.WebSearchEnabled = settings.WebSearchEnabled
@@ -383,29 +378,6 @@ func intArgument(value any, name string) (*int, error) {
 	return &result, nil
 }
 
-func floatArgument(value any, name string) (*float32, error) {
-	var number float64
-	switch value := value.(type) {
-	case int:
-		number = float64(value)
-	case int32:
-		number = float64(value)
-	case int64:
-		number = float64(value)
-	case float32:
-		number = float64(value)
-	case float64:
-		number = value
-	default:
-		return nil, errors.Errorf("%s must be a number", name)
-	}
-	if math.IsNaN(number) || math.IsInf(number, 0) || number < -math.MaxFloat32 || number > math.MaxFloat32 {
-		return nil, errors.Errorf("%s must be a number", name)
-	}
-	result := float32(number)
-	return &result, nil
-}
-
 func boolArgument(value any, name string) (*bool, error) {
 	result, ok := value.(bool)
 	if !ok {
@@ -439,8 +411,4 @@ func integerSchema(description string, minimum, maximum int) *googlegenai.Schema
 func integerMinimumSchema(description string, minimum int) *googlegenai.Schema {
 	minValue := float64(minimum)
 	return &googlegenai.Schema{Type: googlegenai.TypeInteger, Description: description, Minimum: &minValue}
-}
-
-func numberSchema(description string, minimum, maximum float64) *googlegenai.Schema {
-	return &googlegenai.Schema{Type: googlegenai.TypeNumber, Description: description, Minimum: &minimum, Maximum: &maximum}
 }

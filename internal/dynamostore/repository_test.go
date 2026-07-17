@@ -47,7 +47,7 @@ func (c *fakeDynamoClient) Query(ctx context.Context, input *dynamodb.QueryInput
 func repositoryDefaults() config.GuildConfig {
 	return config.GuildConfig{Settings: config.ServerSettings{
 		Prompt: "Jarvis", ThreadMessages: 15, ParentMessages: 10, ChannelMessages: 4, HistoryRunes: 4000,
-		MaxOutputTokens: 256, Temperature: 1.4, MessageTimeout: time.Minute,
+		MaxOutputTokens: 256, MessageTimeout: time.Minute,
 		MessageRetentionDays: config.DefaultMessageRetentionDays, WebSearchEnabled: true, ChannelSearchEnabled: true,
 	}}
 }
@@ -250,6 +250,51 @@ func TestConfigurationPersistsGuildPromptAndLoadsMissingField(t *testing.T) {
 	loaded, err = repository.Load(context.Background(), "guild")
 	require.NoError(t, err)
 	assert.Empty(t, loaded.Settings.GuildPrompt)
+}
+
+func TestConfigurationIgnoresLegacyTemperatureAttribute(t *testing.T) {
+	value := repositoryDefaults()
+	value.Version = 3
+	attributes, err := attributevalue.MarshalMap(newGuildConfigItem("guild", "admin", value, time.Unix(1, 0)))
+	require.NoError(t, err)
+	assert.NotContains(t, attributes, "temperature")
+	attributes["temperature"] = &dynamodbtypes.AttributeValueMemberN{Value: "1.4"}
+	client := &fakeDynamoClient{get: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		return &dynamodb.GetItemOutput{Item: attributes}, nil
+	}}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	defer repository.Close()
+
+	loaded, err := repository.Load(context.Background(), "guild")
+	require.NoError(t, err)
+	assert.Equal(t, value.Settings, loaded.Settings)
+	assert.Equal(t, value.Version, loaded.Version)
+}
+
+func TestConfigurationUpdateDropsLegacyTemperatureAttribute(t *testing.T) {
+	value := repositoryDefaults()
+	value.Version = 1
+	attributes, err := attributevalue.MarshalMap(newGuildConfigItem("guild", "admin", value, time.Unix(1, 0)))
+	require.NoError(t, err)
+	attributes["temperature"] = &dynamodbtypes.AttributeValueMemberN{Value: "1.4"}
+	client := &fakeDynamoClient{
+		get: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{Item: attributes}, nil
+		},
+		put: func(_ context.Context, input *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+			assert.NotContains(t, input.Item, "temperature")
+			return &dynamodb.PutItemOutput{}, nil
+		},
+	}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	defer repository.Close()
+
+	prompt := "Updated"
+	updated, err := repository.Update(context.Background(), "guild", "actor", config.Patch{Prompt: &prompt})
+	require.NoError(t, err)
+	assert.Equal(t, prompt, updated.Settings.Prompt)
 }
 
 func TestConfigurationProviderFailsOpenButManagerDoesNot(t *testing.T) {

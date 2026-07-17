@@ -16,7 +16,6 @@ const (
 	MaxMessageRetentionDays     = 3650
 	maxContextMessages          = 100
 	maxOutputTokensLimit        = 8192
-	maxTemperature              = 2
 )
 
 // ErrConflict indicates that a concurrent guild configuration update won bounded retries.
@@ -31,7 +30,6 @@ type ServerSettings struct {
 	ChannelMessages      int
 	HistoryRunes         int
 	MaxOutputTokens      int
-	Temperature          float32
 	MessageTimeout       time.Duration
 	MessageRetentionDays int
 	WebSearchEnabled     bool
@@ -60,9 +58,6 @@ func (s ServerSettings) Validate() error {
 	}
 	if s.MessageTimeout <= 0 {
 		return errors.New("message timeout must be positive")
-	}
-	if s.Temperature < 0 || s.Temperature > maxTemperature {
-		return errors.Errorf("temperature must be between 0 and %d", maxTemperature)
 	}
 	if s.MessageRetentionDays < 1 || s.MessageRetentionDays > MaxMessageRetentionDays {
 		return errors.Errorf("message retention must be between 1 and %d days", MaxMessageRetentionDays)
@@ -113,7 +108,6 @@ type Patch struct {
 	ChannelMessages      *int
 	HistoryRunes         *int
 	MaxOutputTokens      *int
-	Temperature          *float32
 	MessageTimeout       *time.Duration
 	MessageRetentionDays *int
 	WebSearchEnabled     *bool
@@ -123,7 +117,7 @@ type Patch struct {
 // Empty reports whether the patch changes no fields.
 func (p Patch) Empty() bool {
 	return p.Prompt == nil && p.GuildPrompt == nil && p.ThreadMessages == nil && p.ParentMessages == nil && p.ChannelMessages == nil &&
-		p.HistoryRunes == nil && p.MaxOutputTokens == nil && p.Temperature == nil && p.MessageTimeout == nil &&
+		p.HistoryRunes == nil && p.MaxOutputTokens == nil && p.MessageTimeout == nil &&
 		p.MessageRetentionDays == nil && p.WebSearchEnabled == nil && p.ChannelSearchEnabled == nil
 }
 
@@ -153,9 +147,6 @@ func (p Patch) Apply(current GuildConfig) (GuildConfig, error) {
 	}
 	if p.MaxOutputTokens != nil {
 		settings.MaxOutputTokens = *p.MaxOutputTokens
-	}
-	if p.Temperature != nil {
-		settings.Temperature = *p.Temperature
 	}
 	if p.MessageTimeout != nil {
 		settings.MessageTimeout = *p.MessageTimeout

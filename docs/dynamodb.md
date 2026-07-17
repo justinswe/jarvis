@@ -62,7 +62,6 @@ Message writes are conditional and deterministic, making duplicate delivery of t
 | `guild_prompt` | String | Optional guild-admin instructions appended to the base prompt. |
 | `thread_messages`, `parent_messages`, `channel_messages` | Number | Context-window limits. |
 | `history_runes`, `max_output_tokens` | Number | Context-rune budget and total generated-token budget, including thinking and visible text. |
-| `temperature` | Number | Model sampling temperature. |
 | `message_timeout_seconds` | Number | Processing deadline. |
 | `message_retention_days` | Number | Retention for new messages, 1 through 3650 days. |
 | `web_search_enabled`, `channel_search_enabled` | Boolean | Tool availability settings. |
@@ -71,7 +70,7 @@ Message writes are conditional and deterministic, making duplicate delivery of t
 | `updated_at` | Number | Unix milliseconds. |
 | `updated_by_user_id` | String | Discord actor ID for the latest update. |
 
-Missing guild configuration items materialize from the worker's validated defaults on their first mutation. Existing items without `guild_prompt` load it as empty, so no migration or backfill is required. Updates use conditional writes and bounded conflict retries.
+Missing guild configuration items materialize from the worker's validated defaults on their first mutation. Existing items without `guild_prompt` load it as empty. Legacy `temperature` attributes are ignored during reads and disappear on the next full configuration write, so no migration or backfill is required. Updates use conditional writes and bounded conflict retries.
 
 When present, the guild prompt is trimmed, limited to 4,000 runes, and composed as:
 

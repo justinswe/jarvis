@@ -93,7 +93,7 @@ func TestContentConfig(t *testing.T) {
 	require.Len(t, cfg.Tools, 2)
 	assert.NotNil(t, cfg.Tools[0].GoogleSearch)
 	assert.Equal(t, "tool", cfg.Tools[1].FunctionDeclarations[0].Name)
-	assert.Equal(t, googlegenai.ThinkingLevelMedium, cfg.ThinkingConfig.ThinkingLevel)
+	assert.Equal(t, googlegenai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
 	assert.Contains(t, cfg.SystemInstruction.Parts[0].Text, webSearchSystemPrompt)
 	assert.Equal(t, googlegenai.FunctionCallingConfigModeAuto, cfg.ToolConfig.FunctionCallingConfig.Mode)
 	disabled := h.contentConfig(false, nil, googlegenai.FunctionCallingConfigModeNone)
@@ -172,7 +172,7 @@ func TestGenerateRetriesSearchWithoutSourcesAndRequiresGrounding(t *testing.T) {
 		assert.NotNil(t, cfg.Tools[0].GoogleSearch)
 		require.NotNil(t, cfg.ToolConfig)
 		assert.Equal(t, googlegenai.FunctionCallingConfigModeNone, cfg.ToolConfig.FunctionCallingConfig.Mode)
-		assert.Equal(t, float32(1.0), *cfg.Temperature)
+		assert.Nil(t, cfg.Temperature)
 		assert.Equal(t, googlegenai.ThinkingLevelMedium, cfg.ThinkingConfig.ThinkingLevel)
 		assert.GreaterOrEqual(t, cfg.MaxOutputTokens, int32(emptyRecoveryMinTokens))
 		assert.Contains(t, cfg.SystemInstruction.Parts[0].Text, groundingRetryPrompt)
@@ -238,14 +238,15 @@ func TestGenerateUsesRequestScopedConfiguration(t *testing.T) {
 	h := testHandler(func(_ context.Context, _ string, _ []*googlegenai.Content, cfg *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
 		assert.Empty(t, cfg.Tools)
 		assert.Equal(t, int32(123), cfg.MaxOutputTokens)
-		assert.Equal(t, float32(0.4), *cfg.Temperature)
+		assert.Nil(t, cfg.Temperature)
+		assert.Equal(t, googlegenai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
 		assert.Contains(t, cfg.SystemInstruction.Parts[0].Text, "server prompt")
 		assert.NotContains(t, cfg.SystemInstruction.Parts[0].Text, webSearchSystemPrompt)
 		return response("answer", nil), nil
 	})
 	_, err := h.Generate(context.Background(), GenerateRequest{
 		Messages: []Message{{Role: "user", Content: "hello"}},
-		Config:   &RequestConfig{Prompt: "server prompt", MaxOutputTokens: 123, Temperature: 0.4, WebSearchEnabled: false},
+		Config:   &RequestConfig{Prompt: "server prompt", MaxOutputTokens: 123, WebSearchEnabled: false},
 	})
 	require.NoError(t, err)
 }
@@ -325,7 +326,7 @@ func TestGenerateRecoversThoughtOnlyMaxTokensResponse(t *testing.T) {
 		calls++
 		if calls == 1 {
 			assert.Equal(t, int32(512), cfg.MaxOutputTokens)
-			assert.Equal(t, googlegenai.ThinkingLevelMedium, cfg.ThinkingConfig.ThinkingLevel)
+			assert.Equal(t, googlegenai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
 			return thoughtOnlyResponse(googlegenai.FinishReasonMaxTokens), nil
 		}
 		assert.Empty(t, cfg.Tools)

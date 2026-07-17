@@ -94,7 +94,6 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		Location:        cfg.location,
 		DefaultPrompt:   cfg.defaultPrompt,
 		MaxOutputTokens: cfg.maxOutputTokens,
-		Temperature:     float32(cfg.temperature),
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize Gemini client")
@@ -130,7 +129,6 @@ func (cfg workerConfig) serverSettings() config.ServerSettings {
 		ChannelMessages:      cfg.channelMessages,
 		HistoryRunes:         cfg.historyRunes,
 		MaxOutputTokens:      cfg.maxOutputTokens,
-		Temperature:          float32(cfg.temperature),
 		MessageTimeout:       cfg.messageTimeout,
 		MessageRetentionDays: cfg.messageRetentionDays,
 		WebSearchEnabled:     true,

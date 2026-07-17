@@ -32,6 +32,34 @@ func appendSources(text string, sources []genai.Source) string {
 	return strings.TrimSpace(text) + "\n\n-# Sources: " + strings.Join(links, " · ")
 }
 
+func appendEvidence(text string, evidence []genai.Evidence) string {
+	labels := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	for _, item := range evidence {
+		label := ""
+		switch item.Kind {
+		case genai.EvidenceKindRuntimeContext:
+			label = "runtime context"
+		case genai.EvidenceKindChannelHistory:
+			label = "channel history"
+		case genai.EvidenceKindCodeExecution:
+			label = "code execution"
+		}
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
+		return text
+	}
+	return strings.TrimSpace(text) + "\n\n-# Evidence used: " + strings.Join(labels, " · ")
+}
+
 func sanitizeContent(content, botID string) string {
 	if botID != "" {
 		content = strings.ReplaceAll(content, fmt.Sprintf("<@%s>", botID), "")
