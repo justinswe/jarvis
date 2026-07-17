@@ -17,12 +17,11 @@ type runtimeContextTool struct {
 }
 
 type runtimeContextResponse struct {
-	AssistantName string `json:"assistant_name"`
-	Version       string `json:"version"`
-	Timezone      string `json:"timezone"`
-	CurrentTime   string `json:"current_time"`
-	CurrentDate   string `json:"current_date"`
-	Weekday       string `json:"weekday"`
+	Version     string `json:"version"`
+	Timezone    string `json:"timezone"`
+	CurrentTime string `json:"current_time"`
+	CurrentDate string `json:"current_date"`
+	Weekday     string `json:"weekday"`
 }
 
 func (p *Processor) runtimeContext() genai.FunctionTool {
@@ -34,8 +33,8 @@ func (runtimeContextTool) Name() string { return runtimeContextToolName }
 func (runtimeContextTool) Declaration() *googlegenai.FunctionDeclaration {
 	return &googlegenai.FunctionDeclaration{
 		Name: runtimeContextToolName,
-		Description: "Read Jarvis's identity, exact build version, and current clock information. " +
-			"Use only when asked about Jarvis's identity or version, when asked for the current time, date, or weekday, " +
+		Description: "Read the application's exact build version and current clock information. " +
+			"Use only when asked about the application or build version, when asked for the current time, date, or weekday, " +
 			"or when the current date materially affects research. Do not call or mention its output in unrelated answers.",
 		Parameters: &googlegenai.Schema{Type: googlegenai.TypeObject, Properties: map[string]*googlegenai.Schema{
 			"timezone": {
@@ -57,12 +56,11 @@ func (t runtimeContextTool) Execute(_ context.Context, args map[string]any) (any
 	}
 	current := now().In(timezone)
 	return runtimeContextResponse{
-		AssistantName: "Jarvis",
-		Version:       strings.TrimSpace(t.version),
-		Timezone:      timezone.String(),
-		CurrentTime:   current.Format(time.RFC3339),
-		CurrentDate:   current.Format(time.DateOnly),
-		Weekday:       current.Weekday().String(),
+		Version:     strings.TrimSpace(t.version),
+		Timezone:    timezone.String(),
+		CurrentTime: current.Format(time.RFC3339),
+		CurrentDate: current.Format(time.DateOnly),
+		Weekday:     current.Weekday().String(),
 	}, nil
 }
 
@@ -76,12 +74,11 @@ func (runtimeContextTool) Evidence(output any) (genai.Evidence, bool) {
 		Kind: genai.EvidenceKindRuntimeContext,
 		Tool: runtimeContextToolName,
 		Attributes: map[string]string{
-			"assistant_name": response.AssistantName,
-			"version":        response.Version,
-			"timezone":       response.Timezone,
-			"current_time":   response.CurrentTime,
-			"current_date":   response.CurrentDate,
-			"weekday":        response.Weekday,
+			"version":      response.Version,
+			"timezone":     response.Timezone,
+			"current_time": response.CurrentTime,
+			"current_date": response.CurrentDate,
+			"weekday":      response.Weekday,
 		},
 	}, true
 }

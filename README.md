@@ -99,6 +99,7 @@ The primary configuration variables are:
 | `DISCORD_BOT_TOKEN` | Yes | Token used for Discord Gateway and REST access. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Environment-dependent | Path to application credentials for local or container execution. |
 | `LOCATION` | No | Vertex AI location; defaults to `global`. |
+| `DEFAULT_PROMPT` | No | Root-controlled assistant customization that may define its name and personality; empty by default. |
 | `DYNAMODB_ENABLED` | No | Enables persistent history and server configuration; defaults to `false`. |
 | `DYNAMODB_TABLE` | With DynamoDB | Existing DynamoDB table name; defaults to `jarvis`. |
 | `AWS_REGION` | With DynamoDB | DynamoDB region resolved by the AWS SDK. |

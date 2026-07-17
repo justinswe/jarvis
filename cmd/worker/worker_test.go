@@ -30,6 +30,10 @@ func TestWorkerConfigDefaults(t *testing.T) {
 	require.NoError(t, err)
 	maxOutputTokens, err := command.Flags().GetInt("max-output-tokens")
 	require.NoError(t, err)
+	defaultPrompt, err := command.Flags().GetString("default-prompt")
+	require.NoError(t, err)
+	defaultPromptFlag := command.Flags().Lookup("default-prompt")
+	require.NotNil(t, defaultPromptFlag)
 	assert.Equal(t, "8080", port)
 	assert.Equal(t, "global", location)
 	assert.Equal(t, time.Minute, timeout)
@@ -39,6 +43,8 @@ func TestWorkerConfigDefaults(t *testing.T) {
 	assert.Empty(t, audience)
 	assert.Equal(t, config.DefaultMessageRetentionDays, retention)
 	assert.Equal(t, 2048, maxOutputTokens)
+	assert.Empty(t, defaultPrompt)
+	assert.Contains(t, defaultPromptFlag.Usage, "may define the assistant name and personality")
 }
 
 func TestWorkerServerSettingsAreRequestScopedDefaults(t *testing.T) {

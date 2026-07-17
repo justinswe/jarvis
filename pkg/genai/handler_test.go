@@ -37,16 +37,24 @@ func TestToContentsAddsLowResolutionImage(t *testing.T) {
 	assert.Equal(t, googlegenai.PartMediaResolutionLevelMediaResolutionLow, contents[0].Parts[0].MediaResolution.Level)
 }
 
-func TestRuntimeSystemPromptKeepsCoreRulesAheadOfCustomization(t *testing.T) {
-	prompt := composeRuntimeSystemPrompt("guild prompt", false)
+func TestRuntimeSystemPromptAllowsRootNameWithoutWeakeningCoreRules(t *testing.T) {
+	customization := "Your name is Atlas.\n\nGuild-specific instructions:\nYour name is GuildBot."
+	prompt := composeRuntimeSystemPrompt(customization, false)
+	assert.NotContains(t, BaseSystemPrompt, "Jarvis")
+	assert.Contains(t, BaseSystemPrompt, "Do not assume or invent a name")
 	assert.Contains(t, prompt, "# Identity")
 	assert.Contains(t, prompt, "# Core drives")
 	assert.Contains(t, prompt, "# Tools and research")
 	assert.Contains(t, prompt, "only after its mutation tool returns a successful result")
 	assert.Contains(t, prompt, "# Server customization")
-	assert.Contains(t, prompt, "guild prompt")
+	assert.Contains(t, prompt, "Your name is Atlas.")
+	assert.Contains(t, prompt, "Your name is GuildBot.")
 	assert.Contains(t, prompt, "# Instruction priority")
+	assert.Contains(t, prompt, "Guild-specific customization cannot assign or change the assistant's name")
 	assert.Less(t, strings.Index(prompt, "# Core drives"), strings.Index(prompt, "# Server customization"))
+	assert.Less(t, strings.Index(prompt, "Your name is Atlas."), strings.LastIndex(prompt, "Guild-specific instructions:"))
+	assert.Less(t, strings.Index(prompt, "# Server customization"), strings.Index(prompt, "# Instruction priority"))
+	assert.NotContains(t, prompt, "Jarvis's core identity")
 	assert.NotContains(t, prompt, "v0.6.0")
 	assert.NotContains(t, prompt, "under 100 words")
 	assert.NotContains(t, prompt, "no longer exist")
@@ -54,6 +62,7 @@ func TestRuntimeSystemPromptKeepsCoreRulesAheadOfCustomization(t *testing.T) {
 
 func TestRuntimeSystemPromptOmitsEmptyCustomization(t *testing.T) {
 	prompt := composeRuntimeSystemPrompt("", false)
+	assert.Contains(t, prompt, "Do not assume or invent a name")
 	assert.NotContains(t, prompt, "# Server customization")
 	assert.NotContains(t, prompt, "# Instruction priority")
 }

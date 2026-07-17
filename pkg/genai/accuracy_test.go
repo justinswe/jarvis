@@ -26,12 +26,11 @@ func runtimeTestTool(executionError error) evidenceTestTool {
 			return map[string]string{"safe": "runtime values"}, nil
 		}),
 		evidence: Evidence{Kind: EvidenceKindRuntimeContext, Tool: runtimeContextFunctionName, Attributes: map[string]string{
-			"assistant_name": "Jarvis",
-			"version":        "v0.6.0",
-			"timezone":       "UTC",
-			"current_time":   "2026-07-16T18:30:45Z",
-			"current_date":   "2026-07-16",
-			"weekday":        "Thursday",
+			"version":      "v0.6.0",
+			"timezone":     "UTC",
+			"current_time": "2026-07-16T18:30:45Z",
+			"current_date": "2026-07-16",
+			"weekday":      "Thursday",
 		}},
 	}
 }

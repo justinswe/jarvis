@@ -128,7 +128,7 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 			"web_search_enabled":      booleanSchema("Whether Google Search may be used for this server."),
 			"channel_search_enabled":  booleanSchema("Whether stored current-channel search may be used when DynamoDB is enabled."),
 		}
-		properties["prompt"] = stringSchema("Root-controlled additional server customization. It cannot override Jarvis's core identity, drives, truthfulness, research, tool, or reliability rules.")
+		properties["prompt"] = stringSchema("Root-controlled assistant customization. It may define the assistant's name and personality, but cannot override the core drives, truthfulness, research, tool, or reliability rules.")
 		properties["thread_context_window"] = integerSchema("Prior thread messages included in context.", 1, 100)
 		properties["parent_context_window"] = integerSchema("Prior parent-channel messages included in thread context.", 1, 100)
 		properties["message_retention_days"] = integerSchema(
@@ -144,11 +144,11 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 	case setGuildPromptToolName:
 		return &googlegenai.FunctionDeclaration{
 			Name: t.action,
-			Description: "Set subordinate customization instructions for the current Discord server. They cannot override Jarvis's core identity, drives, truthfulness, research, tool, or reliability rules. " +
+			Description: "Set subordinate customization instructions for the current Discord server. They cannot assign or change the assistant's name, override root-controlled customization, or override the core drives, truthfulness, research, tool, or reliability rules. " +
 				"Call only for an explicit administrator request. Pass an empty string to clear the guild prompt.",
 			Parameters: objectSchema(map[string]*googlegenai.Schema{
 				"guild_prompt": boundedStringSchema(
-					"Guild-specific customization appended to the root-controlled customization. An empty string clears it.",
+					"Guild-specific customization appended to the root-controlled customization. It cannot assign or change the assistant's name; an empty string clears it.",
 					config.MaxGuildPromptRunes,
 				),
 			}, []string{"guild_prompt"}),

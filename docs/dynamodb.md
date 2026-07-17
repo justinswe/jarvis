@@ -68,8 +68,8 @@ Usable messages returned alongside a DynamoDB or decode error are supplied to th
 | `sk` | String | `CONFIG` |
 | `entity_type` | String | `GUILD_CONFIG` |
 | `schema_version` | Number | `1` |
-| `prompt` | String | Root-controlled base identity and personality prompt. |
-| `guild_prompt` | String | Optional guild-admin instructions appended to the base prompt. |
+| `prompt` | String | Root-controlled assistant customization, including an optional name and personality. |
+| `guild_prompt` | String | Optional subordinate guild-admin instructions appended to the root-controlled prompt. |
 | `thread_messages`, `parent_messages`, `channel_messages` | Number | Context-window limits. |
 | `history_runes`, `max_output_tokens` | Number | Context-rune budget and total generated-token budget, including thinking and visible text. |
 | `message_timeout_seconds` | Number | Processing deadline. |
@@ -92,6 +92,8 @@ Guild-specific instructions:
 ```
 
 An empty guild prompt leaves the base prompt unchanged.
+
+The root-controlled prompt is the only customization allowed to assign the assistant's name. The default prompt is empty, so the assistant remains unnamed unless root customization supplies one. Guild-specific instructions cannot assign or change the name and remain subordinate to the root-controlled prompt and the core behavioral and reliability rules.
 
 ## Administration tools
 

@@ -21,12 +21,11 @@ func TestRuntimeContextReturnsVersionAndUTCClock(t *testing.T) {
 	result, err := tool.Execute(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, runtimeContextResponse{
-		AssistantName: "Jarvis",
-		Version:       "v0.6.0",
-		Timezone:      "UTC",
-		CurrentTime:   "2026-07-16T18:30:45Z",
-		CurrentDate:   "2026-07-16",
-		Weekday:       "Thursday",
+		Version:     "v0.6.0",
+		Timezone:    "UTC",
+		CurrentTime: "2026-07-16T18:30:45Z",
+		CurrentDate: "2026-07-16",
+		Weekday:     "Thursday",
 	}, result)
 }
 
@@ -58,6 +57,8 @@ func TestRuntimeContextRejectsInvalidTimezone(t *testing.T) {
 func TestRuntimeContextDeclarationMakesTimezoneOptional(t *testing.T) {
 	declaration := (runtimeContextTool{}).Declaration()
 	assert.Equal(t, runtimeContextToolName, declaration.Name)
+	assert.NotContains(t, declaration.Description, "identity")
+	assert.NotContains(t, declaration.Description, "Jarvis")
 	assert.Contains(t, declaration.Description, "Do not call or mention its output in unrelated answers")
 	require.Contains(t, declaration.Parameters.Properties, "timezone")
 	assert.Empty(t, declaration.Parameters.Required)
@@ -75,4 +76,5 @@ func TestRuntimeContextProducesSafeEvidence(t *testing.T) {
 	assert.Equal(t, runtimeContextToolName, evidence.Tool)
 	assert.Equal(t, "2026-07-16T18:30:45Z", evidence.Attributes["current_time"])
 	assert.Equal(t, "v0.6.0", evidence.Attributes["version"])
+	assert.NotContains(t, evidence.Attributes, "assistant_name")
 }

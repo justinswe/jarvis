@@ -142,6 +142,9 @@ func TestConfigurationToolSchemasLimitProtectedSettingsToRootUsers(t *testing.T)
 	require.NotNil(t, maxOutputTokens.Maximum)
 	assert.Equal(t, float64(genai.MaxOutputTokensLimit), *maxOutputTokens.Maximum)
 	assert.Contains(t, maxOutputTokens.Description, "including thinking")
+	prompt := base.Declaration().Parameters.Properties["prompt"]
+	assert.Contains(t, prompt.Description, "may define the assistant's name and personality")
+	assert.NotContains(t, prompt.Description, "Jarvis's core identity")
 	for _, field := range []string{"prompt", "thread_context_window", "parent_context_window", "message_retention_days"} {
 		assert.Contains(t, base.Declaration().Parameters.Properties, field)
 	}
@@ -220,6 +223,9 @@ func TestSetGuildPromptToolSetsAndClearsPrompt(t *testing.T) {
 	declaration := tool.Declaration()
 	require.NotNil(t, declaration.Parameters.Properties["guild_prompt"].MaxLength)
 	assert.Equal(t, int64(config.MaxGuildPromptRunes), *declaration.Parameters.Properties["guild_prompt"].MaxLength)
+	assert.Contains(t, declaration.Description, "cannot assign or change the assistant's name")
+	assert.Contains(t, declaration.Description, "override root-controlled customization")
+	assert.Contains(t, declaration.Parameters.Properties["guild_prompt"].Description, "cannot assign or change the assistant's name")
 
 	result, err := tool.Execute(context.Background(), map[string]any{"guild_prompt": "  Use guild terminology.  "})
 	require.NoError(t, err)
