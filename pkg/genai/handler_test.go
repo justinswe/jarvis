@@ -102,7 +102,7 @@ func TestContentConfig(t *testing.T) {
 	require.Len(t, cfg.Tools, 2)
 	assert.NotNil(t, cfg.Tools[0].GoogleSearch)
 	assert.Equal(t, "tool", cfg.Tools[1].FunctionDeclarations[0].Name)
-	assert.Equal(t, googlegenai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
+	assert.Equal(t, googlegenai.ThinkingLevelMedium, cfg.ThinkingConfig.ThinkingLevel)
 	assert.Contains(t, cfg.SystemInstruction.Parts[0].Text, webSearchSystemPrompt)
 	assert.Equal(t, googlegenai.FunctionCallingConfigModeAuto, cfg.ToolConfig.FunctionCallingConfig.Mode)
 	disabled := h.contentConfig(false, nil, googlegenai.FunctionCallingConfigModeNone)
@@ -248,7 +248,7 @@ func TestGenerateUsesRequestScopedConfiguration(t *testing.T) {
 		assert.Empty(t, cfg.Tools)
 		assert.Equal(t, int32(123), cfg.MaxOutputTokens)
 		assert.Nil(t, cfg.Temperature)
-		assert.Equal(t, googlegenai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
+		assert.Equal(t, googlegenai.ThinkingLevelMedium, cfg.ThinkingConfig.ThinkingLevel)
 		assert.Contains(t, cfg.SystemInstruction.Parts[0].Text, "server prompt")
 		assert.NotContains(t, cfg.SystemInstruction.Parts[0].Text, webSearchSystemPrompt)
 		return response("answer", nil), nil
@@ -335,7 +335,7 @@ func TestGenerateRecoversThoughtOnlyMaxTokensResponse(t *testing.T) {
 		calls++
 		if calls == 1 {
 			assert.Equal(t, int32(512), cfg.MaxOutputTokens)
-			assert.Equal(t, googlegenai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
+			assert.Equal(t, googlegenai.ThinkingLevelMedium, cfg.ThinkingConfig.ThinkingLevel)
 			return thoughtOnlyResponse(googlegenai.FinishReasonMaxTokens), nil
 		}
 		assert.Empty(t, cfg.Tools)

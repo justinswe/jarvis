@@ -80,6 +80,8 @@ Jarvis makes Google Search available to the model when web search is enabled for
 
 Recent conversation context is loaded from Discord by default. When DynamoDB is enabled, Jarvis records incoming messages, uses the stored conversation as model context, and can search the current channel or thread by text, author, or time range. Search results include direct links back to Discord. See [DynamoDB storage](docs/dynamodb.md) for retention, access, and search behavior.
 
+Within one worker instance, overlapping requests in the same Discord thread use latest-message-wins processing. A newer request cancels the active request, replaces any older pending request, and waits for cancellation to finish before generating one response from the latest available thread history. Existing context-window and rune-budget settings still apply. Separate threads remain concurrent; deployments with multiple worker replicas need external request affinity or distributed coordination to provide the same guarantee across replicas.
+
 ## Multi-cloud configuration
 
 Vertex AI provides generation and Google Search grounding. DynamoDB can optionally provide persistent Discord history and per-server configuration:
@@ -110,7 +112,7 @@ Every command flag is also available as an uppercase environment variable with h
 
 ## Architecture
 
-Jarvis separates the stateful Discord connection from stateless message processing:
+Jarvis separates the stateful Discord connection from independently deployable message processing:
 
 ```text
 Discord Gateway -> ingestor -> HTTP/1.1 raw protobuf -> worker

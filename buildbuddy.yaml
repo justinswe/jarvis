@@ -1,0 +1,76 @@
+actions:
+  # BuildBuddy injects RBE authentication; workflow steps must not inspect user rc files.
+  - name: presubmit
+    container_image: "ubuntu-24.04"
+    resource_requests:
+      cpu: 2000m
+      memory: 4GB
+    triggers:
+      pull_request:
+        branches:
+          - main
+        merge_with_base: true
+
+    steps:
+      - run: |
+          bazel \
+            test \
+            --config=rbe \
+            --config=ci \
+            --test_output=all \
+            //...
+
+  - name: publish
+    container_image: "ubuntu-24.04"
+    resource_requests:
+      cpu: 2000m
+      memory: 4GB
+    triggers:
+      push:
+        branches:
+          - main
+
+    steps:
+      - run: |
+          bazel \
+            test \
+            --config=rbe \
+            --config=ci \
+            --test_output=all \
+            //...
+
+      - run: |
+          set -euo pipefail
+          set +x
+
+          : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME is not configured}"
+          : "${DOCKERHUB_TOKEN:?DOCKERHUB_TOKEN is not configured}"
+
+          docker_config_dir="$(mktemp -d)"
+          chmod 700 "${docker_config_dir}"
+          trap 'rm -rf -- "${docker_config_dir}"' EXIT
+          export DOCKER_CONFIG="${docker_config_dir}"
+
+          printf '%s' "${DOCKERHUB_TOKEN}" | docker login \
+            --username "${DOCKERHUB_USERNAME}" \
+            --password-stdin \
+            docker.io \
+            >/dev/null
+
+          bazel run \
+            --config=rbe \
+            --config=ci \
+            --stamp \
+            --remote_download_outputs=all \
+            --@rules_img//img/settings:push_strategy=eager \
+            --@rules_img//img/settings:docker_config_path="${DOCKER_CONFIG}/config.json" \
+            //:image_push
+
+          bazel run \
+            --config=rbe \
+            --config=ci \
+            --stamp \
+            --remote_download_outputs=all \
+            --@rules_img//img/settings:push_strategy=eager \
+            --@rules_img//img/settings:docker_config_path="${DOCKER_CONFIG}/config.json" \
+            //:image_push_latest

@@ -50,6 +50,7 @@ type Processor struct {
 	rootUsers   map[string]struct{}
 	version     string
 	imageClient *http.Client
+	threadQueue threadRequestQueue
 }
 
 // ProcessorConfig contains the worker-owned dependencies for Discord request processing.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,12 @@ type fakeGenerator struct {
 func (f *fakeGenerator) Generate(_ context.Context, request genai.GenerateRequest) (genai.GenerateResponse, error) {
 	f.request = &request
 	return f.response, f.err
+}
+
+type generatorFunc func(context.Context, genai.GenerateRequest) (genai.GenerateResponse, error)
+
+func (f generatorFunc) Generate(ctx context.Context, request genai.GenerateRequest) (genai.GenerateResponse, error) {
+	return f(ctx, request)
 }
 
 type fakeClient struct {
@@ -431,7 +438,7 @@ func TestProcessUsesPerServerSettings(t *testing.T) {
 	assert.Equal(t, "Jarvis\n\nGuild-specific instructions:\nUse guild terminology.", generator.request.Config.Prompt)
 	assert.Equal(t, 256, generator.request.Config.MaxOutputTokens)
 	assert.True(t, generator.request.Config.WebSearchEnabled)
-	assert.Equal(t, googlegenai.ThinkingLevelHigh, generator.request.Config.ThinkingLevel)
+	assert.Equal(t, googlegenai.ThinkingLevelMedium, generator.request.Config.ThinkingLevel)
 	assert.Equal(t, genai.AccuracyPolicy{}, generator.request.Config.AccuracyPolicy)
 	require.Len(t, generator.request.Tools, 3)
 	assert.Equal(t, runtimeContextToolName, generator.request.Tools[0].Name())
@@ -479,6 +486,115 @@ func TestProcessSkipsConfigurationForUntargetedMessages(t *testing.T) {
 	m.ChannelID = "channel"
 	require.NoError(t, p.Process(context.Background(), &discordgo.MessageCreate{Message: m}))
 	assert.Zero(t, provider.calls)
+}
+
+func TestProcessKeepsOnlyLatestOverlappingThreadRequest(t *testing.T) {
+	firstStarted := make(chan struct{})
+	firstCanceled := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	latestRequest := make(chan genai.GenerateRequest, 1)
+	generator := generatorFunc(func(ctx context.Context, request genai.GenerateRequest) (genai.GenerateResponse, error) {
+		switch request.RequestID {
+		case "first":
+			close(firstStarted)
+			<-ctx.Done()
+			close(firstCanceled)
+			<-releaseFirst
+			return genai.GenerateResponse{}, ctx.Err()
+		case "latest":
+			latestRequest <- request
+			return genai.GenerateResponse{Text: "latest answer"}, nil
+		default:
+			t.Errorf("unexpected generation for %q", request.RequestID)
+			return genai.GenerateResponse{}, nil
+		}
+	})
+
+	var sent, added, removed []string
+	var clientMu sync.Mutex
+	client := &fakeClient{
+		channel: &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread, ID: "thread", ParentID: "parent", OwnerID: "bot"},
+		sendMessage: func(_ context.Context, channelID, content string) (*discordgo.Message, error) {
+			clientMu.Lock()
+			defer clientMu.Unlock()
+			sent = append(sent, channelID+":"+content)
+			return &discordgo.Message{}, nil
+		},
+		addReaction: func(_ context.Context, _, messageID, _ string) error {
+			clientMu.Lock()
+			defer clientMu.Unlock()
+			added = append(added, messageID)
+			return nil
+		},
+		removeReaction: func(_ context.Context, _, messageID, _, _ string) error {
+			clientMu.Lock()
+			defer clientMu.Unlock()
+			removed = append(removed, messageID)
+			return nil
+		},
+	}
+	history := &fakeHistory{messagesFunc: func(_ context.Context, _, channelID string, _ int, before string) ([]*discordgo.Message, error) {
+		if channelID == "thread" && before == "latest" {
+			return []*discordgo.Message{message("middle", "second thought"), message("first", "first thought")}, nil
+		}
+		return nil, nil
+	}}
+	processor := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t), history: history}
+
+	first := targetedMessage("first", "first thought")
+	first.ChannelID = "thread"
+	middle := targetedMessage("middle", "second thought")
+	middle.ChannelID = "thread"
+	latest := targetedMessage("latest", "final question")
+	latest.ChannelID = "thread"
+
+	firstResult := processAsync(processor, first)
+	requireReceive(t, firstStarted)
+	middleResult := processAsync(processor, middle)
+	requireReceive(t, firstCanceled)
+	latestResult := processAsync(processor, latest)
+	assert.NoError(t, requireReceive(t, middleResult))
+
+	close(releaseFirst)
+	assert.NoError(t, requireReceive(t, firstResult))
+	request := requireReceive(t, latestRequest)
+	assert.NoError(t, requireReceive(t, latestResult))
+	require.Len(t, request.Messages, 1)
+	assert.Contains(t, request.Messages[0].Content, "first thought")
+	assert.Contains(t, request.Messages[0].Content, "second thought")
+	assert.Contains(t, request.Messages[0].Content, "CURRENT REQUEST:\nfinal question")
+
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	assert.Equal(t, []string{"thread:latest answer"}, sent)
+	assert.Equal(t, []string{"first", "latest"}, added)
+	assert.Equal(t, []string{"first", "latest"}, removed)
+}
+
+func TestProcessDoesNotQueueNonThreadMessages(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	generator := generatorFunc(func(_ context.Context, request genai.GenerateRequest) (genai.GenerateResponse, error) {
+		started <- request.RequestID
+		<-release
+		return genai.GenerateResponse{Text: "ok"}, nil
+	})
+	processor := &Processor{botID: "bot", generator: generator, client: &fakeClient{}, configs: testProvider(t)}
+
+	firstResult := processAsync(processor, targetedMessage("first", "one"))
+	secondResult := processAsync(processor, targetedMessage("second", "two"))
+	got := []string{requireReceive(t, started), requireReceive(t, started)}
+	assert.ElementsMatch(t, []string{"first", "second"}, got)
+
+	close(release)
+	assert.NoError(t, requireReceive(t, firstResult))
+	assert.NoError(t, requireReceive(t, secondResult))
+}
+
+func processAsync(processor *Processor, message *discordgo.MessageCreate) <-chan error {
+	result := make(chan error, 1)
+	go func() { result <- processor.Process(context.Background(), message) }()
+	return result
 }
 
 type countingProvider struct {

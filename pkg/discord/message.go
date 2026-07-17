@@ -39,7 +39,21 @@ func (p *Processor) Process(ctx context.Context, m *discordgo.MessageCreate) err
 	if handled := p.handleAddAdminCommand(ctx, m); handled {
 		return nil
 	}
+	if !isThreadChannel(channel) {
+		return p.processTargetedMessage(ctx, channel, m)
+	}
+	err = p.threadQueue.Run(ctx, m.ChannelID, func(threadCtx context.Context) error {
+		return p.processTargetedMessage(threadCtx, channel, m)
+	})
+	if errors.Is(err, errThreadRequestSuperseded) {
+		app.L().Debug("Discord AI request superseded", discordRequestFields(channel, m)...)
+		return nil
+	}
+	return err
+}
 
+// processTargetedMessage handles one request after targeting and queue coordination.
+func (p *Processor) processTargetedMessage(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate) error {
 	guildConfig, err := p.configs.Get(ctx, m.GuildID)
 	if err != nil {
 		return errors.Wrap(err, "resolve server configuration")
@@ -62,6 +76,9 @@ func (p *Processor) Process(ctx context.Context, m *discordgo.MessageCreate) err
 			app.L().Debug("Failed to remove processing reaction", zap.Error(err))
 		}
 	}()
+	if threadRequestSuperseded(ctx) {
+		return errThreadRequestSuperseded
+	}
 
 	processCtx, cancel := context.WithTimeout(ctx, settings.MessageTimeout)
 	defer cancel()
@@ -105,6 +122,9 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	fields := discordRequestFields(channel, m)
 	settings := guildConfig.Settings
 	messages, err := p.buildPrompt(ctx, channel, m, settings)
+	if threadRequestSuperseded(replyCtx) {
+		return errThreadRequestSuperseded
+	}
 	if err != nil {
 		app.L().Warn("Failed to build AI request", append(fields, zap.Error(err))...)
 		if errors.Is(err, errEmptyMessageContent) {
@@ -124,7 +144,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			Prompt:           settings.EffectivePrompt(),
 			MaxOutputTokens:  settings.MaxOutputTokens,
 			WebSearchEnabled: settings.WebSearchEnabled,
-			ThinkingLevel:    googlegenai.ThinkingLevelHigh,
+			ThinkingLevel:    googlegenai.ThinkingLevelMedium,
 			AccuracyPolicy:   genai.ClassifyAccuracyPolicy(sanitizeContent(m.Content, p.botID)),
 		},
 	}
@@ -135,8 +155,15 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	}
 	if tools, authorized := p.configurationTools(ctx, m, guildConfig); authorized {
 		request.Tools = append(request.Tools, tools...)
+		request.Config.ThinkingLevel = googlegenai.ThinkingLevelHigh
+	}
+	if threadRequestSuperseded(replyCtx) {
+		return errThreadRequestSuperseded
 	}
 	response, err := p.generator.Generate(ctx, request)
+	if threadRequestSuperseded(replyCtx) {
+		return errThreadRequestSuperseded
+	}
 	if err != nil {
 		app.L().Warn("Gemini generation failed", append(fields,
 			zap.Duration("duration", time.Since(started)),
@@ -160,7 +187,13 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		reply = appendSources(reply, response.Sources)
 	}
 	reply = appendEvidence(reply, response.Evidence)
+	if threadRequestSuperseded(replyCtx) {
+		return errThreadRequestSuperseded
+	}
 	if err := p.sendReply(replyCtx, channel, m, reply); err != nil {
+		if threadRequestSuperseded(replyCtx) {
+			return errThreadRequestSuperseded
+		}
 		app.L().Warn("Failed to post Discord reply", append(fields,
 			zap.Duration("duration", time.Since(started)),
 			zap.Bool("grounded", response.Grounded),
@@ -168,6 +201,9 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			zap.Error(err),
 		)...)
 		return err
+	}
+	if threadRequestSuperseded(replyCtx) {
+		return errThreadRequestSuperseded
 	}
 	app.L().Info("Discord AI request completed", append(fields,
 		zap.Duration("duration", time.Since(started)),
