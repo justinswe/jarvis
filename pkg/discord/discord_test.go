@@ -561,12 +561,21 @@ func TestReactionCleanupSurvivesRequestCancellation(t *testing.T) {
 
 func TestAppendSources(t *testing.T) {
 	got := appendSources("answer", []genai.Source{
-		{Domain: "news.Example.com", URL: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/one"},
-		{Domain: "www.bbc.co.uk", URL: "https://two.example/article"},
+		{Title: "en.Wikipedia.org", Domain: "google.com", URL: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/one"},
+		{Title: "BBC article", Domain: "www.bbc.co.uk", URL: "https://two.example/article"},
 		{URL: "https://updates.three.example.org/article"},
 		{Domain: "four.example", URL: "https://four.example/article"},
 	})
-	assert.Equal(t, "answer\n\n-# Sources: [example.com](https://vertexaisearch.cloud.google.com/grounding-api-redirect/one) · [bbc.co.uk](https://two.example/article) · [example.org](https://updates.three.example.org/article)", got)
+	assert.Equal(t, "answer\n\n-# Sources: [wikipedia.org](https://vertexaisearch.cloud.google.com/grounding-api-redirect/one) · [bbc.co.uk](https://two.example/article) · [example.org](https://updates.three.example.org/article)", got)
+}
+
+func TestAppendSourcesUsesTextTitleForGroundingRedirect(t *testing.T) {
+	got := appendSources("answer", []genai.Source{{
+		Title:  `Wikipedia [article]\guide`,
+		Domain: "vertexaisearch.cloud.google.com",
+		URL:    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/one",
+	}})
+	assert.Equal(t, "answer\n\n-# Sources: [Wikipedia \\[article\\]\\\\guide](https://vertexaisearch.cloud.google.com/grounding-api-redirect/one)", got)
 }
 
 func TestAppendSourcesSkipsInvalidURLs(t *testing.T) {

@@ -20,7 +20,7 @@ Up to three unique sources are appended to the Discord response in a compact foo
 -# Sources: [example.com](https://example.com) · [example.org](https://example.org)
 ```
 
-Discord cannot render the exact HTML/CSS Google Search suggestion supplied in `SearchEntryPoint.RenderedContent`. Jarvis logs when that content is present but intentionally uses a Discord-native domain-labeled footer instead.
+Discord cannot render the exact HTML/CSS Google Search suggestion supplied in `SearchEntryPoint.RenderedContent`. Jarvis logs when that content is present but intentionally uses a Discord-native domain-labeled footer instead. Labels prefer publisher metadata from the grounding chunk, while Google-provided redirect URLs remain unchanged and are not resolved by Jarvis.
 
 Successful non-web evidence is appended separately so it persists in Discord and DynamoDB history:
 

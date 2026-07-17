@@ -18,6 +18,8 @@ import (
 var botPrefixPattern = regexp.MustCompile(`(?i)^(?:\s*(?:jarvis|jarvischat)\s*[:\-]\s*)+`)
 var channelMentionPattern = regexp.MustCompile(`<#[0-9]+>`)
 
+const googleGroundingRedirectHost = "vertexaisearch.cloud.google.com"
+
 func appendSources(text string, sources []genai.Source) string {
 	links := make([]string, 0, 3)
 	for _, source := range sources {
@@ -46,14 +48,68 @@ func formatSourceLink(source genai.Source) (string, bool) {
 		return "", false
 	}
 
-	domain := baseDomain(source.Domain)
-	if domain == "" {
-		domain = baseDomain(parsedURL.Hostname())
-	}
-	if domain == "" {
+	label := sourceLabel(source, parsedURL)
+	if label == "" {
 		return "", false
 	}
-	return fmt.Sprintf("[%s](%s)", domain, rawURL), true
+	return fmt.Sprintf("[%s](%s)", label, rawURL), true
+}
+
+// sourceLabel chooses publisher metadata without exposing redirect infrastructure.
+func sourceLabel(source genai.Source, parsedURL *url.URL) string {
+	if domain, ok := titleDomain(source.Title); ok {
+		return domain
+	}
+	if !isGoogleGroundingDomain(source.Domain) {
+		if domain := baseDomain(source.Domain); domain != "" {
+			return domain
+		}
+	}
+	if !isGoogleGroundingRedirect(parsedURL) {
+		if domain := baseDomain(parsedURL.Hostname()); domain != "" {
+			return domain
+		}
+	}
+	return escapeLinkLabel(source.Title)
+}
+
+// titleDomain returns a registrable domain only when the title is a hostname.
+func titleDomain(raw string) (string, bool) {
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if domain == "" || net.ParseIP(domain) != nil {
+		return "", false
+	}
+	parsedDomain, err := url.Parse("https://" + domain)
+	if err != nil || parsedDomain.User != nil || parsedDomain.Port() != "" || parsedDomain.Hostname() != domain {
+		return "", false
+	}
+	registrableDomain, err := publicsuffix.EffectiveTLDPlusOne(domain)
+	if err != nil {
+		return "", false
+	}
+	return registrableDomain, true
+}
+
+// isGoogleGroundingDomain reports whether a domain identifies redirect infrastructure.
+func isGoogleGroundingDomain(raw string) bool {
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	return domain == googleGroundingRedirectHost
+}
+
+// isGoogleGroundingRedirect reports whether a URL is a Google grounding redirect.
+func isGoogleGroundingRedirect(parsedURL *url.URL) bool {
+	if parsedURL == nil || !strings.EqualFold(parsedURL.Hostname(), googleGroundingRedirectHost) {
+		return false
+	}
+	return parsedURL.Path == "/grounding-api-redirect" || strings.HasPrefix(parsedURL.Path, "/grounding-api-redirect/")
+}
+
+// escapeLinkLabel makes a textual source title safe for a Markdown link label.
+func escapeLinkLabel(raw string) string {
+	label := strings.Join(strings.Fields(raw), " ")
+	label = strings.ReplaceAll(label, `\`, `\\`)
+	label = strings.ReplaceAll(label, "[", `\[`)
+	return strings.ReplaceAll(label, "]", `\]`)
 }
 
 // baseDomain reduces a hostname to its registrable domain when possible.
