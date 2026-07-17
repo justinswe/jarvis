@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/justinswe/jarvis/actions/workflows/publish.yml"><img alt="Publish" src="https://img.shields.io/github/actions/workflow/status/justinswe/jarvis/publish.yml?branch=main&label=publish"></a>
+  <a href="https://justinswe.buildbuddy.io/workflows/"><img alt="Publish" src="https://img.shields.io/github/check-runs/justinswe/jarvis/main?nameFilter=publish&label=publish"></a>
   <a href="https://hub.docker.com/r/justinswe/jarvis"><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/justinswe/jarvis"></a>
   <a href="https://hub.docker.com/r/justinswe/jarvis/tags"><img alt="Docker image version" src="https://img.shields.io/docker/v/justinswe/jarvis?sort=semver"></a>
   <a href="https://github.com/justinswe/jarvis/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/justinswe/jarvis"></a>
