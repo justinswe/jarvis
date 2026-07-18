@@ -29,3 +29,13 @@ go_test(
         "@org_golang_google_genai//:genai",
     ],
 )
+
+go_test(
+    name = "live_eval",
+    srcs = ["live_eval_test.go"],
+    data = ["search_eval_cases.jsonl"],
+    embed = [":genai"],
+    size = "enormous",
+    tags = ["manual"],
+    deps = ["@org_golang_google_genai//:genai"],
+)

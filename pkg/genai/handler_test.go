@@ -67,6 +67,19 @@ func TestRuntimeSystemPromptOmitsEmptyCustomization(t *testing.T) {
 	assert.NotContains(t, prompt, "# Instruction priority")
 }
 
+func TestSearchPromptVariantsKeepModelAndCutoffTogether(t *testing.T) {
+	for _, variant := range []string{promptVariantBaseline, promptVariantConcise, promptVariantFewShot} {
+		prompt := searchSystemPrompt(variant)
+		if variant == promptVariantBaseline {
+			assert.NotContains(t, prompt, selectedModel)
+			continue
+		}
+		assert.Contains(t, prompt, selectedModel)
+		assert.Contains(t, prompt, "January 2025")
+		assert.Contains(t, prompt, "world news")
+	}
+}
+
 func response(text string, metadata *googlegenai.GroundingMetadata) *googlegenai.GenerateContentResponse {
 	return &googlegenai.GenerateContentResponse{Candidates: []*googlegenai.Candidate{{Content: &googlegenai.Content{Parts: []*googlegenai.Part{{Text: text}}}, GroundingMetadata: metadata}}}
 }
@@ -156,6 +169,7 @@ func TestAnalyzeGroundingPrioritizesSupportedValidSources(t *testing.T) {
 	assert.Equal(t, 4, diagnostics.chunkCount)
 	assert.Equal(t, 4, diagnostics.webChunkCount)
 	assert.Equal(t, 1, diagnostics.supportCount)
+	assert.Equal(t, 2, diagnostics.supportedSourceCount)
 	assert.Equal(t, 2, diagnostics.validSourceCount)
 	assert.Equal(t, 1, diagnostics.invalidSourceCount)
 	assert.Equal(t, 1, diagnostics.duplicateSourceCount)
@@ -191,7 +205,7 @@ func TestGenerateRetriesSearchWithoutSourcesAndRequiresGrounding(t *testing.T) {
 		}), nil
 	})
 
-	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest fact"}}})
+	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest Go release"}}})
 	require.NoError(t, err)
 	assert.Equal(t, "verified answer", got.Text)
 	assert.True(t, got.Grounded)
@@ -199,22 +213,37 @@ func TestGenerateRetriesSearchWithoutSourcesAndRequiresGrounding(t *testing.T) {
 	assert.Equal(t, 2, calls)
 }
 
-func TestGenerateDiscardsUnverifiedGroundingRecovery(t *testing.T) {
+func TestGeneratePreservesQualifiedGroundingRecoveryWithoutSources(t *testing.T) {
 	calls := 0
 	h := testHandler(func(context.Context, string, []*googlegenai.Content, *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
 		calls++
-		return response("unverified answer", &googlegenai.GroundingMetadata{WebSearchQueries: []string{"query"}}), nil
+		if calls == 1 {
+			return response("unsupported current answer", &googlegenai.GroundingMetadata{WebSearchQueries: []string{"query"}}), nil
+		}
+		return response("The available results conflict; a narrower date range would help.", &googlegenai.GroundingMetadata{WebSearchQueries: []string{"retry"}}), nil
 	})
+	var observed generationDiagnostics
+	h.observeGeneration = func(diagnostics generationDiagnostics) { observed = diagnostics }
 
-	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest fact"}}})
+	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest Go release"}}})
 	require.NoError(t, err)
-	assert.Equal(t, groundingFailureFallback, got.Text)
+	assert.Equal(t, searchEvidenceGapPrefix+"\n\nThe available results conflict; a narrower date range would help.", got.Text)
+	assert.NotContains(t, got.Text, "unsupported current answer")
 	assert.False(t, got.Grounded)
 	assert.Empty(t, got.Sources)
 	assert.Equal(t, 2, calls)
+	assert.True(t, observed.searchRequired)
+	assert.True(t, observed.searchAttempted)
+	assert.Equal(t, searchTriggerVolatile, observed.searchTrigger)
+	assert.Equal(t, searchResultNoSourcesQualified, observed.searchResult)
+	assert.Equal(t, searchResultNoSourcesQualified, observed.groundingRetryResult)
+	assert.Equal(t, 2, observed.searchQueryCount)
+	assert.Equal(t, 2, observed.modelCalls)
+	assert.True(t, observed.retryUsed)
+	assert.Equal(t, terminalFallbackNone, observed.terminalFallbackReason)
 }
 
-func TestGenerateReturnsVerificationFallbackWhenGroundingRecoveryFails(t *testing.T) {
+func TestGenerateReturnsActionableFallbackWhenGroundingRecoveryFails(t *testing.T) {
 	calls := 0
 	h := testHandler(func(context.Context, string, []*googlegenai.Content, *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
 		calls++
@@ -226,7 +255,23 @@ func TestGenerateReturnsVerificationFallbackWhenGroundingRecoveryFails(t *testin
 
 	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest fact"}}})
 	require.NoError(t, err)
-	assert.Equal(t, groundingFailureFallback, got.Text)
+	assert.Equal(t, searchUnavailableFallback, got.Text)
+	assert.Equal(t, 2, calls)
+}
+
+func TestGenerateReturnsActionableFallbackWhenGroundingRecoveryIsEmpty(t *testing.T) {
+	calls := 0
+	h := testHandler(func(context.Context, string, []*googlegenai.Content, *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+		calls++
+		if calls == 1 {
+			return response("unsupported current answer", &googlegenai.GroundingMetadata{WebSearchQueries: []string{"query"}}), nil
+		}
+		return &googlegenai.GenerateContentResponse{}, nil
+	})
+
+	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest fact"}}})
+	require.NoError(t, err)
+	assert.Equal(t, searchUnavailableFallback, got.Text)
 	assert.Equal(t, 2, calls)
 }
 
@@ -240,6 +285,56 @@ func TestGenerateDoesNotRequireGroundingWithoutSearchQueries(t *testing.T) {
 	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "stable fact"}}})
 	require.NoError(t, err)
 	assert.Equal(t, "answer from model knowledge", got.Text)
+	assert.Equal(t, 1, calls)
+}
+
+func TestGenerateAllowsFirstBroadRecencyClarificationThenSearchesOnRepeat(t *testing.T) {
+	t.Run("first turn", func(t *testing.T) {
+		calls := 0
+		h := testHandler(func(_ context.Context, _ string, _ []*googlegenai.Content, cfg *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+			calls++
+			require.Len(t, cfg.Tools, 1)
+			return response("What topic or region should I focus on?", nil), nil
+		})
+		got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "What's happening?"}}})
+		require.NoError(t, err)
+		assert.Equal(t, "What topic or region should I focus on?", got.Text)
+		assert.Equal(t, 1, calls)
+	})
+
+	t.Run("repeat", func(t *testing.T) {
+		calls := 0
+		h := testHandler(func(_ context.Context, _ string, _ []*googlegenai.Content, cfg *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+			calls++
+			require.Len(t, cfg.Tools, 1)
+			assert.NotNil(t, cfg.Tools[0].GoogleSearch)
+			return response("Assuming general world news, here is the update.", &googlegenai.GroundingMetadata{
+				WebSearchQueries: []string{"world news"},
+				GroundingChunks:  []*googlegenai.GroundingChunk{{Web: &googlegenai.GroundingChunkWeb{URI: "https://example.com/news"}}},
+			}), nil
+		})
+		got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{
+			{Role: "user", Content: "What's happening?"},
+			{Role: "model", Content: "What topic or region should I focus on?"},
+			{Role: "user", Content: "Anything new?"},
+		}})
+		require.NoError(t, err)
+		assert.True(t, got.Grounded)
+		assert.Equal(t, 1, calls)
+	})
+}
+
+func TestGeneratePreservesTargetedClarificationBeforeRequiredSearch(t *testing.T) {
+	calls := 0
+	h := testHandler(func(context.Context, string, []*googlegenai.Content, *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+		calls++
+		return response("Which Mercury do you mean: the planet, element, or publication?", nil), nil
+	})
+
+	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "Research Mercury."}}})
+	require.NoError(t, err)
+	assert.Equal(t, "Which Mercury do you mean: the planet, element, or publication?", got.Text)
+	assert.False(t, got.Grounded)
 	assert.Equal(t, 1, calls)
 }
 
@@ -354,6 +449,35 @@ func TestGenerateRecoversThoughtOnlyMaxTokensResponse(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "recovered answer", got.Text)
 	assert.Equal(t, 2, calls)
+}
+
+func TestGeneratePreservesSearchAvailabilityAfterEmptyResponseRecovery(t *testing.T) {
+	calls := 0
+	h := testHandler(func(_ context.Context, _ string, _ []*googlegenai.Content, cfg *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+		calls++
+		switch calls {
+		case 1:
+			return thoughtOnlyResponse(googlegenai.FinishReasonMaxTokens), nil
+		case 2:
+			assert.Empty(t, cfg.Tools)
+			return response("Recovered but unsupported current answer.", nil), nil
+		case 3:
+			require.Len(t, cfg.Tools, 1)
+			assert.NotNil(t, cfg.Tools[0].GoogleSearch)
+			return response("Verified current answer.", &googlegenai.GroundingMetadata{
+				WebSearchQueries: []string{"latest Go release"},
+				GroundingChunks:  []*googlegenai.GroundingChunk{{Web: &googlegenai.GroundingChunkWeb{URI: "https://go.dev/doc/devel/release"}}},
+			}), nil
+		default:
+			return nil, errors.New("unexpected generation call")
+		}
+	})
+
+	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "What is the latest Go release?"}}})
+	require.NoError(t, err)
+	assert.Equal(t, "Verified current answer.", got.Text)
+	assert.True(t, got.Grounded)
+	assert.Equal(t, 3, calls)
 }
 
 func TestGenerateRecoversAfterToolWithoutExecutingItTwice(t *testing.T) {

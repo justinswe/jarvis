@@ -22,7 +22,7 @@ const (
 const (
 	accuracyFailureFallback       = "I couldn't verify that response against trusted evidence, so I don't want to guess."
 	codeExecutionFailureFallback  = "I couldn't verify that calculation with code execution, so I don't want to guess."
-	groundingDisabledFallback     = "I couldn't verify that current information because web search is disabled for this server."
+	groundingDisabledFallback     = "Web search is disabled for this server, so I can't confirm current details. I can still explain stable background or help narrow the question."
 	provenanceFailureFallback     = "No source was preserved for that earlier claim, so I can't verify where it came from."
 	runtimeVerificationFallback   = "I couldn't verify the current runtime value, so I don't want to guess."
 	channelHistoryFailureFallback = "I couldn't search stored channel history, so I don't want to guess about earlier messages."
@@ -30,6 +30,14 @@ const (
 
 	accuracyRetryPrompt      = "This is the single accuracy correction. Use only successful tool results and recorded evidence in the supplied conversation. Correct every conflicting runtime value. Never invent an internal clock, source, search, tool call, or evidence. If provenance was not preserved in a Sources or Evidence used footer, say so explicitly."
 	codeExecutionRetryPrompt = "This is the single calculation correction. You must use code execution, check its successful result, and base the answer on that result. If code execution does not succeed, do not provide an unverified numeric answer."
+)
+
+const (
+	searchTriggerNone             = "none"
+	searchTriggerExplicit         = "explicit"
+	searchTriggerVolatile         = "volatile"
+	searchTriggerImplicitVolatile = "implicit-volatile"
+	searchTriggerModelOptional    = "model-optional"
 )
 
 var (
@@ -45,6 +53,8 @@ var (
 	explicitSearchPattern    = regexp.MustCompile(`(?i)\b(?:search|browse|look up|lookup|research|verify|fact[ -]?check|cite|find sources?)\b`)
 	volatilePattern          = regexp.MustCompile(`(?i)\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b.*\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b|\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b.*\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b|\b(?:weather|forecast|news|stock price|sports score|election results?)\b`)
 	implicitVolatilePattern  = regexp.MustCompile(`(?i)\bwho (?:is|are) (?:the )?(?:president|prime minister|governor|mayor|ceo|officeholder)\b|\bwhat(?:'s| is) (?:the )?(?:price|score|standings|weather|forecast|news)\b`)
+	recencyLanguagePattern   = regexp.MustCompile(`(?i)\b(?:what(?:'s| is) happening|what happened most recently|anything new|catch me up|recent developments|what just happened)\b`)
+	broadRecencyPattern      = regexp.MustCompile(`(?i)^\s*(?:what(?:'s| is) happening|what happened most recently|anything new|catch me up|what just happened|what(?:'s| is) new|what(?:'s| is) the latest|(?:tell me about )?recent developments)\s*[?.!]*\s*$`)
 	todayPattern             = regexp.MustCompile(`(?i)\b(?:today|tonight)\b`)
 	channelScopePattern      = regexp.MustCompile(`(?i)\b(?:this|the|current) channel\b|\bchannel (?:history|messages?)\b`)
 	channelLookupPattern     = regexp.MustCompile(`(?i)\b(?:search|find|look up|lookup|what did|who said|when did|where did)\b`)
@@ -54,9 +64,10 @@ var (
 	computationPattern = regexp.MustCompile(`(?i)\b(?:calculate|compute|evaluate|solve|equation|exact(?:ly)?|statistics?|standard deviation|variance|median|percentile|unit conversion|convert\s+[-+]?\d+(?:\.\d+)?|data analysis|analy[sz]e (?:this )?(?:data|dataset))\b|\b(?:mean|average|sum|correlation|regression)\b[^.!?]*\d|\bhow many\s+(?:millimeters?|centimeters?|meters?|kilometers?|inches?|feet|yards?|miles?|grams?|kilograms?|ounces?|pounds?)\s+(?:are\s+)?in\b|[-+]?\d+(?:\.\d+)?\s*(?:\+|-|\*|/|\^|=)\s*[-+]?\d`)
 	numericPattern     = regexp.MustCompile(`\d`)
 
-	internalClockPattern      = regexp.MustCompile(`(?i)\b(?:my|an?|the) internal clock\b|\binternal clock says\b`)
-	inventedProvenancePattern = regexp.MustCompile(`(?i)\b(?:i (?:got|pulled|retrieved) (?:that|it) from|my source (?:was|is)|i (?:used|called|checked|searched|browsed)|according to my (?:search|clock|source))\b`)
-	noProvenancePattern       = regexp.MustCompile(`(?i)\b(?:no source (?:was|is)|source was not|wasn't (?:recorded|preserved)|cannot verify where|can't verify where|do not have (?:a )?(?:recorded|preserved) source|don't have (?:a )?(?:recorded|preserved) source)\b`)
+	internalClockPattern         = regexp.MustCompile(`(?i)\b(?:my|an?|the) internal clock\b|\binternal clock says\b`)
+	inventedProvenancePattern    = regexp.MustCompile(`(?i)\b(?:i (?:got|pulled|retrieved) (?:that|it) from|my source (?:was|is)|i (?:used|called|checked|searched|browsed)|according to my (?:search|clock|source))\b`)
+	noProvenancePattern          = regexp.MustCompile(`(?i)\b(?:no source (?:was|is)|source was not|wasn't (?:recorded|preserved)|cannot verify where|can't verify where|do not have (?:a )?(?:recorded|preserved) source|don't have (?:a )?(?:recorded|preserved) source)\b`)
+	targetedClarificationPattern = regexp.MustCompile(`(?i)^\s*(?:which|what|where|when|who|could you|can you|would you|do you|are you asking)\b[^\n]{0,380}\?\s*$`)
 
 	timeClaimPattern          = regexp.MustCompile(`(?i)\b(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)?(?:\s+(?:UTC|GMT|[ECMP][DS]T))?\b`)
 	dateClaimPattern          = regexp.MustCompile(`(?i)\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4})\b`)
@@ -117,7 +128,7 @@ func ClassifyAccuracyPolicy(request string) AccuracyPolicy {
 	}
 	explicitWebSearch := explicitSearchPattern.MatchString(unquoted) && (!channelHistory || webScopePattern.MatchString(unquoted))
 	policy.GroundingRequired = explicitWebSearch || (channelHistory && webScopePattern.MatchString(unquoted)) ||
-		volatilePattern.MatchString(unquoted) || implicitVolatilePattern.MatchString(unquoted)
+		volatilePattern.MatchString(unquoted) || implicitVolatilePattern.MatchString(unquoted) || recencyLanguagePattern.MatchString(unquoted)
 	if runtimeVersionOnlyPattern.MatchString(unquoted) && !explicitSearchPattern.MatchString(unquoted) {
 		policy.GroundingRequired = false
 	}
@@ -132,6 +143,55 @@ func ClassifyAccuracyPolicy(request string) AccuracyPolicy {
 		policy.CodeExecutionEnabled = false
 	}
 	return policy
+}
+
+func classifySearchTrigger(request string, policy AccuracyPolicy, webSearchEnabled bool) string {
+	request = sanitizeText(request)
+	unquoted := quotedTextPattern.ReplaceAllString(request, " ")
+	unquoted = spacePattern.ReplaceAllString(unquoted, " ")
+	channelHistory := channelHistoryIntent(unquoted)
+	if explicitSearchPattern.MatchString(unquoted) && (!channelHistory || webScopePattern.MatchString(unquoted)) {
+		return searchTriggerExplicit
+	}
+	if volatilePattern.MatchString(unquoted) || recencyLanguagePattern.MatchString(unquoted) {
+		return searchTriggerVolatile
+	}
+	if implicitVolatilePattern.MatchString(unquoted) {
+		return searchTriggerImplicitVolatile
+	}
+	if policy.GroundingRequired {
+		return searchTriggerVolatile
+	}
+	if webSearchEnabled {
+		return searchTriggerModelOptional
+	}
+	return searchTriggerNone
+}
+
+func broadRecencyNeedsClarification(messages []Message) bool {
+	request := currentRequest(messages)
+	if !broadRecencyPattern.MatchString(request) {
+		return false
+	}
+
+	currentUserFound := false
+	for i := len(messages) - 1; i >= 0; i-- {
+		if !strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
+			continue
+		}
+		if !currentUserFound {
+			currentUserFound = true
+			continue
+		}
+		if broadRecencyPattern.MatchString(sanitizeText(messages[i].Content)) {
+			return false
+		}
+	}
+	return !recencyLanguagePattern.MatchString(historicalContext(messages))
+}
+
+func isTargetedClarification(text string) bool {
+	return targetedClarificationPattern.MatchString(sanitizeText(text))
 }
 
 func channelHistoryIntent(request string) bool {

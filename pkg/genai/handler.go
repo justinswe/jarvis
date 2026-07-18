@@ -15,18 +15,25 @@ import (
 )
 
 const (
-	DefaultMaxOutputTokens   = 2048
-	MaxOutputTokensLimit     = 8192
-	emptyRecoveryMinTokens   = 2048
-	selectedModel            = "gemini-3.1-flash-lite"
-	verificationCaveat       = "I couldn't verify this with any web sources."
-	blockedResponseFallback  = "I couldn't complete that exact request, but I can still help with a high-level explanation, risk assessment, or a safer alternative."
-	emptyResponseFallback    = "I couldn't generate a response this time. Please try again."
-	groundingFailureFallback = "I couldn't verify that with reliable web sources, so I don't want to guess."
-	groundingRetryPrompt     = "This is a verification retry. Use Google Search and answer only when the response includes supporting web sources. Do not rely on unsupported prior knowledge. If no relevant sources are available, say that the information could not be verified."
-	toolFailureFallback      = "I encountered an error while using a tool and couldn't complete the request."
-	maxToolRounds            = 2
-	maxFunctionCallsPerRound = 2
+	DefaultMaxOutputTokens    = 2048
+	MaxOutputTokensLimit      = 8192
+	emptyRecoveryMinTokens    = 2048
+	selectedModel             = "gemini-3.1-flash-lite"
+	verificationCaveat        = "I couldn't verify this with any web sources."
+	blockedResponseFallback   = "I couldn't complete that exact request, but I can still help with a high-level explanation, risk assessment, or a safer alternative."
+	emptyResponseFallback     = "I couldn't generate a response this time. Please try again."
+	searchEvidenceGapPrefix   = "I couldn't confirm the current details from usable web sources."
+	searchUnavailableFallback = "Web search didn't return usable results for that request. Give me a topic, region, date range, or link and I'll try a narrower search."
+	groundingRetryPrompt      = "This is the single Search recovery. Use Google Search and return the closest useful outcome: (1) a grounded answer, (2) a verified partial answer, (3) a concise explanation of conflicting evidence, or (4) a targeted clarification or clearly qualified stable background when no current fact can be supported. Support every current specific with returned web evidence. Never repeat a stock verification refusal or say that you do not want to guess."
+	toolFailureFallback       = "I encountered an error while using a tool and couldn't complete the request."
+	maxToolRounds             = 2
+	maxFunctionCallsPerRound  = 2
+)
+
+const (
+	promptVariantBaseline = "baseline"
+	promptVariantConcise  = "concise"
+	promptVariantFewShot  = "few-shot"
 )
 
 const (
@@ -46,6 +53,30 @@ const (
 	groundingOutcomeGrounded                  = "grounded"
 	groundingOutcomeSearchedWithoutChunks     = "searched_without_chunks"
 	groundingOutcomeChunksWithoutValidSources = "chunks_without_valid_sources"
+)
+
+const (
+	searchResultNotUsed            = "not-used"
+	searchResultGrounded           = "grounded"
+	searchResultNoSourcesQualified = "no-sources-qualified"
+	searchResultDisabled           = "disabled"
+	searchResultProviderFailed     = "provider-failed"
+	searchResultEmpty              = "empty"
+)
+
+const (
+	terminalFallbackNone                 = "none"
+	terminalFallbackBlocked              = "blocked"
+	terminalFallbackEmptyResponse        = "empty-response"
+	terminalFallbackSearchDisabled       = "search-disabled"
+	terminalFallbackSearchProviderFailed = "search-provider-failed"
+	terminalFallbackSearchEmpty          = "search-empty"
+	terminalFallbackToolFailed           = "tool-failed"
+	terminalFallbackAccuracyFailed       = "accuracy-validation-failed"
+	terminalFallbackCodeExecutionFailed  = "code-execution-failed"
+	terminalFallbackRuntimeFailed        = "runtime-verification-failed"
+	terminalFallbackChannelHistoryFailed = "channel-history-failed"
+	terminalFallbackProvenanceFailed     = "provenance-failed"
 )
 
 const (
@@ -85,9 +116,36 @@ Do not include your name or a speaker prefix in responses. Use Discord-compatibl
 
 # Configuration reliability
 Report a configuration change as successful only after its mutation tool returns a successful result.`
-	webSearchSystemPrompt = "Google Search is available. Use it when the user explicitly asks for web research, current public information is needed, or a factual answer is niche, uncertain, or unsupported by the supplied conversation. Use the minimum necessary queries and include the current date from get_runtime_context when it materially improves a time-sensitive search. Do not repeat the full question or conversation history in queries. Present claims as verified only when the response includes supporting web sources; if no usable sources are returned, say what could not be verified and provide any still-useful, clearly qualified context."
-	DefaultPrompt         = ""
+	baselineSearchSystemPrompt        = "Google Search is available. Use it when the user explicitly asks for web research, current public information is needed, or a factual answer is niche, uncertain, or unsupported by the supplied conversation. Use the minimum necessary queries and include the current date from get_runtime_context when it materially improves a time-sensitive search. Do not repeat the full question or conversation history in queries. Present claims as verified only when the response includes supporting web sources; if no usable sources are returned, say what could not be verified and provide any still-useful, clearly qualified context."
+	conciseSearchSystemPromptTemplate = `# Search and evidence policy
+- Use Google Search for explicit research requests and current or volatile public facts. Also use it when a niche or uncertain fact would materially benefit from verification; normally answer stable, ordinary facts without Search.
+- Base current claims and citations on returned evidence. Use the minimum necessary queries and never claim Search occurred unless it did.
+- Clearly distinguish verified facts, reasonable inference from sources, and uncertain stable background.
+- If a request is ambiguous, ask one targeted clarification. For a broad first-turn recency request, ask for a topic or region. If the user repeats it without scope, state that you are assuming general world news and Search.
+- If evidence is incomplete or conflicting, give the verified portion, summarize the unresolved conflict, or ask a targeted question.
+- Never assert unsupported current specifics as verified.
+- Still provide the closest useful response; do not give a bare verification refusal.
+- Model context: {{MODEL}} has a {{CUTOFF}} knowledge cutoff. Treat later or volatile details as requiring Search.
+- For relative-date research, use available runtime context and never invent a date.`
+	fewShotSearchExamples = `# Compact examples
+User: What's happening?
+Assistant: What topic or region should I focus on?
+User repeats without scope: What's happening?
+Assistant behavior: State the general-world-news assumption, Search, and give a sourced update.
+
+User: Research the latest stable Go release.
+Assistant behavior: Search and synthesize only supported release details with sources.
+
+User: Which of these conflicting reports is correct?
+Assistant behavior: Search, state what sources agree on, explain the remaining conflict, and avoid choosing an unsupported current claim.`
+	DefaultPrompt = ""
 )
+
+var modelKnowledgeCutoffs = map[string]string{
+	selectedModel: "January 2025",
+}
+
+var webSearchSystemPrompt = searchSystemPrompt(promptVariantConcise)
 
 type Message struct {
 	Role    string
@@ -167,9 +225,11 @@ type Config struct {
 type generateFunc func(context.Context, string, []*googlegenai.Content, *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error)
 
 type Handler struct {
-	client   *googlegenai.Client
-	cfg      Config
-	generate generateFunc
+	client              *googlegenai.Client
+	cfg                 Config
+	generate            generateFunc
+	searchPromptVariant string
+	observeGeneration   func(generationDiagnostics)
 }
 
 type responseRecovery struct {
@@ -181,9 +241,10 @@ type responseRecovery struct {
 }
 
 type groundingRecovery struct {
-	response         *googlegenai.GenerateContentResponse
-	attempted        bool
-	terminalFallback bool
+	response               *googlegenai.GenerateContentResponse
+	attempted              bool
+	terminalFallback       bool
+	terminalFallbackReason string
 }
 
 type codeExecutionRecovery struct {
@@ -192,12 +253,33 @@ type codeExecutionRecovery struct {
 }
 
 type generationTrace struct {
-	searchAttempted      bool
-	accuracyRecoveryUsed bool
-	evidence             []Evidence
-	modelCalls           int
-	usedTools            map[string]struct{}
-	failedTools          map[string]struct{}
+	searchAttempted        bool
+	searchQueryCount       int
+	searchTrigger          string
+	searchResult           string
+	groundingRetryResult   string
+	terminalFallbackReason string
+	accuracyRecoveryUsed   bool
+	evidence               []Evidence
+	modelCalls             int
+	usedTools              map[string]struct{}
+	failedTools            map[string]struct{}
+}
+
+type generationDiagnostics struct {
+	searchRequired         bool
+	searchAttempted        bool
+	searchTrigger          string
+	searchResult           string
+	groundingRetryResult   string
+	searchQueryCount       int
+	modelCalls             int
+	retryUsed              bool
+	validSourceCount       int
+	supportedSourceCount   int
+	groundingOutcome       string
+	terminalFallbackReason string
+	duration               time.Duration
 }
 
 type generationAttempt struct {
@@ -222,6 +304,7 @@ type groundingDiagnostics struct {
 	chunkCount            int
 	webChunkCount         int
 	supportCount          int
+	supportedSourceCount  int
 	validSourceCount      int
 	invalidSourceCount    int
 	duplicateSourceCount  int
@@ -249,7 +332,7 @@ func New(ctx context.Context, cfg Config) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &Handler{client: client, cfg: cfg}
+	h := &Handler{client: client, cfg: cfg, searchPromptVariant: promptVariantConcise}
 	h.generate = client.Models.GenerateContent
 	return h, nil
 }
@@ -263,8 +346,13 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 		return GenerateResponse{}, err
 	}
 	request := currentRequest(req.Messages)
+	configuredGroundingRequired := generationConfig.AccuracyPolicy.GroundingRequired
 	policy := mergeAccuracyPolicies(generationConfig.AccuracyPolicy, ClassifyAccuracyPolicy(request))
+	if !configuredGroundingRequired && broadRecencyNeedsClarification(req.Messages) {
+		policy.GroundingRequired = false
+	}
 	generationConfig.AccuracyPolicy = policy
+	searchTrigger := classifySearchTrigger(request, policy, generationConfig.WebSearchEnabled)
 	if requiresTimezoneClarification(request, policy) {
 		return GenerateResponse{Text: timezoneClarificationFallback}, nil
 	}
@@ -277,6 +365,7 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 		zap.Int("max_output_tokens", generationConfig.MaxOutputTokens),
 		zap.String("thinking_level", string(generationConfig.ThinkingLevel)),
 		zap.Bool("google_search_available", generationConfig.WebSearchEnabled),
+		zap.String("search_trigger", searchTrigger),
 		zap.Int("function_tool_count", len(req.Tools)),
 		zap.Strings("required_function_names", policy.RequiredFunctionNames),
 		zap.Bool("grounding_required", policy.GroundingRequired),
@@ -314,7 +403,14 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 		searchEnabled = false
 		codeExecutionEnabled = false
 	}
-	trace := &generationTrace{usedTools: make(map[string]struct{}), failedTools: make(map[string]struct{})}
+	trace := &generationTrace{
+		searchTrigger:          searchTrigger,
+		searchResult:           searchResultNotUsed,
+		groundingRetryResult:   searchResultNotUsed,
+		terminalFallbackReason: terminalFallbackNone,
+		usedTools:              make(map[string]struct{}),
+		failedTools:            make(map[string]struct{}),
+	}
 	toolDisabledFallback := false
 	resp, err := h.generateAttempt(ctx, req, generationConfig, contents, generationAttempt{
 		kind:                 attemptInitial,
@@ -361,6 +457,9 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 	}
 	resp = grounding.response
 	terminalFallback := recovery.terminalFallback || grounding.terminalFallback
+	if grounding.terminalFallbackReason != "" {
+		trace.terminalFallbackReason = grounding.terminalFallbackReason
+	}
 	codeRecovery, err := h.ensureCodeExecuted(ctx, req, recovery.config, contents, resp, terminalFallback, policy, trace)
 	if err != nil {
 		return GenerateResponse{}, err
@@ -430,6 +529,12 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 	if trace.searchAttempted {
 		trace.usedTools["google_search"] = struct{}{}
 	}
+	if grounded {
+		trace.searchResult = searchResultGrounded
+	}
+	if terminalFallback && trace.terminalFallbackReason == terminalFallbackNone {
+		trace.terminalFallbackReason = terminalFallbackReasonForResponse(resp)
+	}
 	evidence = uniqueEvidence(evidence)
 	app.L().Info("Gemini generation completed",
 		zap.String("request_id", req.RequestID),
@@ -440,9 +545,31 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (GenerateRe
 		zap.Strings("failed_tools", mapKeys(trace.failedTools)),
 		zap.Strings("evidence_kinds", evidenceKinds(evidence)),
 		zap.Bool("grounded", grounded),
+		zap.String("search_trigger", trace.searchTrigger),
+		zap.String("search_result", trace.searchResult),
+		zap.String("grounding_retry_result", trace.groundingRetryResult),
+		zap.Int("supported_source_count", diagnostics.supportedSourceCount),
 		zap.Bool("accuracy_retry_used", trace.accuracyRecoveryUsed),
 		zap.Bool("terminal_fallback", terminalFallback),
+		zap.String("terminal_fallback_reason", trace.terminalFallbackReason),
 	)
+	if h.observeGeneration != nil {
+		h.observeGeneration(generationDiagnostics{
+			searchRequired:         policy.GroundingRequired,
+			searchAttempted:        trace.searchAttempted,
+			searchTrigger:          trace.searchTrigger,
+			searchResult:           trace.searchResult,
+			groundingRetryResult:   trace.groundingRetryResult,
+			searchQueryCount:       trace.searchQueryCount,
+			modelCalls:             trace.modelCalls,
+			retryUsed:              trace.accuracyRecoveryUsed,
+			validSourceCount:       diagnostics.validSourceCount,
+			supportedSourceCount:   diagnostics.supportedSourceCount,
+			groundingOutcome:       diagnostics.outcome,
+			terminalFallbackReason: trace.terminalFallbackReason,
+			duration:               time.Since(started),
+		})
+	}
 	return GenerateResponse{Text: text, Grounded: grounded, Sources: sources, Evidence: evidence}, nil
 }
 
@@ -488,8 +615,11 @@ func (h *Handler) generateAttempt(ctx context.Context, req GenerateRequest, gene
 	}
 
 	diagnostics := analyzeGrounding(resp, 3)
-	if trace != nil && diagnostics.searchAttempted {
-		trace.searchAttempted = true
+	if trace != nil {
+		trace.searchQueryCount += diagnostics.queryCount
+		if diagnostics.searchAttempted {
+			trace.searchAttempted = true
+		}
 	}
 	fields := []zap.Field{
 		zap.String("model", selectedModel),
@@ -513,6 +643,7 @@ func (h *Handler) generateAttempt(ctx context.Context, req GenerateRequest, gene
 		zap.Int("grounding_chunk_count", diagnostics.chunkCount),
 		zap.Int("web_chunk_count", diagnostics.webChunkCount),
 		zap.Int("grounding_support_count", diagnostics.supportCount),
+		zap.Int("supported_source_count", diagnostics.supportedSourceCount),
 		zap.Int("valid_source_count", diagnostics.validSourceCount),
 		zap.Int("invalid_source_count", diagnostics.invalidSourceCount),
 		zap.Int("duplicate_source_count", diagnostics.duplicateSourceCount),
@@ -585,7 +716,7 @@ func (h *Handler) contentConfig(search bool, declarations []*googlegenai.Functio
 
 func (h *Handler) contentConfigFor(generationConfig RequestConfig, search bool, declarations []*googlegenai.FunctionDeclaration, mode googlegenai.FunctionCallingConfigMode, allowedFunctionNames []string, codeExecution bool) *googlegenai.GenerateContentConfig {
 	cfg := &googlegenai.GenerateContentConfig{
-		SystemInstruction: &googlegenai.Content{Parts: []*googlegenai.Part{{Text: composeRuntimeSystemPrompt(generationConfig.Prompt, search)}}},
+		SystemInstruction: &googlegenai.Content{Parts: []*googlegenai.Part{{Text: composeRuntimeSystemPromptForVariant(generationConfig.Prompt, search, h.searchPromptVariant)}}},
 		MaxOutputTokens:   int32(generationConfig.MaxOutputTokens),
 		ThinkingConfig:    &googlegenai.ThinkingConfig{ThinkingLevel: generationConfig.ThinkingLevel},
 	}
@@ -720,6 +851,7 @@ func (h *Handler) recoverEmptyResponse(ctx context.Context, req GenerateRequest,
 		app.L().Warn("Gemini recovery returned no visible text", append(fields, responseLogFields(recovery)...)...)
 		return responseRecovery{response: textResponse(emptyResponseFallback), config: recoveryConfig, attempted: true, terminalFallback: true}, nil
 	}
+	recoveryConfig.WebSearchEnabled = generationConfig.WebSearchEnabled
 	return responseRecovery{
 		response:           recovery,
 		config:             recoveryConfig,
@@ -730,17 +862,44 @@ func (h *Handler) recoverEmptyResponse(ctx context.Context, req GenerateRequest,
 
 func (h *Handler) ensureGroundedResponse(ctx context.Context, req GenerateRequest, generationConfig RequestConfig, contents []*googlegenai.Content, resp *googlegenai.GenerateContentResponse, terminalFallback bool, policy AccuracyPolicy, trace *generationTrace) (groundingRecovery, error) {
 	initialDiagnostics := analyzeGrounding(resp, 3)
-	if terminalFallback || initialDiagnostics.validSourceCount > 0 {
+	if terminalFallback {
 		return groundingRecovery{response: resp, terminalFallback: terminalFallback}, nil
 	}
+	if initialDiagnostics.validSourceCount > 0 {
+		if trace != nil {
+			trace.searchResult = searchResultGrounded
+		}
+		return groundingRecovery{response: resp}, nil
+	}
 	if policy.GroundingRequired && !generationConfig.WebSearchEnabled {
-		return groundingRecovery{response: textResponse(groundingDisabledFallback), terminalFallback: true}, nil
+		if trace != nil {
+			trace.searchResult = searchResultDisabled
+		}
+		return groundingRecovery{
+			response:               textResponse(groundingDisabledFallback),
+			terminalFallback:       true,
+			terminalFallbackReason: terminalFallbackSearchDisabled,
+		}, nil
+	}
+	if trace != nil && !trace.searchAttempted && isTargetedClarification(responseText(resp)) {
+		trace.searchResult = searchResultNotUsed
+		return groundingRecovery{response: resp}, nil
 	}
 	if trace == nil || trace.accuracyRecoveryUsed || (!policy.GroundingRequired && !trace.searchAttempted) {
 		if policy.GroundingRequired {
-			return groundingRecovery{response: textResponse(groundingFailureFallback), terminalFallback: true}, nil
+			if trace != nil {
+				trace.searchResult = searchResultEmpty
+			}
+			return groundingRecovery{
+				response:               textResponse(searchUnavailableFallback),
+				terminalFallback:       true,
+				terminalFallbackReason: terminalFallbackSearchEmpty,
+			}, nil
 		}
-		return groundingRecovery{response: resp, terminalFallback: terminalFallback}, nil
+		if trace != nil {
+			trace.searchResult = searchResultNotUsed
+		}
+		return groundingRecovery{response: resp}, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return groundingRecovery{}, err
@@ -754,7 +913,7 @@ func (h *Handler) ensureGroundedResponse(ctx context.Context, req GenerateReques
 		recoveryConfig.MaxOutputTokens = emptyRecoveryMinTokens
 	}
 	recoveryConfig.Prompt = strings.TrimSpace(recoveryConfig.Prompt + "\n\n" + groundingRetryPrompt)
-	app.L().Warn("Required grounding was missing; retrying with Search only",
+	app.L().Warn("Usable grounding was missing; retrying with Search only",
 		zap.String("request_id", req.RequestID),
 		zap.String("channel_id", req.ChannelID),
 		zap.String("grounding_outcome", initialDiagnostics.outcome),
@@ -762,6 +921,7 @@ func (h *Handler) ensureGroundedResponse(ctx context.Context, req GenerateReques
 		zap.Int("grounding_chunk_count", initialDiagnostics.chunkCount),
 	)
 	trace.accuracyRecoveryUsed = true
+	trace.groundingRetryResult = searchResultEmpty
 	recovery, err := h.generateAttempt(ctx, req, recoveryConfig, contents, generationAttempt{
 		kind:          attemptGroundingRecovery,
 		searchEnabled: true,
@@ -771,15 +931,23 @@ func (h *Handler) ensureGroundedResponse(ctx context.Context, req GenerateReques
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return groundingRecovery{}, ctxErr
 		}
-		app.L().Warn("Grounding recovery failed; returning verification fallback",
+		app.L().Warn("Grounding recovery failed; returning actionable Search fallback",
 			zap.String("request_id", req.RequestID),
 			zap.String("channel_id", req.ChannelID),
 			zap.Error(err),
 		)
-		return groundingRecovery{response: textResponse(groundingFailureFallback), attempted: true, terminalFallback: true}, nil
+		trace.searchResult = searchResultProviderFailed
+		trace.groundingRetryResult = searchResultProviderFailed
+		return groundingRecovery{
+			response:               textResponse(searchUnavailableFallback),
+			attempted:              true,
+			terminalFallback:       true,
+			terminalFallbackReason: terminalFallbackSearchProviderFailed,
+		}, nil
 	}
 	diagnostics := analyzeGrounding(recovery, 3)
-	if responseText(recovery) == "" || responseFunctionCallCount(recovery) > 0 || diagnostics.validSourceCount == 0 {
+	text := responseText(recovery)
+	if text == "" || responseFunctionCallCount(recovery) > 0 {
 		app.L().Warn("Grounding recovery returned no verified answer",
 			zap.String("request_id", req.RequestID),
 			zap.String("channel_id", req.ChannelID),
@@ -789,8 +957,32 @@ func (h *Handler) ensureGroundedResponse(ctx context.Context, req GenerateReques
 			zap.Int("valid_source_count", diagnostics.validSourceCount),
 			zap.Int("function_call_count", responseFunctionCallCount(recovery)),
 		)
-		return groundingRecovery{response: textResponse(groundingFailureFallback), attempted: true, terminalFallback: true}, nil
+		trace.searchResult = searchResultEmpty
+		trace.groundingRetryResult = searchResultEmpty
+		return groundingRecovery{
+			response:               textResponse(searchUnavailableFallback),
+			attempted:              true,
+			terminalFallback:       true,
+			terminalFallbackReason: terminalFallbackSearchEmpty,
+		}, nil
 	}
+	if diagnostics.validSourceCount == 0 {
+		app.L().Warn("Grounding recovery returned qualified text without usable sources",
+			zap.String("request_id", req.RequestID),
+			zap.String("channel_id", req.ChannelID),
+			zap.String("grounding_outcome", diagnostics.outcome),
+			zap.Int("search_query_count", diagnostics.queryCount),
+			zap.Int("grounding_chunk_count", diagnostics.chunkCount),
+		)
+		trace.searchResult = searchResultNoSourcesQualified
+		trace.groundingRetryResult = searchResultNoSourcesQualified
+		return groundingRecovery{
+			response:  textResponse(searchEvidenceGapPrefix + "\n\n" + text),
+			attempted: true,
+		}, nil
+	}
+	trace.searchResult = searchResultGrounded
+	trace.groundingRetryResult = searchResultGrounded
 	return groundingRecovery{response: recovery, attempted: true}, nil
 }
 
@@ -1309,7 +1501,7 @@ func textResponse(text string) *googlegenai.GenerateContentResponse {
 
 func isTerminalFallbackResponse(resp *googlegenai.GenerateContentResponse) bool {
 	switch responseText(resp) {
-	case blockedResponseFallback, emptyResponseFallback, groundingFailureFallback, toolFailureFallback,
+	case blockedResponseFallback, emptyResponseFallback, searchUnavailableFallback, toolFailureFallback,
 		accuracyFailureFallback, codeExecutionFailureFallback, groundingDisabledFallback,
 		provenanceFailureFallback, runtimeVerificationFallback, timezoneClarificationFallback:
 		return true
@@ -1318,18 +1510,47 @@ func isTerminalFallbackResponse(resp *googlegenai.GenerateContentResponse) bool 
 	}
 }
 
+func terminalFallbackReasonForResponse(resp *googlegenai.GenerateContentResponse) string {
+	switch responseText(resp) {
+	case blockedResponseFallback:
+		return terminalFallbackBlocked
+	case emptyResponseFallback, searchUnavailableFallback:
+		return terminalFallbackEmptyResponse
+	case groundingDisabledFallback:
+		return terminalFallbackSearchDisabled
+	case toolFailureFallback:
+		return terminalFallbackToolFailed
+	case codeExecutionFailureFallback:
+		return terminalFallbackCodeExecutionFailed
+	case runtimeVerificationFallback:
+		return terminalFallbackRuntimeFailed
+	case channelHistoryFailureFallback:
+		return terminalFallbackChannelHistoryFailed
+	case provenanceFailureFallback:
+		return terminalFallbackProvenanceFailed
+	case accuracyFailureFallback:
+		return terminalFallbackAccuracyFailed
+	default:
+		return terminalFallbackNone
+	}
+}
+
 func composeSystemPrompt(prompt string, webSearch bool) string {
 	return composeRuntimeSystemPrompt(prompt, webSearch)
 }
 
 func composeRuntimeSystemPrompt(prompt string, webSearch bool) string {
+	return composeRuntimeSystemPromptForVariant(prompt, webSearch, promptVariantConcise)
+}
+
+func composeRuntimeSystemPromptForVariant(prompt string, webSearch bool, variant string) string {
 	prompt = strings.TrimSpace(strings.ReplaceAll(prompt, `\n`, "\n"))
 	if prompt == "" {
 		prompt = DefaultPrompt
 	}
 	parts := []string{BaseSystemPrompt}
 	if webSearch {
-		parts = append(parts, webSearchSystemPrompt)
+		parts = append(parts, searchSystemPrompt(variant))
 	}
 	if prompt != "" {
 		parts = append(parts,
@@ -1340,6 +1561,29 @@ func composeRuntimeSystemPrompt(prompt string, webSearch bool) string {
 	return strings.Join(parts, "\n\n")
 }
 
+func searchSystemPrompt(variant string) string {
+	if variant == "" {
+		variant = promptVariantConcise
+	}
+	if variant == promptVariantBaseline {
+		return baselineSearchSystemPrompt
+	}
+	cutoff, ok := modelKnowledgeCutoffs[selectedModel]
+	if !ok {
+		panic("selected Gemini model is missing a knowledge cutoff")
+	}
+	prompt := strings.ReplaceAll(conciseSearchSystemPromptTemplate, "{{MODEL}}", selectedModel)
+	prompt = strings.ReplaceAll(prompt, "{{CUTOFF}}", cutoff)
+	switch variant {
+	case promptVariantConcise:
+		return prompt
+	case promptVariantFewShot:
+		return prompt + "\n\n" + fewShotSearchExamples
+	default:
+		panic("unknown Search prompt variant: " + variant)
+	}
+}
+
 func analyzeGrounding(resp *googlegenai.GenerateContentResponse, sourceLimit int) groundingDiagnostics {
 	diagnostics := groundingDiagnostics{outcome: groundingOutcomeNotUsed}
 	if resp == nil {
@@ -1347,6 +1591,7 @@ func analyzeGrounding(resp *googlegenai.GenerateContentResponse, sourceLimit int
 	}
 	seenURLs := make(map[string]struct{})
 	seenDomains := make(map[string]struct{})
+	seenSupportedURLs := make(map[string]struct{})
 	for _, candidate := range resp.Candidates {
 		if candidate == nil || candidate.GroundingMetadata == nil {
 			continue
@@ -1356,6 +1601,30 @@ func analyzeGrounding(resp *googlegenai.GenerateContentResponse, sourceLimit int
 		diagnostics.queryCount += len(metadata.WebSearchQueries)
 		diagnostics.chunkCount += len(metadata.GroundingChunks)
 		diagnostics.supportCount += len(metadata.GroundingSupports)
+		for _, support := range metadata.GroundingSupports {
+			if support == nil {
+				continue
+			}
+			for _, chunkIndex := range support.GroundingChunkIndices {
+				index := int(chunkIndex)
+				if index < 0 || index >= len(metadata.GroundingChunks) {
+					continue
+				}
+				chunk := metadata.GroundingChunks[index]
+				if chunk == nil || chunk.Web == nil {
+					continue
+				}
+				normalizedURL, _, ok := normalizeSourceURL(chunk.Web.URI)
+				if !ok {
+					continue
+				}
+				if _, ok := seenSupportedURLs[normalizedURL]; ok {
+					continue
+				}
+				seenSupportedURLs[normalizedURL] = struct{}{}
+				diagnostics.supportedSourceCount++
+			}
+		}
 		if metadata.SearchEntryPoint != nil {
 			diagnostics.searchEntryPoint = true
 			renderedBytes := len(metadata.SearchEntryPoint.RenderedContent)
