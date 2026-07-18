@@ -73,6 +73,12 @@ func TestClassifyAccuracyPolicyUsesOnlyCurrentIntent(t *testing.T) {
 		{name: "volatile price", request: "What is AAPL's price right now?", want: AccuracyPolicy{GroundingRequired: true}},
 		{name: "contractions", request: "What's Apple's price right now?", want: AccuracyPolicy{GroundingRequired: true}},
 		{name: "implicit officeholder", request: "Who is the president of Freedonia?", want: AccuracyPolicy{GroundingRequired: true}},
+		{name: "whats happening", request: "What's happening?", want: AccuracyPolicy{GroundingRequired: true}},
+		{name: "most recent event", request: "What happened most recently?", want: AccuracyPolicy{GroundingRequired: true}},
+		{name: "anything new", request: "Anything new?", want: AccuracyPolicy{GroundingRequired: true}},
+		{name: "catch up", request: "Catch me up.", want: AccuracyPolicy{GroundingRequired: true}},
+		{name: "recent developments", request: "Tell me about recent developments.", want: AccuracyPolicy{GroundingRequired: true}},
+		{name: "just happened", request: "What just happened?", want: AccuracyPolicy{GroundingRequired: true}},
 		{name: "today research", request: "What happened in markets today?", want: AccuracyPolicy{RequiredFunctionNames: []string{runtimeContextFunctionName}, GroundingRequired: true, RuntimeContextRelevant: true}},
 		{name: "channel search", request: "Search this channel for deploy.", want: AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}}},
 		{name: "earlier message", request: "Find Alice's earlier message about launch.", want: AccuracyPolicy{RequiredFunctionNames: []string{ChannelSearchFunctionName}}},
@@ -90,6 +96,41 @@ func TestClassifyAccuracyPolicyUsesOnlyCurrentIntent(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Equal(t, test.want, ClassifyAccuracyPolicy(test.request))
 		})
+	}
+}
+
+func TestBroadRecencyRequestNeedsScopeOnlyOnce(t *testing.T) {
+	firstTurn := []Message{{Role: "user", Content: "What's happening?"}}
+	assert.True(t, broadRecencyNeedsClarification(firstTurn))
+
+	repeated := []Message{
+		{Role: "user", Content: "What's happening?"},
+		{Role: "model", Content: "What topic or region should I focus on?"},
+		{Role: "user", Content: "Anything new?"},
+	}
+	assert.False(t, broadRecencyNeedsClarification(repeated))
+	compiledHistory := []Message{{Role: "user", Content: "THREAD HISTORY:\n[timestamp unavailable] user: What's happening?\n[timestamp unavailable] Jarvis [bot]: What topic or region?\n\nCURRENT REQUEST:\nAnything new?"}}
+	assert.False(t, broadRecencyNeedsClarification(compiledHistory))
+
+	scoped := []Message{{Role: "user", Content: "What's happening in Argentina?"}}
+	assert.False(t, broadRecencyNeedsClarification(scoped))
+}
+
+func TestSearchTriggerUsesStrongestDeterministicSignal(t *testing.T) {
+	tests := []struct {
+		request string
+		enabled bool
+		want    string
+	}{
+		{request: "Why is the sky blue?", enabled: true, want: searchTriggerModelOptional},
+		{request: "Why is the sky blue?", enabled: false, want: searchTriggerNone},
+		{request: "Research the latest Go release.", enabled: true, want: searchTriggerExplicit},
+		{request: "What is the latest Go release?", enabled: true, want: searchTriggerVolatile},
+		{request: "Who is the president of Freedonia?", enabled: true, want: searchTriggerImplicitVolatile},
+	}
+	for _, test := range tests {
+		policy := ClassifyAccuracyPolicy(test.request)
+		assert.Equal(t, test.want, classifySearchTrigger(test.request, policy, test.enabled), test.request)
 	}
 }
 
@@ -340,6 +381,7 @@ func TestGenerateQualifiesRequiredCurrentClaimWhenSearchIsDisabled(t *testing.T)
 	})
 	require.NoError(t, err)
 	assert.Equal(t, groundingDisabledFallback, got.Text)
+	assert.Contains(t, got.Text, "stable background")
 	assert.False(t, got.Grounded)
 	assert.Equal(t, 1, calls)
 }
