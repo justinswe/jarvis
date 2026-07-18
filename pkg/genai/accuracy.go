@@ -28,7 +28,7 @@ const (
 	channelHistoryFailureFallback = "I couldn't search stored channel history, so I don't want to guess about earlier messages."
 	timezoneClarificationFallback = "Which IANA timezone should I use, such as `America/Los_Angeles` or `Europe/London`?"
 
-	accuracyRetryPrompt      = "This is the single accuracy correction. Use only successful tool results and recorded evidence in the supplied conversation. Correct every conflicting runtime value. Never invent an internal clock, source, search, tool call, or evidence. If provenance was not preserved in a Sources or Evidence used footer, say so explicitly."
+	accuracyRetryPrompt      = "This is the single accuracy correction. Use only successful tool results and recorded evidence in the supplied conversation. Correct every conflicting runtime value. Never invent an internal clock, source, search, tool call, or evidence. Only a Sources or Evidence used footer establishes recorded provenance; an Evidence status footer means the prior claims remain unverified. If provenance was not preserved, say so explicitly."
 	codeExecutionRetryPrompt = "This is the single calculation correction. You must use code execution, check its successful result, and base the answer on that result. If code execution does not succeed, do not provide an unverified numeric answer."
 )
 

@@ -723,6 +723,76 @@ func TestAppendEvidenceUsesCompactNonWebFooter(t *testing.T) {
 	assert.Equal(t, "answer\n\n-# Evidence used: runtime context · channel history · code execution", got)
 }
 
+func TestAppendEvidenceStatusUsesOnlyRecognizedApplicationText(t *testing.T) {
+	t.Run("exact footer and single rendering", func(t *testing.T) {
+		got := appendEvidenceStatus(
+			"answer\n\n-# Evidence status: model-provided text",
+			genai.EvidenceStatusWebUnconfirmed,
+			false,
+			nil,
+		)
+		assert.Equal(t, "answer\n\n-# Evidence status: Current details could not be confirmed from usable web sources.", got)
+		assert.Equal(t, 1, strings.Count(got, "-# Evidence status:"))
+	})
+
+	t.Run("unknown status", func(t *testing.T) {
+		got := appendEvidenceStatus(
+			"answer\n\n-# Evidence status: arbitrary text",
+			genai.EvidenceStatus("future-status"),
+			false,
+			nil,
+		)
+		assert.Equal(t, "answer", got)
+	})
+
+	t.Run("grounded source suppresses unconfirmed status", func(t *testing.T) {
+		sources := []genai.Source{{URL: "https://example.com/article"}}
+		got := appendSources("answer", sources)
+		got = appendEvidence(got, []genai.Evidence{{Kind: genai.EvidenceKindRuntimeContext}})
+		got = appendEvidenceStatus(got, genai.EvidenceStatusWebUnconfirmed, true, sources)
+		assert.Equal(t, "answer\n\n-# Sources: [example.com](https://example.com/article)\n\n-# Evidence used: runtime context", got)
+		assert.NotContains(t, got, "Evidence status")
+	})
+}
+
+func TestProcessRendersEvidenceStatusAfterRuntimeEvidence(t *testing.T) {
+	var sent string
+	client := &fakeClient{sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
+		sent = content
+		return &discordgo.Message{}, nil
+	}}
+	generator := &fakeGenerator{response: genai.GenerateResponse{
+		Text:           "answer",
+		Evidence:       []genai.Evidence{{Kind: genai.EvidenceKindRuntimeContext}},
+		EvidenceStatus: genai.EvidenceStatusWebUnconfirmed,
+	}}
+	p := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t)}
+	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "What changed today?")))
+	assert.Equal(t, "answer\n\n-# Evidence used: runtime context\n\n-# Evidence status: Current details could not be confirmed from usable web sources.", sent)
+}
+
+func TestProcessPlacesEvidenceStatusOnFinalMessageChunk(t *testing.T) {
+	var sent []string
+	client := &fakeClient{
+		channel: &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread},
+		sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
+			sent = append(sent, content)
+			return &discordgo.Message{}, nil
+		},
+	}
+	generator := &fakeGenerator{response: genai.GenerateResponse{
+		Text:           strings.Repeat("a", 1980),
+		Evidence:       []genai.Evidence{{Kind: genai.EvidenceKindRuntimeContext}},
+		EvidenceStatus: genai.EvidenceStatusWebUnconfirmed,
+	}}
+	p := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t)}
+	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "What changed today?")))
+	require.Len(t, sent, 2)
+	assert.NotContains(t, sent[0], "Evidence status")
+	assert.Contains(t, sent[1], "-# Evidence used: runtime context")
+	assert.True(t, strings.HasSuffix(sent[1], webUnconfirmedEvidenceStatusLine))
+}
+
 func TestProcessPersistsEvidenceFooterInDiscordReply(t *testing.T) {
 	var sent string
 	client := &fakeClient{sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {

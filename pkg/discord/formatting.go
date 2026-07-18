@@ -18,7 +18,10 @@ import (
 var botPrefixPattern = regexp.MustCompile(`(?i)^(?:\s*(?:jarvis|jarvischat)\s*[:\-]\s*)+`)
 var channelMentionPattern = regexp.MustCompile(`<#[0-9]+>`)
 
-const googleGroundingRedirectHost = "vertexaisearch.cloud.google.com"
+const (
+	googleGroundingRedirectHost      = "vertexaisearch.cloud.google.com"
+	webUnconfirmedEvidenceStatusLine = "-# Evidence status: Current details could not be confirmed from usable web sources."
+)
 
 func appendSources(text string, sources []genai.Source) string {
 	links := make([]string, 0, 3)
@@ -151,6 +154,41 @@ func appendEvidence(text string, evidence []genai.Evidence) string {
 		return text
 	}
 	return strings.TrimSpace(text) + "\n\n-# Evidence used: " + strings.Join(labels, " · ")
+}
+
+// appendEvidenceStatus renders a recognized status after all provenance footers.
+func appendEvidenceStatus(text string, status genai.EvidenceStatus, grounded bool, sources []genai.Source) string {
+	text = stripEvidenceStatusFooters(text)
+	if status != genai.EvidenceStatusWebUnconfirmed {
+		return text
+	}
+	if grounded && hasRenderableSource(sources) {
+		return text
+	}
+	return strings.TrimSpace(text) + "\n\n" + webUnconfirmedEvidenceStatusLine
+}
+
+// stripEvidenceStatusFooters removes model-provided text from the reserved status line.
+func stripEvidenceStatusFooters(text string) string {
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "-# evidence status:") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+// hasRenderableSource reports whether Discord can display a grounded source.
+func hasRenderableSource(sources []genai.Source) bool {
+	for _, source := range sources {
+		if _, ok := formatSourceLink(source); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeContent(content, botID string) string {

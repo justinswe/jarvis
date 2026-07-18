@@ -222,6 +222,10 @@ func TestProvenanceValidationAllowsOnlyRecordedRuntimeClaim(t *testing.T) {
 		"The unsupported claim was 5:06 PM PDT.",
 		"Where did that come from?", "[timestamp] Jarvis [bot]: It was 5:06 PM PDT.", policy, nil,
 	))
+	assert.Equal(t, "unsupported_provenance_runtime_claim", accuracyValidationFailure(
+		"The unsupported claim was 5:06 PM PDT.",
+		"Where did that come from?", "[timestamp] Jarvis [bot]: It was 5:06 PM PDT.\n-# Evidence status: Current details could not be confirmed from usable web sources.", policy, nil,
+	))
 }
 
 func TestGenerateForcesOnlyRequiredRuntimeFunctionThenReturnsToAuto(t *testing.T) {
@@ -383,6 +387,7 @@ func TestGenerateQualifiesRequiredCurrentClaimWhenSearchIsDisabled(t *testing.T)
 	assert.Equal(t, groundingDisabledFallback, got.Text)
 	assert.Contains(t, got.Text, "stable background")
 	assert.False(t, got.Grounded)
+	assert.Empty(t, got.EvidenceStatus)
 	assert.Equal(t, 1, calls)
 }
 
