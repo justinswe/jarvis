@@ -12,7 +12,7 @@ Explicit requests to search the current channel or retrieve earlier messages ins
 
 1. Jarvis accepts the response when it contains at least one valid HTTP or HTTPS web source.
 2. If Search returned no usable source, Jarvis makes one verification retry with Google Search as the only tool, including when Gemini never attempted Search. Function tools are not exposed or executed again. The retry uses medium thinking and at least 2,048 output tokens. Temperature is omitted so Gemini uses its recommended provider default.
-3. Jarvis accepts a retry with visible text and valid sources as grounded. If the retry has useful text but no valid source, Jarvis discards the initial unsupported answer, omits the Sources footer, prepends “I couldn’t confirm the current details from usable web sources,” and preserves the retry’s qualified background, verified subset, conflict explanation, or clarification.
+3. Jarvis accepts a retry with visible text and valid sources as grounded. If the retry has useful text but no valid source, Jarvis discards the initial unsupported answer, preserves the retry body without a leading caveat, leaves the response ungrounded, and records `web-unconfirmed` evidence status. The retry may retain useful current details but must not describe them as verified or confirmed.
 4. If the Search-only retry fails or has no visible text, Jarvis returns an actionable request for a topic, region, date range, or link. If Search is disabled for a required-current request, Jarvis says so and offers stable background or help narrowing the question.
 
 Optional Search requests for which Gemini emits no search query retain the model response. Grounding, code-execution, and response-validation recovery share a single one-call accuracy-retry budget. Existing function-tool rounds are separate from that budget, and function tools are never exposed or executed again during Search-only recovery. Runtime context, stored channel history, completed mutations, and code execution retain their strict evidence requirements.
@@ -30,6 +30,14 @@ Successful non-web evidence is appended separately so it persists in Discord and
 ```text
 -# Evidence used: runtime context · channel history · code execution
 ```
+
+When current details could not be confirmed from usable web sources, Discord renders one fixed final footer:
+
+```text
+-# Evidence status: Current details could not be confirmed from usable web sources.
+```
+
+Metadata order is always `Sources`, `Evidence used`, then `Evidence status`. A grounded response with valid sources suppresses an unconfirmed status defensively. `Evidence status` qualifies the preceding claims as unverified; it does not count as evidence, make the response grounded, or establish recorded provenance. Only `Sources` and `Evidence used` record provenance for later conversation turns.
 
 ## Diagnostics
 
@@ -49,6 +57,7 @@ Every Gemini attempt has an `attempt` value such as `initial`, `tool_followup`, 
 - `search_trigger` (`none`, `explicit`, `volatile`, `implicit-volatile`, or `model-optional`)
 - `search_result` (`not-used`, `grounded`, `no-sources-qualified`, `disabled`, `provider-failed`, or `empty`)
 - `grounding_retry_result`
+- `evidence_status` (empty or `web-unconfirmed`)
 - `terminal_fallback_reason`
 
 Function-tool rounds log requested, executed, succeeded, and failed counts. Stored channel searches additionally log duration, scanned and returned counts, filter-presence booleans, truncation, and incompleteness. DEBUG logs add exposed tool names, per-call timing and outcome, and grounding source domains. Logs intentionally exclude search query text, author criteria, full source URLs, function arguments, function outputs, and message content.
@@ -66,7 +75,7 @@ bazel test //pkg/genai:live_eval \
   --test_env=JARVIS_EVAL_SUBSET=development
 ```
 
-Set `JARVIS_EVAL_SUBSET=full` and `JARVIS_EVAL_RUNS=3` for repeated full-corpus runs. Results are written as JSONL test outputs with response text, Search requirement and attempt state, query and model-call counts, retry use, source and supported-source counts, grounding outcome, latency, and terminal fallback reason. These evaluation artifacts may contain response text; production logs continue to exclude messages, queries, responses, and full source URLs.
+Set `JARVIS_EVAL_SUBSET=full` and `JARVIS_EVAL_RUNS=3` for repeated full-corpus runs. Results are written as JSONL test outputs with response text, Search requirement and attempt state, query and model-call counts, retry use, source and supported-source counts, evidence status, grounding outcome, latency, and terminal fallback reason. Status-bearing responses are classified as `qualified-answer` from the structured field rather than a response-text prefix. These evaluation artifacts may contain response text; production logs continue to exclude messages, queries, responses, and full source URLs.
 
 ## Pre-change baseline
 

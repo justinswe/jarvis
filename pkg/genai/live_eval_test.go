@@ -55,6 +55,7 @@ type evaluationRecord struct {
 	ModelCallCount          int                    `json:"model_call_count"`
 	RetryUsed               bool                   `json:"retry_used"`
 	SourceCount             int                    `json:"source_count"`
+	EvidenceStatus          EvidenceStatus         `json:"evidence_status"`
 	SupportedSourceCount    int                    `json:"supported_source_count"`
 	GroundingOutcome        string                 `json:"grounding_outcome"`
 	LatencyMilliseconds     int64                  `json:"latency_milliseconds"`
@@ -190,6 +191,7 @@ func newEvaluationRecord(evalCase evaluationCase, variant string, run int, respo
 		ModelCallCount:         diagnostics.modelCalls,
 		RetryUsed:              diagnostics.retryUsed,
 		SourceCount:            len(response.Sources),
+		EvidenceStatus:         response.EvidenceStatus,
 		SupportedSourceCount:   diagnostics.supportedSourceCount,
 		GroundingOutcome:       diagnostics.groundingOutcome,
 		LatencyMilliseconds:    elapsed.Milliseconds(),
@@ -212,13 +214,28 @@ func evaluationDisposition(response GenerateResponse, diagnostics generationDiag
 	if response.Grounded {
 		return "grounded-answer"
 	}
-	if strings.HasPrefix(response.Text, searchEvidenceGapPrefix) {
+	if response.EvidenceStatus == EvidenceStatusWebUnconfirmed {
 		return "qualified-answer"
 	}
 	if strings.Contains(response.Text, "?") && len(response.Text) < 400 {
 		return "clarification"
 	}
 	return "answer"
+}
+
+func TestEvaluationDispositionUsesStructuredEvidenceStatus(t *testing.T) {
+	response := GenerateResponse{
+		Text:           "Could this be the current result?",
+		EvidenceStatus: EvidenceStatusWebUnconfirmed,
+	}
+	if got := evaluationDisposition(response, generationDiagnostics{}, nil); got != "qualified-answer" {
+		t.Fatalf("evaluationDisposition() = %q; want qualified-answer", got)
+	}
+
+	response.EvidenceStatus = EvidenceStatus("future-status")
+	if got := evaluationDisposition(response, generationDiagnostics{}, nil); got != "clarification" {
+		t.Fatalf("evaluationDisposition() with unknown status = %q; want clarification", got)
+	}
 }
 
 func evaluationViolations(evalCase evaluationCase, record evaluationRecord) []string {

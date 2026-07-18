@@ -45,6 +45,8 @@ func TestRuntimeSystemPromptAllowsRootNameWithoutWeakeningCoreRules(t *testing.T
 	assert.Contains(t, prompt, "# Identity")
 	assert.Contains(t, prompt, "# Core drives")
 	assert.Contains(t, prompt, "# Tools and research")
+	assert.Contains(t, prompt, "An Evidence status footer means the message's claims remain unverified")
+	assert.Contains(t, prompt, "only when that message contains a Sources or Evidence used footer")
 	assert.Contains(t, prompt, "only after its mutation tool returns a successful result")
 	assert.Contains(t, prompt, "# Server customization")
 	assert.Contains(t, prompt, "Your name is Atlas.")
@@ -144,6 +146,7 @@ func TestGenerateGroundingSources(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, got.Grounded)
 	assert.Len(t, got.Sources, 1)
+	assert.Empty(t, got.EvidenceStatus)
 	assert.Equal(t, 1, calls)
 }
 
@@ -199,6 +202,8 @@ func TestGenerateRetriesSearchWithoutSourcesAndRequiresGrounding(t *testing.T) {
 		assert.Equal(t, googlegenai.ThinkingLevelMedium, cfg.ThinkingConfig.ThinkingLevel)
 		assert.GreaterOrEqual(t, cfg.MaxOutputTokens, int32(emptyRecoveryMinTokens))
 		assert.Contains(t, cfg.SystemInstruction.Parts[0].Text, groundingRetryPrompt)
+		assert.Contains(t, groundingRetryPrompt, "current details may still be included")
+		assert.Contains(t, groundingRetryPrompt, "application renders it")
 		return response("verified answer", &googlegenai.GroundingMetadata{
 			WebSearchQueries: []string{"retry"},
 			GroundingChunks:  []*googlegenai.GroundingChunk{{Web: &googlegenai.GroundingChunkWeb{URI: "https://source.example/fact"}}},
@@ -214,23 +219,27 @@ func TestGenerateRetriesSearchWithoutSourcesAndRequiresGrounding(t *testing.T) {
 }
 
 func TestGeneratePreservesQualifiedGroundingRecoveryWithoutSources(t *testing.T) {
+	const qualifiedText = "The available results conflict, but the retry still returned useful detail:\n- One report gives a Tuesday date.\n- Another report gives a Thursday date.\nA narrower date range would help resolve the conflict."
 	calls := 0
 	h := testHandler(func(context.Context, string, []*googlegenai.Content, *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
 		calls++
 		if calls == 1 {
 			return response("unsupported current answer", &googlegenai.GroundingMetadata{WebSearchQueries: []string{"query"}}), nil
 		}
-		return response("The available results conflict; a narrower date range would help.", &googlegenai.GroundingMetadata{WebSearchQueries: []string{"retry"}}), nil
+		return response(qualifiedText, &googlegenai.GroundingMetadata{WebSearchQueries: []string{"retry"}}), nil
 	})
 	var observed generationDiagnostics
 	h.observeGeneration = func(diagnostics generationDiagnostics) { observed = diagnostics }
 
 	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest Go release"}}})
 	require.NoError(t, err)
-	assert.Equal(t, searchEvidenceGapPrefix+"\n\nThe available results conflict; a narrower date range would help.", got.Text)
+	assert.Equal(t, qualifiedText, got.Text)
 	assert.NotContains(t, got.Text, "unsupported current answer")
+	assert.NotContains(t, got.Text, "couldn't confirm")
 	assert.False(t, got.Grounded)
 	assert.Empty(t, got.Sources)
+	assert.Empty(t, got.Evidence)
+	assert.Equal(t, EvidenceStatusWebUnconfirmed, got.EvidenceStatus)
 	assert.Equal(t, 2, calls)
 	assert.True(t, observed.searchRequired)
 	assert.True(t, observed.searchAttempted)
@@ -256,6 +265,7 @@ func TestGenerateReturnsActionableFallbackWhenGroundingRecoveryFails(t *testing.
 	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest fact"}}})
 	require.NoError(t, err)
 	assert.Equal(t, searchUnavailableFallback, got.Text)
+	assert.Empty(t, got.EvidenceStatus)
 	assert.Equal(t, 2, calls)
 }
 
@@ -272,6 +282,7 @@ func TestGenerateReturnsActionableFallbackWhenGroundingRecoveryIsEmpty(t *testin
 	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "latest fact"}}})
 	require.NoError(t, err)
 	assert.Equal(t, searchUnavailableFallback, got.Text)
+	assert.Empty(t, got.EvidenceStatus)
 	assert.Equal(t, 2, calls)
 }
 
@@ -285,6 +296,7 @@ func TestGenerateDoesNotRequireGroundingWithoutSearchQueries(t *testing.T) {
 	got, err := h.Generate(context.Background(), GenerateRequest{Messages: []Message{{Role: "user", Content: "stable fact"}}})
 	require.NoError(t, err)
 	assert.Equal(t, "answer from model knowledge", got.Text)
+	assert.Empty(t, got.EvidenceStatus)
 	assert.Equal(t, 1, calls)
 }
 
@@ -335,6 +347,7 @@ func TestGeneratePreservesTargetedClarificationBeforeRequiredSearch(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, "Which Mercury do you mean: the planet, element, or publication?", got.Text)
 	assert.False(t, got.Grounded)
+	assert.Empty(t, got.EvidenceStatus)
 	assert.Equal(t, 1, calls)
 }
 
@@ -377,13 +390,14 @@ func TestGenerateUsesRequestThinkingLevel(t *testing.T) {
 	assert.ErrorContains(t, err, "thinking level")
 }
 
-func TestGenerateFallbackCaveatMatchesSearchAvailability(t *testing.T) {
+func TestGenerateFallbackEvidenceStatusMatchesSearchAvailability(t *testing.T) {
 	for _, test := range []struct {
-		name, wantText string
-		webSearch      bool
+		name       string
+		webSearch  bool
+		wantStatus EvidenceStatus
 	}{
-		{name: "search enabled", webSearch: true, wantText: "answer\n\n" + verificationCaveat},
-		{name: "search disabled", wantText: "answer"},
+		{name: "search enabled", webSearch: true, wantStatus: EvidenceStatusWebUnconfirmed},
+		{name: "search disabled"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
@@ -403,7 +417,10 @@ func TestGenerateFallbackCaveatMatchesSearchAvailability(t *testing.T) {
 				Config:   &RequestConfig{Prompt: "prompt", MaxOutputTokens: 123, WebSearchEnabled: test.webSearch},
 			})
 			require.NoError(t, err)
-			assert.Equal(t, test.wantText, got.Text)
+			assert.Equal(t, "answer", got.Text)
+			assert.Equal(t, test.wantStatus, got.EvidenceStatus)
+			assert.False(t, got.Grounded)
+			assert.Empty(t, got.Sources)
 			assert.Equal(t, 2, calls)
 		})
 	}

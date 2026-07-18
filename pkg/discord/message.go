@@ -172,13 +172,14 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		p.sendErrorReply(replyCtx, m.ChannelID)
 		return errors.Wrap(err, "generate response")
 	}
-	reply := stripBotPrefix(html.UnescapeString(response.Text))
+	reply := stripEvidenceStatusFooters(stripBotPrefix(html.UnescapeString(response.Text)))
 	if strings.TrimSpace(reply) == "" {
 		err := errors.New("Gemini returned an empty response")
 		app.L().Warn(err.Error(), append(fields,
 			zap.Duration("duration", time.Since(started)),
 			zap.Bool("grounded", response.Grounded),
 			zap.Int("source_count", len(response.Sources)),
+			zap.String("evidence_status", string(response.EvidenceStatus)),
 		)...)
 		p.sendErrorReply(replyCtx, m.ChannelID)
 		return err
@@ -187,6 +188,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		reply = appendSources(reply, response.Sources)
 	}
 	reply = appendEvidence(reply, response.Evidence)
+	reply = appendEvidenceStatus(reply, response.EvidenceStatus, response.Grounded, response.Sources)
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
 	}
@@ -198,6 +200,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			zap.Duration("duration", time.Since(started)),
 			zap.Bool("grounded", response.Grounded),
 			zap.Int("source_count", len(response.Sources)),
+			zap.String("evidence_status", string(response.EvidenceStatus)),
 			zap.Error(err),
 		)...)
 		return err
@@ -210,6 +213,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		zap.Bool("grounded", response.Grounded),
 		zap.Int("source_count", len(response.Sources)),
 		zap.Int("evidence_count", len(response.Evidence)),
+		zap.String("evidence_status", string(response.EvidenceStatus)),
 		zap.Int("response_runes", len([]rune(reply))),
 	)...)
 	return nil
