@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/justinswe/jarvis/pkg/genai"
-	googlegenai "google.golang.org/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 )
 
 const runtimeContextToolName = "get_runtime_context"
@@ -30,18 +30,16 @@ func (p *Processor) runtimeContext() genai.FunctionTool {
 
 func (runtimeContextTool) Name() string { return runtimeContextToolName }
 
-func (runtimeContextTool) Declaration() *googlegenai.FunctionDeclaration {
-	return &googlegenai.FunctionDeclaration{
+func (runtimeContextTool) Declaration() *llm.ToolDefinition {
+	return &llm.ToolDefinition{
 		Name: runtimeContextToolName,
 		Description: "Read the application's exact build version and current clock information. " +
 			"Use only when asked about the application or build version, when asked for the current time, date, or weekday, " +
 			"or when the current date materially affects research. Do not call or mention its output in unrelated answers.",
-		Parameters: &googlegenai.Schema{Type: googlegenai.TypeObject, Properties: map[string]*googlegenai.Schema{
-			"timezone": {
-				Type:        googlegenai.TypeString,
-				Description: "Optional IANA timezone such as America/Los_Angeles. Omit it to use UTC.",
-			},
+		InputSchema: llm.JSONSchema{"type": "object", "properties": map[string]any{
+			"timezone": map[string]any{"type": "string", "description": "Optional IANA timezone such as America/Los_Angeles. Omit it to use UTC."},
 		}},
+		Effect: llm.ToolEffectReadOnly,
 	}
 }
 

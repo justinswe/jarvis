@@ -15,6 +15,13 @@ bazel test //package/...
 bazel run //:gazelle -- update PATH
 bazel run //:gazelle
 
+# Configuration
+
+- Declare operator configuration as Cobra flags and execute commands through `app.RunCobraCommand`.
+- The `app` package automatically maps flags to uppercase environment variables with hyphens replaced by underscores and loads supported `.env` files. For example, `--openrouter-api-key` maps to `OPENROUTER_API_KEY`.
+- Application and manual-harness code must use the bound flag value. Do not read configuration with `os.Getenv`, `os.LookupEnv`, or equivalent APIs.
+- Use purpose-built APIs for runtime infrastructure, such as rules_go's runfiles package for Bazel test data, instead of reading Bazel environment variables directly.
+
 # Go Style Guide
 
 https://google.github.io/styleguide/go/guide

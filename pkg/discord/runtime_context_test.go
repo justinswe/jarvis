@@ -60,8 +60,8 @@ func TestRuntimeContextDeclarationMakesTimezoneOptional(t *testing.T) {
 	assert.NotContains(t, declaration.Description, "identity")
 	assert.NotContains(t, declaration.Description, "Jarvis")
 	assert.Contains(t, declaration.Description, "Do not call or mention its output in unrelated answers")
-	require.Contains(t, declaration.Parameters.Properties, "timezone")
-	assert.Empty(t, declaration.Parameters.Required)
+	require.Contains(t, schemaProperties(t, declaration), "timezone")
+	assert.NotContains(t, declaration.InputSchema, "required")
 }
 
 func TestRuntimeContextProducesSafeEvidence(t *testing.T) {

@@ -17,13 +17,23 @@ type contextSection struct {
 	messages []*discordgo.Message
 }
 
+type builtPrompt struct {
+	messages []genai.Message
+	intent   genai.IntentContext
+}
+
 const incompleteContextNotice = "CONTEXT NOTICE: Stored conversation history could not be fully loaded; the supplied history may be incomplete."
 
 func (p *Processor) buildPrompt(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, settings config.ServerSettings) ([]genai.Message, error) {
+	built, err := p.buildPromptWithIntent(ctx, channel, m, settings)
+	return built.messages, err
+}
+
+func (p *Processor) buildPromptWithIntent(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, settings config.ServerSettings) (builtPrompt, error) {
 	current := sanitizeContent(m.Content, p.botID)
 	image, imageAttachmentNotice := p.currentImage(ctx, m.Attachments)
 	if current == "" && image == nil && imageAttachmentNotice == "" {
-		return nil, errEmptyMessageContent
+		return builtPrompt{}, errEmptyMessageContent
 	}
 	if current == "" {
 		current = "Please respond to the attached image."
@@ -50,7 +60,32 @@ func (p *Processor) buildPrompt(ctx context.Context, channel *discordgo.Channel,
 	if incomplete {
 		content = incompleteContextNotice + "\n\n" + content
 	}
-	return []genai.Message{{Role: "user", Content: content, Image: image}}, nil
+	return builtPrompt{
+		messages: []genai.Message{{Role: "user", Content: content, Image: image}},
+		intent: genai.IntentContext{
+			CurrentRequest:      current,
+			PreviousUserRequest: previousSameAuthorRequest(sections, m.Author.ID),
+		},
+	}, nil
+}
+
+func previousSameAuthorRequest(sections []contextSection, authorID string) string {
+	for _, section := range sections {
+		if section.label == "PARENT CHANNEL" {
+			continue
+		}
+		for i := len(section.messages) - 1; i >= 0; i-- {
+			message := section.messages[i]
+			if message == nil || message.Author == nil || message.Author.Bot {
+				continue
+			}
+			if message.Author.ID != authorID {
+				return ""
+			}
+			return sanitizeContent(message.Content, "")
+		}
+	}
+	return ""
 }
 
 func (p *Processor) fetchHistory(ctx context.Context, guildID, channelID string, limit int, before string) ([]*discordgo.Message, error) {

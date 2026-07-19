@@ -12,10 +12,10 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
-	googlegenai "google.golang.org/genai"
 )
 
 var errEmptyMessageContent = errors.New("empty message content")
@@ -121,7 +121,7 @@ func (p *Processor) handleAddAdminCommand(ctx context.Context, m *discordgo.Mess
 func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, guildConfig config.GuildConfig, started time.Time) error {
 	fields := discordRequestFields(channel, m)
 	settings := guildConfig.Settings
-	messages, err := p.buildPrompt(ctx, channel, m, settings)
+	built, err := p.buildPromptWithIntent(ctx, channel, m, settings)
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
 	}
@@ -134,18 +134,21 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		p.sendErrorReply(replyCtx, m.ChannelID)
 		return err
 	}
-	app.L().Info("Sending request to Gemini", append(fields, zap.Int("context_message_count", len(messages)))...)
+	app.L().Info("Sending request to model", append(fields, zap.Int("context_message_count", len(built.messages)))...)
 	request := genai.GenerateRequest{
-		Messages:  messages,
+		Messages:  built.messages,
+		Intent:    &built.intent,
 		RequestID: m.ID,
 		CallerID:  m.Author.ID,
 		ChannelID: m.ChannelID,
 		Config: &genai.RequestConfig{
-			Prompt:           settings.EffectivePrompt(),
-			MaxOutputTokens:  settings.MaxOutputTokens,
-			WebSearchEnabled: settings.WebSearchEnabled,
-			ThinkingLevel:    googlegenai.ThinkingLevelMedium,
-			AccuracyPolicy:   genai.ClassifyAccuracyPolicy(sanitizeContent(m.Content, p.botID)),
+			Prompt:               settings.EffectivePrompt(),
+			MaxOutputTokens:      settings.MaxOutputTokens,
+			WebSearchEnabled:     settings.WebSearchEnabled,
+			ReasoningEffort:      llm.ReasoningMedium,
+			AccuracyPolicy:       genai.ClassifyAccuracyPolicy(sanitizeContent(m.Content, p.botID)),
+			PrimaryModelProfile:  settings.PrimaryModelProfile,
+			FallbackModelProfile: settings.FallbackModelProfile,
 		},
 	}
 	request.Tools = append(request.Tools, p.runtimeContext())
@@ -155,7 +158,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	}
 	if tools, authorized := p.configurationTools(ctx, m, guildConfig); authorized {
 		request.Tools = append(request.Tools, tools...)
-		request.Config.ThinkingLevel = googlegenai.ThinkingLevelHigh
+		request.Config.ReasoningEffort = llm.ReasoningHigh
 	}
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
@@ -165,7 +168,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		return errThreadRequestSuperseded
 	}
 	if err != nil {
-		app.L().Warn("Gemini generation failed", append(fields,
+		app.L().Warn("Model generation failed", append(fields,
 			zap.Duration("duration", time.Since(started)),
 			zap.Error(err),
 		)...)
@@ -174,21 +177,24 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	}
 	reply := stripEvidenceStatusFooters(stripBotPrefix(html.UnescapeString(response.Text)))
 	if strings.TrimSpace(reply) == "" {
-		err := errors.New("Gemini returned an empty response")
+		err := errors.New("model returned an empty response")
 		app.L().Warn(err.Error(), append(fields,
 			zap.Duration("duration", time.Since(started)),
-			zap.Bool("grounded", response.Grounded),
 			zap.Int("source_count", len(response.Sources)),
 			zap.String("evidence_status", string(response.EvidenceStatus)),
 		)...)
 		p.sendErrorReply(replyCtx, m.ChannelID)
 		return err
 	}
-	if response.Grounded && len(response.Sources) > 0 {
+	if len(response.Sources) > 0 {
 		reply = appendSources(reply, response.Sources)
 	}
 	reply = appendEvidence(reply, response.Evidence)
-	reply = appendEvidenceStatus(reply, response.EvidenceStatus, response.Grounded, response.Sources)
+	statuses := append([]genai.EvidenceStatus(nil), response.EvidenceStatuses...)
+	if response.EvidenceStatus != "" {
+		statuses = append(statuses, response.EvidenceStatus)
+	}
+	reply = appendEvidenceStatuses(reply, statuses, response.Sources)
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
 	}
@@ -198,7 +204,6 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		}
 		app.L().Warn("Failed to post Discord reply", append(fields,
 			zap.Duration("duration", time.Since(started)),
-			zap.Bool("grounded", response.Grounded),
 			zap.Int("source_count", len(response.Sources)),
 			zap.String("evidence_status", string(response.EvidenceStatus)),
 			zap.Error(err),
@@ -210,7 +215,6 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	}
 	app.L().Info("Discord AI request completed", append(fields,
 		zap.Duration("duration", time.Since(started)),
-		zap.Bool("grounded", response.Grounded),
 		zap.Int("source_count", len(response.Sources)),
 		zap.Int("evidence_count", len(response.Evidence)),
 		zap.String("evidence_status", string(response.EvidenceStatus)),

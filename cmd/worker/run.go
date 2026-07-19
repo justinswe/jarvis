@@ -16,7 +16,7 @@ import (
 	"github.com/justinswe/jarvis/internal/version"
 	workerservice "github.com/justinswe/jarvis/internal/worker"
 	"github.com/justinswe/jarvis/pkg/discord"
-	llm "github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/genai"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
@@ -25,9 +25,6 @@ import (
 func runWorker(parent context.Context, cfg workerConfig) error {
 	if cfg.port == "" {
 		return errors.New("worker port is required")
-	}
-	if cfg.projectID == "" {
-		return errors.New("project-id is required")
 	}
 	if cfg.discordBotToken == "" {
 		return errors.New("discord bot token is required")
@@ -39,6 +36,10 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		if !validRootUserID(userID) {
 			return errors.Errorf("root user ID %q must be a 17-20 digit Discord user ID", userID)
 		}
+	}
+	webSearchClients, err := cfg.webSearchClients()
+	if err != nil {
+		return errors.Wrap(err, "initialize web search providers")
 	}
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -89,24 +90,38 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		defer repository.Close()
 		provider, history, manager, recorder = repository, repository, repository, repository
 	}
-	generator, err := llm.New(ctx, llm.Config{
-		ProjectID:       cfg.projectID,
-		Location:        cfg.location,
-		DefaultPrompt:   cfg.defaultPrompt,
-		MaxOutputTokens: cfg.maxOutputTokens,
+	generator, err := genai.New(ctx, genai.Config{
+		ProjectID:            cfg.projectID,
+		Location:             cfg.location,
+		DefaultPrompt:        cfg.defaultPrompt,
+		MaxOutputTokens:      cfg.maxOutputTokens,
+		OpenRouterAPIKey:     cfg.openRouterAPIKey,
+		GoogleAIAPIKey:       cfg.googleAIAPIKey,
+		NVIDIAAPIKey:         cfg.nvidiaAPIKey,
+		ModelProfiles:        cfg.modelProfiles,
+		PrimaryModelProfile:  cfg.primaryModelProfile,
+		FallbackModelProfile: cfg.fallbackModelProfile,
+		WebSearchClients:     webSearchClients,
+		MutableConfiguration: cfg.dynamodbEnabled,
 	})
 	if err != nil {
-		return errors.Wrap(err, "initialize Gemini client")
+		return errors.Wrap(err, "initialize model orchestration")
 	}
 	defer generator.Close()
+	webSearchProviders := make([]string, 0, len(generator.WebSearchProviders()))
+	for _, provider := range generator.WebSearchProviders() {
+		webSearchProviders = append(webSearchProviders, string(provider))
+	}
 	processor, err := discord.NewProcessorWithConfig(ctx, discord.ProcessorConfig{
-		DiscordBotToken: cfg.discordBotToken,
-		Configs:         provider,
-		Generator:       generator,
-		History:         history,
-		ConfigManager:   manager,
-		RootUserIDs:     cfg.rootUserIDs,
-		Version:         version.Value,
+		DiscordBotToken:    cfg.discordBotToken,
+		Configs:            provider,
+		Generator:          generator,
+		History:            history,
+		ConfigManager:      manager,
+		ModelRegistry:      generator.Registry(),
+		WebSearchProviders: webSearchProviders,
+		RootUserIDs:        cfg.rootUserIDs,
+		Version:            version.Value,
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize Discord processor")
@@ -122,6 +137,10 @@ func (cfg workerConfig) address() string {
 }
 
 func (cfg workerConfig) serverSettings() config.ServerSettings {
+	primary := strings.TrimSpace(cfg.primaryModelProfile)
+	if primary == "" && len(cfg.modelProfiles) == 0 {
+		primary = "default"
+	}
 	return config.ServerSettings{
 		Prompt:               cfg.defaultPrompt,
 		ThreadMessages:       cfg.threadMessages,
@@ -133,6 +152,8 @@ func (cfg workerConfig) serverSettings() config.ServerSettings {
 		MessageRetentionDays: cfg.messageRetentionDays,
 		WebSearchEnabled:     true,
 		ChannelSearchEnabled: true,
+		PrimaryModelProfile:  primary,
+		FallbackModelProfile: strings.TrimSpace(cfg.fallbackModelProfile),
 	}
 }
 

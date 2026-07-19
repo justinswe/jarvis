@@ -49,6 +49,7 @@ func repositoryDefaults() config.GuildConfig {
 		Prompt: "Jarvis", ThreadMessages: 15, ParentMessages: 10, ChannelMessages: 4, HistoryRunes: 4000,
 		MaxOutputTokens: 256, MessageTimeout: time.Minute,
 		MessageRetentionDays: config.DefaultMessageRetentionDays, WebSearchEnabled: true, ChannelSearchEnabled: true,
+		PrimaryModelProfile: "default", FallbackModelProfile: "fallback",
 	}}
 }
 
@@ -100,7 +101,7 @@ func TestRecordCompressesContentOverOneHundredBytes(t *testing.T) {
 			decoded, err := repository.decodeMessage(stored)
 			require.NoError(t, err)
 			assert.Equal(t, test.content, decoded.Content)
-			assert.Equal(t, time.Unix(1000, 0).Add(30*24*time.Hour).Unix(), item.ExpiresAt)
+			assert.Equal(t, time.Unix(1000, 0).Add(time.Duration(config.DefaultMessageRetentionDays)*24*time.Hour).Unix(), item.ExpiresAt)
 		})
 	}
 }
@@ -287,6 +288,47 @@ func TestConfigurationPersistsGuildPromptAndLoadsMissingField(t *testing.T) {
 	loaded, err = repository.Load(context.Background(), "guild")
 	require.NoError(t, err)
 	assert.Empty(t, loaded.Settings.GuildPrompt)
+}
+
+func TestConfigurationV1InheritsModelProfileDefaults(t *testing.T) {
+	value := repositoryDefaults()
+	attributes, err := attributevalue.MarshalMap(newGuildConfigItem("guild", "admin", value, time.Unix(1, 0)))
+	require.NoError(t, err)
+	attributes["schema_version"] = &dynamodbtypes.AttributeValueMemberN{Value: "1"}
+	delete(attributes, "primary_model_profile")
+	delete(attributes, "fallback_model_profile")
+	client := &fakeDynamoClient{get: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		return &dynamodb.GetItemOutput{Item: attributes}, nil
+	}}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	defer repository.Close()
+
+	loaded, err := repository.Load(context.Background(), "guild")
+	require.NoError(t, err)
+	assert.Equal(t, "default", loaded.Settings.PrimaryModelProfile)
+	assert.Equal(t, "fallback", loaded.Settings.FallbackModelProfile)
+}
+
+func TestConfigurationV2RoundTripsModelProfiles(t *testing.T) {
+	value := repositoryDefaults()
+	value.Settings.PrimaryModelProfile = "quality"
+	value.Settings.FallbackModelProfile = ""
+	item := newGuildConfigItem("guild", "admin", value, time.Unix(1, 0))
+	assert.Equal(t, guildConfigSchemaVersion, item.SchemaVersion)
+	attributes, err := attributevalue.MarshalMap(item)
+	require.NoError(t, err)
+	client := &fakeDynamoClient{get: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		return &dynamodb.GetItemOutput{Item: attributes}, nil
+	}}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	defer repository.Close()
+
+	loaded, err := repository.Load(context.Background(), "guild")
+	require.NoError(t, err)
+	assert.Equal(t, "quality", loaded.Settings.PrimaryModelProfile)
+	assert.Empty(t, loaded.Settings.FallbackModelProfile)
 }
 
 func TestConfigurationIgnoresLegacyTemperatureAttribute(t *testing.T) {

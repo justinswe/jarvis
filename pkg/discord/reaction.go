@@ -6,8 +6,8 @@ import (
 	"unicode"
 
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/errors"
-	googlegenai "google.golang.org/genai"
 )
 
 const (
@@ -31,16 +31,17 @@ func (p *Processor) reactToMessage(channelID, currentMessageID string) genai.Fun
 
 func (messageReactionTool) Name() string { return messageReactionToolName }
 
-func (messageReactionTool) Declaration() *googlegenai.FunctionDeclaration {
-	return &googlegenai.FunctionDeclaration{
+func (messageReactionTool) Declaration() *llm.ToolDefinition {
+	return &llm.ToolDefinition{
 		Name: messageReactionToolName,
 		Description: "Add a Unicode emoji reaction to the current Discord message or another message in the current channel. " +
 			"Use this when a lightweight reaction improves the interaction, but not instead of a substantive answer when one is needed. " +
 			"Omit message_id to react to the current request; use only message IDs provided in the conversation or by search_current_channel.",
-		Parameters: &googlegenai.Schema{Type: googlegenai.TypeObject, Properties: map[string]*googlegenai.Schema{
-			"emoji":      {Type: googlegenai.TypeString, Description: "One standard Unicode emoji. Custom Discord emoji and the reserved processing emoji are not supported."},
-			"message_id": {Type: googlegenai.TypeString, Description: "Optional message ID from the current channel. Omit this to react to the current request."},
-		}, Required: []string{"emoji"}},
+		InputSchema: llm.JSONSchema{"type": "object", "properties": map[string]any{
+			"emoji":      map[string]any{"type": "string", "description": "One standard Unicode emoji. Custom Discord emoji and the reserved processing emoji are not supported."},
+			"message_id": map[string]any{"type": "string", "description": "Optional message ID from the current channel. Omit this to react to the current request."},
+		}, "required": []string{"emoji"}},
+		Effect: llm.ToolEffectMutation,
 	}
 }
 

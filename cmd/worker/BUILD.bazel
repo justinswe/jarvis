@@ -17,6 +17,7 @@ go_library(
         "//internal/worker",
         "//pkg/discord",
         "//pkg/genai",
+        "//pkg/websearch",
         "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
         "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",
@@ -38,6 +39,9 @@ go_test(
     embed = [":worker_lib"],
     deps = [
         "//internal/config",
+        "//pkg/websearch",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

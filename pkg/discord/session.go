@@ -9,6 +9,7 @@ import (
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/internal/version"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/errors"
 )
 
@@ -41,28 +42,32 @@ type Client interface {
 
 // Processor handles Discord messages without owning a Gateway connection.
 type Processor struct {
-	client      Client
-	botID       string
-	generator   Generator
-	configs     config.Provider
-	history     History
-	manager     config.Manager
-	rootUsers   map[string]struct{}
-	version     string
-	imageClient *http.Client
-	threadQueue threadRequestQueue
+	client             Client
+	botID              string
+	generator          Generator
+	configs            config.Provider
+	history            History
+	manager            config.Manager
+	models             *llm.Registry
+	webSearchProviders []string
+	rootUsers          map[string]struct{}
+	version            string
+	imageClient        *http.Client
+	threadQueue        threadRequestQueue
 }
 
 // ProcessorConfig contains the worker-owned dependencies for Discord request processing.
 type ProcessorConfig struct {
-	DiscordBotToken string
-	Configs         config.Provider
-	Generator       Generator
-	History         History
-	ConfigManager   config.Manager
-	RootUserIDs     []string
-	Version         string
-	ImageHTTPClient *http.Client
+	DiscordBotToken    string
+	Configs            config.Provider
+	Generator          Generator
+	History            History
+	ConfigManager      config.Manager
+	ModelRegistry      *llm.Registry
+	WebSearchProviders []string
+	RootUserIDs        []string
+	Version            string
+	ImageHTTPClient    *http.Client
 }
 
 // NewProcessor creates a request processor backed only by Discord REST APIs.
@@ -104,7 +109,8 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 	}
 	return &Processor{
 		client: restClient{session: session}, botID: user.ID, generator: cfg.Generator, configs: cfg.Configs,
-		history: cfg.History, manager: cfg.ConfigManager, rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
+		history: cfg.History, manager: cfg.ConfigManager, models: cfg.ModelRegistry, webSearchProviders: append([]string(nil), cfg.WebSearchProviders...),
+		rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
 	}, nil
 }
 

@@ -9,10 +9,10 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	googlegenai "google.golang.org/genai"
 )
 
 type fakeConfigManager struct {
@@ -136,19 +136,95 @@ func TestConfigurationToolsAreExposedOnlyToAdministrators(t *testing.T) {
 
 func TestConfigurationToolSchemasLimitProtectedSettingsToRootUsers(t *testing.T) {
 	base := configurationTool{action: updateServerConfigurationToolName, authorized: true}
-	assert.Empty(t, base.Declaration().Parameters.Properties)
+	assert.Empty(t, schemaProperties(t, base.Declaration()))
 	base.root = true
-	maxOutputTokens := base.Declaration().Parameters.Properties["max_output_tokens"]
-	require.NotNil(t, maxOutputTokens.Maximum)
-	assert.Equal(t, float64(genai.MaxOutputTokensLimit), *maxOutputTokens.Maximum)
-	assert.Contains(t, maxOutputTokens.Description, "including thinking")
-	prompt := base.Declaration().Parameters.Properties["prompt"]
-	assert.Contains(t, prompt.Description, "may define the assistant's name and personality")
-	assert.NotContains(t, prompt.Description, "Jarvis's core identity")
+	properties := schemaProperties(t, base.Declaration())
+	maxOutputTokens := schemaProperty(t, properties, "max_output_tokens")
+	assert.Equal(t, genai.MaxOutputTokensLimit, maxOutputTokens["maximum"])
+	assert.Contains(t, maxOutputTokens["description"], "including thinking")
+	prompt := schemaProperty(t, properties, "prompt")
+	assert.Contains(t, prompt["description"], "may define the assistant's name and personality")
+	assert.NotContains(t, prompt["description"], "Jarvis's core identity")
 	for _, field := range []string{"prompt", "thread_context_window", "parent_context_window", "message_retention_days"} {
-		assert.Contains(t, base.Declaration().Parameters.Properties, field)
+		assert.Contains(t, properties, field)
 	}
-	assert.NotContains(t, base.Declaration().Parameters.Properties, "temperature")
+	assert.NotContains(t, properties, "temperature")
+	assert.NotContains(t, properties, "tool_model_profile")
+	assert.NotContains(t, properties, "web_search_model_profile")
+}
+
+func TestRootConfigurationReadsAndUpdatesModelProfiles(t *testing.T) {
+	models := testConfigurationModels(t)
+	settings := testSettings()
+	settings.PrimaryModelProfile = "fast"
+	settings.FallbackModelProfile = "presentation"
+	manager := &fakeConfigManager{value: config.GuildConfig{Settings: settings}}
+	root := configurationTool{
+		manager: manager, models: models, webSearchProviders: []string{"serper", "tavily"}, guildID: "guild", actorID: "123456789012345678",
+		authorized: true, root: true, access: "root", action: getServerConfigurationToolName,
+	}
+
+	result, err := root.Execute(context.Background(), nil)
+	require.NoError(t, err)
+	response := result.(configurationResponse)
+	assert.Equal(t, "fast", response.PrimaryModelProfile)
+	assert.Equal(t, "presentation", response.FallbackModelProfile)
+	assert.Equal(t, []string{"serper", "tavily"}, response.WebSearchProviders)
+	assert.Equal(t, []configurationProfile{
+		{Name: "fast", Provider: string(llm.ProviderOpenRouter), Tools: true, ToolChoice: true},
+		{Name: "google", Provider: string(llm.ProviderGoogleAI)},
+		{Name: "presentation", Provider: string(llm.ProviderVertex)},
+		{Name: "quality", Provider: string(llm.ProviderNVIDIANIM), Tools: true, ToolChoice: true},
+	}, response.AvailableProfiles)
+
+	root.action = updateServerConfigurationToolName
+	properties := schemaProperties(t, root.Declaration())
+	assert.Equal(t, []string{"fast", "quality"}, schemaProperty(t, properties, "primary_model_profile")["enum"])
+	assert.Equal(t, []string{"", "fast", "google", "presentation", "quality"}, schemaProperty(t, properties, "fallback_model_profile")["enum"])
+	result, err = root.Execute(context.Background(), map[string]any{
+		"primary_model_profile":  "quality",
+		"fallback_model_profile": "",
+	})
+	require.NoError(t, err)
+	response = result.(configurationResponse)
+	assert.Equal(t, "quality", response.PrimaryModelProfile)
+	assert.Empty(t, response.FallbackModelProfile)
+	assert.Equal(t, []string{"fallback_model_profile", "primary_model_profile"}, response.ChangedFields)
+}
+
+func TestRootConfigurationRejectsInvalidModelPairs(t *testing.T) {
+	models := testConfigurationModels(t)
+	settings := testSettings()
+	settings.PrimaryModelProfile = "quality"
+	manager := &fakeConfigManager{value: config.GuildConfig{Settings: settings}}
+	root := configurationTool{
+		manager: manager, models: models, guildID: "guild", actorID: "123456789012345678",
+		authorized: true, root: true, action: updateServerConfigurationToolName,
+	}
+
+	for _, args := range []map[string]any{
+		{"primary_model_profile": "missing"},
+		{"primary_model_profile": "presentation"},
+		{"primary_model_profile": "fast", "fallback_model_profile": "fast"},
+	} {
+		_, err := root.Execute(context.Background(), args)
+		var executionErr *genai.ExecutionError
+		require.ErrorAs(t, err, &executionErr)
+		assert.Equal(t, "invalid_configuration", executionErr.Code)
+	}
+}
+
+func TestRootConfigurationReadPreservesStaleProfileAlias(t *testing.T) {
+	settings := testSettings()
+	settings.PrimaryModelProfile = "removed-profile"
+	tool := configurationTool{
+		manager: &fakeConfigManager{value: config.GuildConfig{Settings: settings}}, models: testConfigurationModels(t),
+		guildID: "guild", actorID: "123456789012345678", authorized: true, root: true, access: "root",
+		action: getServerConfigurationToolName,
+	}
+	result, err := tool.Execute(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "removed-profile", result.(configurationResponse).PrimaryModelProfile)
 }
 
 func TestConfigurationToolsUpdateAndDelegate(t *testing.T) {
@@ -221,11 +297,11 @@ func TestSetGuildPromptToolSetsAndClearsPrompt(t *testing.T) {
 		action: setGuildPromptToolName,
 	}
 	declaration := tool.Declaration()
-	require.NotNil(t, declaration.Parameters.Properties["guild_prompt"].MaxLength)
-	assert.Equal(t, int64(config.MaxGuildPromptRunes), *declaration.Parameters.Properties["guild_prompt"].MaxLength)
+	guildPrompt := schemaProperty(t, schemaProperties(t, declaration), "guild_prompt")
+	assert.Equal(t, config.MaxGuildPromptRunes, guildPrompt["maxLength"])
 	assert.Contains(t, declaration.Description, "cannot assign or change the assistant's name")
 	assert.Contains(t, declaration.Description, "override root-controlled customization")
-	assert.Contains(t, declaration.Parameters.Properties["guild_prompt"].Description, "cannot assign or change the assistant's name")
+	assert.Contains(t, guildPrompt["description"], "cannot assign or change the assistant's name")
 
 	result, err := tool.Execute(context.Background(), map[string]any{"guild_prompt": "  Use guild terminology.  "})
 	require.NoError(t, err)
@@ -266,8 +342,52 @@ func TestProcessUsesHighThinkingWhenAdminToolsAreExposed(t *testing.T) {
 	}
 	require.NoError(t, processor.Process(context.Background(), targetedMessage("message", "show the configuration")))
 	require.NotNil(t, generator.request)
-	assert.Equal(t, googlegenai.ThinkingLevelHigh, generator.request.Config.ThinkingLevel)
+	assert.Equal(t, llm.ReasoningHigh, generator.request.Config.ReasoningEffort)
 	require.Len(t, generator.request.Tools, 8)
 	assert.Equal(t, getServerConfigurationToolName, generator.request.Tools[3].Name())
 	assert.Equal(t, setGuildPromptToolName, generator.request.Tools[5].Name())
+}
+
+func TestRootVersionRequestPreservesRuntimeToolRouteAndRequestShape(t *testing.T) {
+	settings := testSettings()
+	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
+	processor := &Processor{
+		botID: "bot", generator: generator, client: &fakeClient{}, configs: &countingProvider{settings: settings},
+		history: &fakeHistory{}, manager: &fakeConfigManager{value: config.GuildConfig{Settings: settings}},
+		rootUsers: map[string]struct{}{"u": {}}, version: "v0.6.0",
+	}
+	require.NoError(t, processor.Process(context.Background(), targetedMessage("message", "what version are you")))
+	require.NotNil(t, generator.request)
+	assert.Equal(t, "CURRENT REQUEST:\nwhat version are you", generator.request.Messages[len(generator.request.Messages)-1].Content)
+	assert.Equal(t, llm.ReasoningHigh, generator.request.Config.ReasoningEffort)
+	assert.Equal(t, genai.AccuracyPolicy{
+		RequiredFunctionNames: []string{runtimeContextToolName}, RuntimeContextRelevant: true,
+	}, generator.request.Config.AccuracyPolicy)
+	assert.Len(t, generator.request.Tools, 8)
+}
+
+func schemaProperties(t *testing.T, declaration *llm.ToolDefinition) map[string]any {
+	t.Helper()
+	properties, ok := declaration.InputSchema["properties"].(map[string]any)
+	require.True(t, ok)
+	return properties
+}
+
+func schemaProperty(t *testing.T, properties map[string]any, name string) llm.JSONSchema {
+	t.Helper()
+	property, ok := properties[name].(llm.JSONSchema)
+	require.True(t, ok)
+	return property
+}
+
+func testConfigurationModels(t *testing.T) *llm.Registry {
+	t.Helper()
+	registry, err := llm.NewRegistry([]llm.Profile{
+		{Name: "fast", Provider: llm.ProviderOpenRouter, ModelID: "fast", Capabilities: llm.Capabilities{Tools: true, ToolChoice: true}},
+		{Name: "google", Provider: llm.ProviderGoogleAI, ModelID: "gemini-3.1-flash-lite"},
+		{Name: "presentation", Provider: llm.ProviderVertex, ModelID: "presentation"},
+		{Name: "quality", Provider: llm.ProviderNVIDIANIM, ModelID: "quality", Capabilities: llm.Capabilities{Tools: true, ToolChoice: true}},
+	}, nil, llm.Selection{Primary: "fast", Fallback: "presentation"})
+	require.NoError(t, err)
+	return registry
 }

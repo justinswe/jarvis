@@ -19,9 +19,15 @@ var botPrefixPattern = regexp.MustCompile(`(?i)^(?:\s*(?:jarvis|jarvischat)\s*[:
 var channelMentionPattern = regexp.MustCompile(`<#[0-9]+>`)
 
 const (
-	googleGroundingRedirectHost      = "vertexaisearch.cloud.google.com"
-	webUnconfirmedEvidenceStatusLine = "-# Evidence status: Current details could not be confirmed from usable web sources."
+	webUnconfirmedEvidenceStatusSentence = "Current details could not be confirmed from usable web sources."
 )
+
+var evidenceStatusText = map[genai.EvidenceStatus]string{
+	genai.EvidenceStatusWebUnconfirmed:     webUnconfirmedEvidenceStatusSentence,
+	genai.EvidenceStatusRuntimeUnconfirmed: "Current runtime details could not be confirmed.",
+	genai.EvidenceStatusChannelUnconfirmed: "Requested channel history could not be confirmed.",
+	genai.EvidenceStatusGeneralUnconfirmed: "Some details could not be confirmed with available evidence.",
+}
 
 func appendSources(text string, sources []genai.Source) string {
 	links := make([]string, 0, 3)
@@ -31,18 +37,21 @@ func appendSources(text string, sources []genai.Source) string {
 		}
 		link, ok := formatSourceLink(source)
 		if ok {
-			links = append(links, link)
+			links = append(links, fmt.Sprintf("[%d · %s", len(links)+1, strings.TrimPrefix(link, "[")))
 		}
 	}
 	if len(links) == 0 {
 		return text
 	}
-	return strings.TrimSpace(text) + "\n\n-# Sources: " + strings.Join(links, " · ")
+	return strings.TrimSpace(text) + "\n\n-# Sources consulted: " + strings.Join(links, " · ")
 }
 
 // formatSourceLink creates a Discord link labeled with its source domain.
 func formatSourceLink(source genai.Source) (string, bool) {
 	rawURL := strings.TrimSpace(source.URL)
+	if strings.ContainsAny(rawURL, "()") {
+		return "", false
+	}
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil || parsedURL.User != nil || parsedURL.Host == "" {
 		return "", false
@@ -51,68 +60,11 @@ func formatSourceLink(source genai.Source) (string, bool) {
 		return "", false
 	}
 
-	label := sourceLabel(source, parsedURL)
+	label := baseDomain(parsedURL.Hostname())
 	if label == "" {
 		return "", false
 	}
 	return fmt.Sprintf("[%s](%s)", label, rawURL), true
-}
-
-// sourceLabel chooses publisher metadata without exposing redirect infrastructure.
-func sourceLabel(source genai.Source, parsedURL *url.URL) string {
-	if domain, ok := titleDomain(source.Title); ok {
-		return domain
-	}
-	if !isGoogleGroundingDomain(source.Domain) {
-		if domain := baseDomain(source.Domain); domain != "" {
-			return domain
-		}
-	}
-	if !isGoogleGroundingRedirect(parsedURL) {
-		if domain := baseDomain(parsedURL.Hostname()); domain != "" {
-			return domain
-		}
-	}
-	return escapeLinkLabel(source.Title)
-}
-
-// titleDomain returns a registrable domain only when the title is a hostname.
-func titleDomain(raw string) (string, bool) {
-	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
-	if domain == "" || net.ParseIP(domain) != nil {
-		return "", false
-	}
-	parsedDomain, err := url.Parse("https://" + domain)
-	if err != nil || parsedDomain.User != nil || parsedDomain.Port() != "" || parsedDomain.Hostname() != domain {
-		return "", false
-	}
-	registrableDomain, err := publicsuffix.EffectiveTLDPlusOne(domain)
-	if err != nil {
-		return "", false
-	}
-	return registrableDomain, true
-}
-
-// isGoogleGroundingDomain reports whether a domain identifies redirect infrastructure.
-func isGoogleGroundingDomain(raw string) bool {
-	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
-	return domain == googleGroundingRedirectHost
-}
-
-// isGoogleGroundingRedirect reports whether a URL is a Google grounding redirect.
-func isGoogleGroundingRedirect(parsedURL *url.URL) bool {
-	if parsedURL == nil || !strings.EqualFold(parsedURL.Hostname(), googleGroundingRedirectHost) {
-		return false
-	}
-	return parsedURL.Path == "/grounding-api-redirect" || strings.HasPrefix(parsedURL.Path, "/grounding-api-redirect/")
-}
-
-// escapeLinkLabel makes a textual source title safe for a Markdown link label.
-func escapeLinkLabel(raw string) string {
-	label := strings.Join(strings.Fields(raw), " ")
-	label = strings.ReplaceAll(label, `\`, `\\`)
-	label = strings.ReplaceAll(label, "[", `\[`)
-	return strings.ReplaceAll(label, "]", `\]`)
 }
 
 // baseDomain reduces a hostname to its registrable domain when possible.
@@ -138,8 +90,6 @@ func appendEvidence(text string, evidence []genai.Evidence) string {
 			label = "runtime context"
 		case genai.EvidenceKindChannelHistory:
 			label = "channel history"
-		case genai.EvidenceKindCodeExecution:
-			label = "code execution"
 		}
 		if label == "" {
 			continue
@@ -157,15 +107,33 @@ func appendEvidence(text string, evidence []genai.Evidence) string {
 }
 
 // appendEvidenceStatus renders a recognized status after all provenance footers.
-func appendEvidenceStatus(text string, status genai.EvidenceStatus, grounded bool, sources []genai.Source) string {
+func appendEvidenceStatus(text string, status genai.EvidenceStatus, sources []genai.Source) string {
+	return appendEvidenceStatuses(text, []genai.EvidenceStatus{status}, sources)
+}
+
+// appendEvidenceStatuses renders recognized statuses after all provenance footers.
+func appendEvidenceStatuses(text string, statuses []genai.EvidenceStatus, sources []genai.Source) string {
 	text = stripEvidenceStatusFooters(text)
-	if status != genai.EvidenceStatusWebUnconfirmed {
+	seen := make(map[genai.EvidenceStatus]struct{}, len(statuses))
+	labels := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		if status == genai.EvidenceStatusWebUnconfirmed && hasRenderableSource(sources) {
+			continue
+		}
+		label, ok := evidenceStatusText[status]
+		if !ok {
+			continue
+		}
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		labels = append(labels, label)
+	}
+	if len(labels) == 0 {
 		return text
 	}
-	if grounded && hasRenderableSource(sources) {
-		return text
-	}
-	return strings.TrimSpace(text) + "\n\n" + webUnconfirmedEvidenceStatusLine
+	return strings.TrimSpace(text) + "\n\n-# Evidence status: " + strings.Join(labels, " ")
 }
 
 // stripEvidenceStatusFooters removes model-provided text from the reserved status line.
@@ -181,7 +149,7 @@ func stripEvidenceStatusFooters(text string) string {
 	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
-// hasRenderableSource reports whether Discord can display a grounded source.
+// hasRenderableSource reports whether Discord can display a normalized source.
 func hasRenderableSource(sources []genai.Source) bool {
 	for _, source := range sources {
 		if _, ok := formatSourceLink(source); ok {

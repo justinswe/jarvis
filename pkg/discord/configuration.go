@@ -11,10 +11,10 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
-	googlegenai "google.golang.org/genai"
 )
 
 const (
@@ -26,32 +26,51 @@ const (
 )
 
 type configurationTool struct {
-	manager    config.Manager
-	guildID    string
-	actorID    string
-	authorized bool
-	root       bool
-	access     string
-	action     string
+	manager            config.Manager
+	models             *llm.Registry
+	webSearchProviders []string
+	guildID            string
+	actorID            string
+	authorized         bool
+	root               bool
+	access             string
+	action             string
 }
 
 type configurationResponse struct {
-	Source                string   `json:"source"`
-	Version               int64    `json:"version"`
-	AccessClass           string   `json:"access_class"`
-	Prompt                string   `json:"prompt,omitempty"`
-	GuildPrompt           string   `json:"guild_prompt"`
-	ThreadMessages        int      `json:"thread_context_window,omitempty"`
-	ParentMessages        int      `json:"parent_context_window,omitempty"`
-	ChannelMessages       int      `json:"channel_context_window,omitempty"`
-	HistoryRunes          int      `json:"history_runes,omitempty"`
-	MaxOutputTokens       int      `json:"max_output_tokens,omitempty"`
-	MessageTimeoutSeconds int64    `json:"message_timeout_seconds,omitempty"`
-	MessageRetentionDays  int      `json:"message_retention_days,omitempty"`
-	WebSearchEnabled      bool     `json:"web_search_enabled,omitempty"`
-	ChannelSearchEnabled  bool     `json:"channel_search_enabled,omitempty"`
-	AdminUserIDs          []string `json:"admin_user_ids,omitempty"`
-	ChangedFields         []string `json:"changed_fields,omitempty"`
+	Source                string                 `json:"source"`
+	Version               int64                  `json:"version"`
+	AccessClass           string                 `json:"access_class"`
+	Prompt                string                 `json:"prompt,omitempty"`
+	GuildPrompt           string                 `json:"guild_prompt"`
+	ThreadMessages        int                    `json:"thread_context_window,omitempty"`
+	ParentMessages        int                    `json:"parent_context_window,omitempty"`
+	ChannelMessages       int                    `json:"channel_context_window,omitempty"`
+	HistoryRunes          int                    `json:"history_runes,omitempty"`
+	MaxOutputTokens       int                    `json:"max_output_tokens,omitempty"`
+	MessageTimeoutSeconds int64                  `json:"message_timeout_seconds,omitempty"`
+	MessageRetentionDays  int                    `json:"message_retention_days,omitempty"`
+	WebSearchEnabled      bool                   `json:"web_search_enabled,omitempty"`
+	ChannelSearchEnabled  bool                   `json:"channel_search_enabled,omitempty"`
+	AdminUserIDs          []string               `json:"admin_user_ids,omitempty"`
+	ChangedFields         []string               `json:"changed_fields,omitempty"`
+	PrimaryModelProfile   string                 `json:"primary_model_profile,omitempty"`
+	FallbackModelProfile  string                 `json:"fallback_model_profile"`
+	WebSearchProviders    []string               `json:"web_search_providers"`
+	AvailableProfiles     []configurationProfile `json:"available_model_profiles,omitempty"`
+}
+
+type configurationProfile struct {
+	Name              string `json:"name"`
+	Provider          string `json:"provider"`
+	Tools             bool   `json:"tools"`
+	ToolChoice        bool   `json:"tool_choice"`
+	Images            bool   `json:"images"`
+	Reasoning         bool   `json:"reasoning"`
+	ReasoningControls bool   `json:"reasoning_controls"`
+	ContextTokens     int    `json:"context_tokens,omitempty"`
+	MaxInputTokens    int    `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens   int    `json:"max_output_tokens,omitempty"`
 }
 
 func (p *Processor) configurationTools(ctx context.Context, m *discordgo.MessageCreate, guildConfig config.GuildConfig) ([]genai.FunctionTool, bool) {
@@ -80,7 +99,7 @@ func (p *Processor) configurationTools(ctx context.Context, m *discordgo.Message
 	if !authorized {
 		return nil, false
 	}
-	base := configurationTool{manager: p.manager, guildID: m.GuildID, actorID: m.Author.ID, authorized: true, root: root, access: access}
+	base := configurationTool{manager: p.manager, models: p.models, webSearchProviders: p.webSearchProviders, guildID: m.GuildID, actorID: m.Author.ID, authorized: true, root: root, access: access}
 	if root {
 		return []genai.FunctionTool{
 			configurationToolWithAction(base, getServerConfigurationToolName),
@@ -103,29 +122,29 @@ func configurationToolWithAction(tool configurationTool, action string) configur
 
 func (t configurationTool) Name() string { return t.action }
 
-func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
+func (t configurationTool) Declaration() *llm.ToolDefinition {
 	switch t.action {
 	case getServerConfigurationToolName:
-		return &googlegenai.FunctionDeclaration{
+		return &llm.ToolDefinition{
 			Name: t.action,
 			Description: "Read the effective Jarvis settings and delegated administrators for the current Discord server. " +
 				"Use only when an administrator explicitly asks to inspect server configuration.",
-			Parameters: objectSchema(nil, nil),
+			InputSchema: objectSchema(nil, nil), Effect: llm.ToolEffectReadOnly,
 		}
 	case updateServerConfigurationToolName:
 		if !t.root {
-			return &googlegenai.FunctionDeclaration{
-				Name: t.action, Description: "Root-only server configuration update.", Parameters: objectSchema(nil, nil),
+			return &llm.ToolDefinition{
+				Name: t.action, Description: "Root-only server configuration update.", InputSchema: objectSchema(nil, nil), Effect: llm.ToolEffectMutation,
 			}
 		}
-		properties := map[string]*googlegenai.Schema{
+		properties := map[string]any{
 			"channel_context_window": integerSchema("Prior ordinary channel messages included in context.", 1, 100),
 			"history_runes":          integerMinimumSchema("Combined history rune budget.", 1),
 			"max_output_tokens": integerSchema(
 				"Maximum total generated tokens, including thinking and visible text.", 1, genai.MaxOutputTokensLimit,
 			),
 			"message_timeout_seconds": integerMinimumSchema("Overall processing timeout in whole seconds.", 1),
-			"web_search_enabled":      booleanSchema("Whether Google Search may be used for this server."),
+			"web_search_enabled":      booleanSchema("Whether configured public-web Search may be used for this server."),
 			"channel_search_enabled":  booleanSchema("Whether stored current-channel search may be used when DynamoDB is enabled."),
 		}
 		properties["prompt"] = stringSchema("Root-controlled assistant customization. It may define the assistant's name and personality, but cannot override the core drives, truthfulness, research, tool, or reliability rules.")
@@ -135,41 +154,45 @@ func (t configurationTool) Declaration() *googlegenai.FunctionDeclaration {
 			"Retention for newly ingested messages in whole days. Only root users may change this value.",
 			1, config.MaxMessageRetentionDays,
 		)
-		return &googlegenai.FunctionDeclaration{
+		if t.models != nil {
+			properties["primary_model_profile"] = enumStringSchema("Tool-capable primary model profile for this server.", primaryModelProfileNames(t.models))
+			properties["fallback_model_profile"] = enumStringSchema("Presentation fallback model profile. Pass an empty string to disable fallback.", append([]string{""}, modelProfileNames(t.models)...))
+		}
+		return &llm.ToolDefinition{
 			Name: t.action,
 			Description: "Update one or more Jarvis settings for the current Discord server. " +
 				"Call only for an explicit, unambiguous administrator request; ask a clarification question instead of guessing a value.",
-			Parameters: objectSchema(properties, nil),
+			InputSchema: objectSchema(properties, nil), Effect: llm.ToolEffectMutation,
 		}
 	case setGuildPromptToolName:
-		return &googlegenai.FunctionDeclaration{
+		return &llm.ToolDefinition{
 			Name: t.action,
 			Description: "Set subordinate customization instructions for the current Discord server. They cannot assign or change the assistant's name, override root-controlled customization, or override the core drives, truthfulness, research, tool, or reliability rules. " +
 				"Call only for an explicit administrator request. Pass an empty string to clear the guild prompt.",
-			Parameters: objectSchema(map[string]*googlegenai.Schema{
+			InputSchema: objectSchema(map[string]any{
 				"guild_prompt": boundedStringSchema(
 					"Guild-specific customization appended to the root-controlled customization. It cannot assign or change the assistant's name; an empty string clears it.",
 					config.MaxGuildPromptRunes,
 				),
-			}, []string{"guild_prompt"}),
+			}, []string{"guild_prompt"}), Effect: llm.ToolEffectMutation,
 		}
 	case addServerAdminToolName:
-		return &googlegenai.FunctionDeclaration{
+		return &llm.ToolDefinition{
 			Name: t.action,
 			Description: "Delegate Jarvis server-configuration access to a Discord user in the current server. " +
 				"Call only when an administrator explicitly asks to add a specific user ID.",
-			Parameters: objectSchema(map[string]*googlegenai.Schema{
+			InputSchema: objectSchema(map[string]any{
 				"user_id": stringSchema("The 17-20 digit Discord user ID to add."),
-			}, []string{"user_id"}),
+			}, []string{"user_id"}), Effect: llm.ToolEffectMutation,
 		}
 	case removeServerAdminToolName:
-		return &googlegenai.FunctionDeclaration{
+		return &llm.ToolDefinition{
 			Name: t.action,
 			Description: "Remove delegated Jarvis server-configuration access from a Discord user in the current server. " +
 				"Call only when an administrator explicitly asks to remove a specific user ID.",
-			Parameters: objectSchema(map[string]*googlegenai.Schema{
+			InputSchema: objectSchema(map[string]any{
 				"user_id": stringSchema("The 17-20 digit Discord user ID to remove."),
-			}, []string{"user_id"}),
+			}, []string{"user_id"}), Effect: llm.ToolEffectMutation,
 		}
 	default:
 		return nil
@@ -186,12 +209,12 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(loaded, nil, t.root, t.access), nil
+		return responseFromConfig(loaded, nil, t.root, t.access, t.models, t.webSearchProviders), nil
 	case updateServerConfigurationToolName:
 		if !t.root {
 			return nil, genai.NewExecutionError("authorization_denied", "Only a root user may change operational settings.", nil)
 		}
-		patch, changed, err := configurationPatch(args)
+		patch, changed, err := configurationPatch(args, t.models)
 		if err != nil {
 			return nil, genai.NewExecutionError("invalid_configuration", err.Error(), err)
 		}
@@ -199,7 +222,7 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(updated, changed, true, t.access), nil
+		return responseFromConfig(updated, changed, true, t.access, t.models, t.webSearchProviders), nil
 	case setGuildPromptToolName:
 		guildPrompt, err := guildPromptArgument(args["guild_prompt"])
 		if err != nil {
@@ -209,7 +232,7 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(updated, []string{"guild_prompt"}, t.root, t.access), nil
+		return responseFromConfig(updated, []string{"guild_prompt"}, t.root, t.access, t.models, t.webSearchProviders), nil
 	case addServerAdminToolName, removeServerAdminToolName:
 		if !t.root {
 			return nil, genai.NewExecutionError("authorization_denied", "Only a root user may manage delegated administrators.", nil)
@@ -227,13 +250,13 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 		if err != nil {
 			return nil, configurationFailure(err)
 		}
-		return responseFromConfig(updated, []string{"admin_user_ids"}, true, t.access), nil
+		return responseFromConfig(updated, []string{"admin_user_ids"}, true, t.access, t.models, t.webSearchProviders), nil
 	default:
 		return nil, genai.NewExecutionError("unsupported_function", "The requested configuration operation is unavailable.", nil)
 	}
 }
 
-func configurationPatch(args map[string]any) (config.Patch, []string, error) {
+func configurationPatch(args map[string]any, models *llm.Registry) (config.Patch, []string, error) {
 	var patch config.Patch
 	var changed []string
 	for name, value := range args {
@@ -266,6 +289,10 @@ func configurationPatch(args map[string]any) (config.Patch, []string, error) {
 			patch.WebSearchEnabled, err = boolArgument(value, name)
 		case "channel_search_enabled":
 			patch.ChannelSearchEnabled, err = boolArgument(value, name)
+		case "primary_model_profile":
+			patch.PrimaryModelProfile, err = modelProfileArgument(value, name, false)
+		case "fallback_model_profile":
+			patch.FallbackModelProfile, err = modelProfileArgument(value, name, true)
 		default:
 			err = errors.Errorf("unsupported configuration field %q", name)
 		}
@@ -277,11 +304,31 @@ func configurationPatch(args map[string]any) (config.Patch, []string, error) {
 	if patch.Empty() {
 		return config.Patch{}, nil, errors.New("at least one configuration field is required")
 	}
+	if patch.PrimaryModelProfile != nil || patch.FallbackModelProfile != nil {
+		if models == nil {
+			return config.Patch{}, nil, errors.New("model profile configuration is unavailable")
+		}
+		patch.ValidateModelProfiles = func(settings config.ServerSettings) error {
+			primary, ok := models.Profile(settings.PrimaryModelProfile)
+			if !ok {
+				return errors.Errorf("unknown primary model profile %q", settings.PrimaryModelProfile)
+			}
+			if !primary.ToolsEnabled() {
+				return errors.Errorf("primary model profile %q must confirm tools and tool choice", settings.PrimaryModelProfile)
+			}
+			if settings.FallbackModelProfile != "" {
+				if _, ok := models.Profile(settings.FallbackModelProfile); !ok {
+					return errors.Errorf("unknown fallback model profile %q", settings.FallbackModelProfile)
+				}
+			}
+			return nil
+		}
+	}
 	slices.Sort(changed)
 	return patch, changed, nil
 }
 
-func responseFromConfig(value config.GuildConfig, changed []string, root bool, access string) configurationResponse {
+func responseFromConfig(value config.GuildConfig, changed []string, root bool, access string, models *llm.Registry, webSearchProviders []string) configurationResponse {
 	settings := value.Settings
 	source := "dynamodb"
 	if value.Version == 0 {
@@ -303,6 +350,21 @@ func responseFromConfig(value config.GuildConfig, changed []string, root bool, a
 	response.MessageRetentionDays = settings.MessageRetentionDays
 	response.WebSearchEnabled = settings.WebSearchEnabled
 	response.ChannelSearchEnabled = settings.ChannelSearchEnabled
+	response.PrimaryModelProfile = settings.PrimaryModelProfile
+	response.FallbackModelProfile = settings.FallbackModelProfile
+	response.WebSearchProviders = append([]string{}, webSearchProviders...)
+	if models != nil {
+		for _, profile := range models.Profiles() {
+			response.AvailableProfiles = append(response.AvailableProfiles, configurationProfile{
+				Name: profile.Name, Provider: string(profile.Provider),
+				Tools: profile.Capabilities.Tools, ToolChoice: profile.Capabilities.ToolChoice,
+				Images: profile.Capabilities.Images, Reasoning: profile.Capabilities.Reasoning,
+				ReasoningControls: profile.Capabilities.ReasoningControls,
+				ContextTokens:     profile.Capabilities.ContextTokens, MaxInputTokens: profile.Capabilities.MaxInputTokens,
+				MaxOutputTokens: profile.Capabilities.MaxOutputTokens,
+			})
+		}
+	}
 	response.AdminUserIDs = slices.Clone(value.AdminUserIDs)
 	response.ChangedFields = changed
 	return response
@@ -321,6 +383,9 @@ func guildPromptArgument(value any) (string, error) {
 }
 
 func configurationFailure(err error) error {
+	if errors.Is(err, config.ErrInvalidConfiguration) {
+		return genai.NewExecutionError("invalid_configuration", "The requested server configuration is invalid.", err)
+	}
 	if errors.Is(err, config.ErrConflict) {
 		return genai.NewExecutionError("configuration_conflict", "The server configuration changed concurrently; no update was applied.", err)
 	}
@@ -355,6 +420,38 @@ func stringArgument(value any, name string) (*string, error) {
 	return &result, nil
 }
 
+func modelProfileArgument(value any, name string, allowEmpty bool) (*string, error) {
+	result, ok := value.(string)
+	if !ok {
+		return nil, errors.Errorf("%s must be a string", name)
+	}
+	result = strings.TrimSpace(result)
+	if result == "" && !allowEmpty {
+		return nil, errors.Errorf("%s must not be empty", name)
+	}
+	return &result, nil
+}
+
+func modelProfileNames(models *llm.Registry) []string {
+	profiles := models.Profiles()
+	names := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		names = append(names, profile.Name)
+	}
+	return names
+}
+
+func primaryModelProfileNames(models *llm.Registry) []string {
+	profiles := models.Profiles()
+	names := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile.ToolsEnabled() {
+			names = append(names, profile.Name)
+		}
+	}
+	return names
+}
+
 func intArgument(value any, name string) (*int, error) {
 	var number float64
 	switch value := value.(type) {
@@ -386,29 +483,37 @@ func boolArgument(value any, name string) (*bool, error) {
 	return &result, nil
 }
 
-func objectSchema(properties map[string]*googlegenai.Schema, required []string) *googlegenai.Schema {
-	return &googlegenai.Schema{Type: googlegenai.TypeObject, Properties: properties, Required: required}
+func objectSchema(properties map[string]any, required []string) llm.JSONSchema {
+	if properties == nil {
+		properties = map[string]any{}
+	}
+	result := llm.JSONSchema{"type": "object", "properties": properties}
+	if len(required) > 0 {
+		result["required"] = required
+	}
+	return result
 }
 
-func stringSchema(description string) *googlegenai.Schema {
-	return &googlegenai.Schema{Type: googlegenai.TypeString, Description: description}
+func stringSchema(description string) llm.JSONSchema {
+	return llm.JSONSchema{"type": "string", "description": description}
 }
 
-func boundedStringSchema(description string, maximum int) *googlegenai.Schema {
-	maxLength := int64(maximum)
-	return &googlegenai.Schema{Type: googlegenai.TypeString, Description: description, MaxLength: &maxLength}
+func enumStringSchema(description string, values []string) llm.JSONSchema {
+	return llm.JSONSchema{"type": "string", "description": description, "enum": values}
 }
 
-func booleanSchema(description string) *googlegenai.Schema {
-	return &googlegenai.Schema{Type: googlegenai.TypeBoolean, Description: description}
+func boundedStringSchema(description string, maximum int) llm.JSONSchema {
+	return llm.JSONSchema{"type": "string", "description": description, "maxLength": maximum}
 }
 
-func integerSchema(description string, minimum, maximum int) *googlegenai.Schema {
-	minValue, maxValue := float64(minimum), float64(maximum)
-	return &googlegenai.Schema{Type: googlegenai.TypeInteger, Description: description, Minimum: &minValue, Maximum: &maxValue}
+func booleanSchema(description string) llm.JSONSchema {
+	return llm.JSONSchema{"type": "boolean", "description": description}
 }
 
-func integerMinimumSchema(description string, minimum int) *googlegenai.Schema {
-	minValue := float64(minimum)
-	return &googlegenai.Schema{Type: googlegenai.TypeInteger, Description: description, Minimum: &minValue}
+func integerSchema(description string, minimum, maximum int) llm.JSONSchema {
+	return llm.JSONSchema{"type": "integer", "description": description, "minimum": minimum, "maximum": maximum}
+}
+
+func integerMinimumSchema(description string, minimum int) llm.JSONSchema {
+	return llm.JSONSchema{"type": "integer", "description": description, "minimum": minimum}
 }

@@ -12,7 +12,7 @@ DynamoDB is disabled by default. Every flag is also available through the app pa
 | `--dynamodb-table` | `DYNAMODB_TABLE` | `jarvis` | Existing table name. |
 | `--aws-role-arn` | `AWS_ROLE_ARN` | empty | AWS role assumed with a Google identity token. |
 | `--aws-web-identity-audience` | `AWS_WEB_IDENTITY_AUDIENCE` | empty | Audience placed in the Google identity token exchanged with AWS. |
-| `--message-retention-days` | `MESSAGE_RETENTION_DAYS` | `30` | Default retention for new message items. |
+| `--message-retention-days` | `MESSAGE_RETENTION_DAYS` | `14` | Default retention for new message items. |
 | `--root-user-ids` | `ROOT_USER_IDS` | empty | Discord user IDs with cross-guild configuration access. Repeat the flag or use the app package's string-slice environment format. |
 
 Jarvis supports two AWS authentication modes. When the role ARN and web identity audience are both set, the worker retrieves a short-lived Google ID token from the attached Google Cloud service account and exchanges it through AWS STS `AssumeRoleWithWebIdentity`. Both the Google token and resulting AWS credentials are cached and refreshed before expiration. Configure both values together; setting only one is an error. Do not mount Google service-account keys or configure static AWS access keys for this mode.
@@ -67,7 +67,7 @@ Usable messages returned alongside a DynamoDB or decode error are supplied to th
 | `pk` | String | `GUILD#<guild_id>` |
 | `sk` | String | `CONFIG` |
 | `entity_type` | String | `GUILD_CONFIG` |
-| `schema_version` | Number | `1` |
+| `schema_version` | Number | `2` for new writes; version `1` remains readable. |
 | `prompt` | String | Root-controlled assistant customization, including an optional name and personality. |
 | `guild_prompt` | String | Optional subordinate guild-admin instructions appended to the root-controlled prompt. |
 | `thread_messages`, `parent_messages`, `channel_messages` | Number | Context-window limits. |
@@ -75,12 +75,15 @@ Usable messages returned alongside a DynamoDB or decode error are supplied to th
 | `message_timeout_seconds` | Number | Processing deadline. |
 | `message_retention_days` | Number | Retention for new messages, 1 through 3650 days. |
 | `web_search_enabled`, `channel_search_enabled` | Boolean | Web-search eligibility and DynamoDB current-channel-search eligibility. |
+| `primary_model_profile`, `fallback_model_profile` | String | Root-selected model profile names. An empty fallback disables host fallback. |
 | `admin_user_ids` | String set | Delegated Jarvis configuration administrators. |
 | `version` | Number | Optimistic concurrency version. |
 | `updated_at` | Number | Unix milliseconds. |
 | `updated_by_user_id` | String | Discord actor ID for the latest update. |
 
-Missing guild configuration items materialize from the worker's validated defaults on their first mutation. Existing items without `guild_prompt` load it as empty. Legacy `temperature` attributes are ignored during reads and disappear on the next full configuration write, so no migration or backfill is required. Updates use conditional writes and bounded conflict retries.
+Missing guild configuration items materialize from the worker's validated defaults on their first mutation. Schema-version 1 items inherit the deployment's primary and fallback profile defaults when read and become version 2 on their next write; no bulk migration is required. Existing items without `guild_prompt` load it as empty. Legacy `temperature` attributes are ignored during reads and disappear on the next full configuration write. Updates use conditional writes and bounded conflict retries.
+
+Jarvis does not scan stored guild selectors during startup. If a later deployment removes a selected profile, request processing logs the stale alias and uses the validated deployment defaults for that request. Root configuration reads continue to show the stored stale value so an operator can repair it.
 
 When present, the guild prompt is trimmed, limited to 4,000 runes, and composed as:
 
@@ -105,7 +108,7 @@ The model receives five narrow tools only when the caller is authorized:
 - `add_server_admin`
 - `remove_server_admin`
 
-Authorization is granted to configured root users, stored delegated administrators, the Discord guild owner, Discord administrators, and users with Manage Guild permission. Those administrators may set or clear `guild_prompt`. Root users apply across guilds and are the only callers allowed to change `prompt`, `thread_context_window`, `parent_context_window`, or `message_retention_days`; protected fields are omitted from every other caller's tool schema and checked again during execution.
+Authorization is granted to configured root users, stored delegated administrators, the Discord guild owner, Discord administrators, and users with Manage Guild permission. Those administrators may set or clear `guild_prompt`. Root users apply across guilds and are the only callers allowed to change `prompt`, context limits, retention, or the primary and fallback model profiles; protected fields are omitted from every other caller's tool schema and checked again during execution. Root reads include the available profile names and their confirmed tool, image, and reasoning capabilities. Only profiles with confirmed tools and tool choice may be selected as primary; any configured profile may be selected as the tools-disabled presentation fallback.
 
 The tools use flat, typed schemas with explicit bounds and return the complete effective state after a successful mutation. Mutation descriptions require an explicit, unambiguous administrator request. When these tools are exposed, Jarvis raises Gemini's thinking level from medium to high. Database errors are returned to the model as stable, sanitized error codes without backend details.
 

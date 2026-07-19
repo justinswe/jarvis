@@ -47,6 +47,21 @@ func TestPatchAppliesAndValidatesCompleteConfiguration(t *testing.T) {
 	assert.ErrorContains(t, err, "message retention")
 }
 
+func TestPatchUpdatesAndClearsModelProfiles(t *testing.T) {
+	settings := validSettings()
+	settings.PrimaryModelProfile = "primary"
+	settings.FallbackModelProfile = "fallback"
+	primary, clearFallback := "quality", ""
+	updated, err := (Patch{PrimaryModelProfile: &primary, FallbackModelProfile: &clearFallback}).Apply(GuildConfig{Settings: settings})
+	require.NoError(t, err)
+	assert.Equal(t, "quality", updated.Settings.PrimaryModelProfile)
+	assert.Empty(t, updated.Settings.FallbackModelProfile)
+
+	same := "quality"
+	_, err = (Patch{FallbackModelProfile: &same}).Apply(updated)
+	assert.ErrorContains(t, err, "different")
+}
+
 func TestGuildPromptCompositionAndClearing(t *testing.T) {
 	settings := validSettings()
 	settings.Prompt = "Base prompt"

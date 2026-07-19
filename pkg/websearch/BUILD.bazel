@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "websearch",
+    srcs = ["websearch.go"],
+    importpath = "github.com/justinswe/jarvis/pkg/websearch",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "websearch_test",
+    srcs = ["websearch_test.go"],
+    embed = [":websearch"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
