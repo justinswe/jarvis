@@ -20,10 +20,10 @@ go_library(
         "//internal/config",
         "//internal/version",
         "//pkg/genai",
+        "//pkg/llm",
         "@com_github_bwmarrin_discordgo//:discordgo",
         "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",
-        "@org_golang_google_genai//:genai",
         "@org_golang_x_net//publicsuffix",
         "@org_uber_go_zap//:zap",
     ],
@@ -42,10 +42,10 @@ go_test(
     deps = [
         "//internal/config",
         "//pkg/genai",
+        "//pkg/llm",
         "@com_github_bwmarrin_discordgo//:discordgo",
         "@com_github_justinswe_std//errors",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-        "@org_golang_google_genai//:genai",
     ],
 )

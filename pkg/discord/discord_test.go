@@ -13,10 +13,10 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	googlegenai "google.golang.org/genai"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -438,7 +438,7 @@ func TestProcessUsesPerServerSettings(t *testing.T) {
 	assert.Equal(t, "Jarvis\n\nGuild-specific instructions:\nUse guild terminology.", generator.request.Config.Prompt)
 	assert.Equal(t, 256, generator.request.Config.MaxOutputTokens)
 	assert.True(t, generator.request.Config.WebSearchEnabled)
-	assert.Equal(t, googlegenai.ThinkingLevelMedium, generator.request.Config.ThinkingLevel)
+	assert.Equal(t, llm.ReasoningMedium, generator.request.Config.ReasoningEffort)
 	assert.Equal(t, genai.AccuracyPolicy{}, generator.request.Config.AccuracyPolicy)
 	require.Len(t, generator.request.Tools, 3)
 	assert.Equal(t, runtimeContextToolName, generator.request.Tools[0].Name())
@@ -456,6 +456,16 @@ func TestProcessClassifiesOnlySanitizedCurrentRequest(t *testing.T) {
 	require.NotNil(t, generator.request)
 	assert.Equal(t, genai.AccuracyPolicy{
 		RequiredFunctionNames: []string{runtimeContextToolName}, RuntimeContextRelevant: true,
+	}, generator.request.Config.AccuracyPolicy)
+}
+
+func TestProcessClassifiesCombinedVersionAndModelIdentity(t *testing.T) {
+	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
+	p := &Processor{botID: "bot", generator: generator, client: &fakeClient{}, configs: testProvider(t)}
+	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "Hey, what version and model are you?")))
+	require.NotNil(t, generator.request)
+	assert.Equal(t, genai.AccuracyPolicy{
+		RequiredFunctionNames: []string{runtimeContextToolName}, RuntimeContextRelevant: true, ModelIdentityRelevant: true,
 	}, generator.request.Config.AccuracyPolicy)
 }
 
@@ -677,21 +687,31 @@ func TestReactionCleanupSurvivesRequestCancellation(t *testing.T) {
 
 func TestAppendSources(t *testing.T) {
 	got := appendSources("answer", []genai.Source{
-		{Title: "en.Wikipedia.org", Domain: "google.com", URL: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/one"},
+		{Title: "en.Wikipedia.org", Domain: "en.wikipedia.org", URL: "https://en.wikipedia.org/wiki/Example"},
 		{Title: "BBC article", Domain: "www.bbc.co.uk", URL: "https://two.example/article"},
 		{URL: "https://updates.three.example.org/article"},
 		{Domain: "four.example", URL: "https://four.example/article"},
 	})
-	assert.Equal(t, "answer\n\n-# Sources: [wikipedia.org](https://vertexaisearch.cloud.google.com/grounding-api-redirect/one) · [bbc.co.uk](https://two.example/article) · [example.org](https://updates.three.example.org/article)", got)
+	assert.Equal(t, "answer\n\n-# Sources consulted: [1 · wikipedia.org](https://en.wikipedia.org/wiki/Example) · [2 · two.example](https://two.example/article) · [3 · example.org](https://updates.three.example.org/article)", got)
 }
 
-func TestAppendSourcesUsesTextTitleForGroundingRedirect(t *testing.T) {
+func TestAppendSourcesLabelsValidatedDestinationDomain(t *testing.T) {
 	got := appendSources("answer", []genai.Source{{
-		Title:  `Wikipedia [article]\guide`,
-		Domain: "vertexaisearch.cloud.google.com",
-		URL:    "https://vertexaisearch.cloud.google.com/grounding-api-redirect/one",
+		Title: "google.com", Domain: "google.com", URL: "https://evil.example/article",
 	}})
-	assert.Equal(t, "answer\n\n-# Sources: [Wikipedia \\[article\\]\\\\guide](https://vertexaisearch.cloud.google.com/grounding-api-redirect/one)", got)
+	assert.Equal(t, "answer\n\n-# Sources consulted: [1 · evil.example](https://evil.example/article)", got)
+}
+
+func TestAppendSourcesRejectsUnsafeMarkdownDestination(t *testing.T) {
+	got := appendSources("answer", []genai.Source{{
+		Title: "source", Domain: "evil.example", URL: "https://evil.example/a)[google](https://phish.example",
+	}})
+	assert.Equal(t, "answer", got)
+}
+
+func TestAppendSourcesAlwaysLabelsResearchAsConsulted(t *testing.T) {
+	got := appendSources("answer", []genai.Source{{Title: "example.com", URL: "https://example.com/article"}})
+	assert.Equal(t, "answer\n\n-# Sources consulted: [1 · example.com](https://example.com/article)", got)
 }
 
 func TestAppendSourcesSkipsInvalidURLs(t *testing.T) {
@@ -701,7 +721,7 @@ func TestAppendSourcesSkipsInvalidURLs(t *testing.T) {
 		{URL: "https://192.0.2.1/article"},
 		{URL: "https://localhost/article"},
 	})
-	assert.Equal(t, "answer\n\n-# Sources: [192.0.2.1](https://192.0.2.1/article) · [localhost](https://localhost/article)", got)
+	assert.Equal(t, "answer\n\n-# Sources consulted: [1 · 192.0.2.1](https://192.0.2.1/article) · [2 · localhost](https://localhost/article)", got)
 }
 
 func TestAppendSourcesPreservesRepeatedDomains(t *testing.T) {
@@ -709,7 +729,15 @@ func TestAppendSourcesPreservesRepeatedDomains(t *testing.T) {
 		{Domain: "news.example.com", URL: "https://example.com/one"},
 		{Domain: "www.example.com", URL: "https://example.com/two"},
 	})
-	assert.Equal(t, "answer\n\n-# Sources: [example.com](https://example.com/one) · [example.com](https://example.com/two)", got)
+	assert.Equal(t, "answer\n\n-# Sources consulted: [1 · example.com](https://example.com/one) · [2 · example.com](https://example.com/two)", got)
+}
+
+func TestAppendEvidenceStatusesRendersBestEffortQualifications(t *testing.T) {
+	got := appendEvidenceStatuses("answer", []genai.EvidenceStatus{
+		genai.EvidenceStatusWebUnconfirmed,
+		genai.EvidenceStatusWebUnconfirmed,
+	}, nil)
+	assert.Equal(t, "answer\n\n-# Evidence status: Current details could not be confirmed from usable web sources.", got)
 }
 
 func TestAppendEvidenceUsesCompactNonWebFooter(t *testing.T) {
@@ -718,9 +746,8 @@ func TestAppendEvidenceUsesCompactNonWebFooter(t *testing.T) {
 		{Kind: genai.EvidenceKindWeb},
 		{Kind: genai.EvidenceKindChannelHistory},
 		{Kind: genai.EvidenceKindRuntimeContext},
-		{Kind: genai.EvidenceKindCodeExecution},
 	})
-	assert.Equal(t, "answer\n\n-# Evidence used: runtime context · channel history · code execution", got)
+	assert.Equal(t, "answer\n\n-# Evidence used: runtime context · channel history", got)
 }
 
 func TestAppendEvidenceStatusUsesOnlyRecognizedApplicationText(t *testing.T) {
@@ -728,7 +755,6 @@ func TestAppendEvidenceStatusUsesOnlyRecognizedApplicationText(t *testing.T) {
 		got := appendEvidenceStatus(
 			"answer\n\n-# Evidence status: model-provided text",
 			genai.EvidenceStatusWebUnconfirmed,
-			false,
 			nil,
 		)
 		assert.Equal(t, "answer\n\n-# Evidence status: Current details could not be confirmed from usable web sources.", got)
@@ -739,18 +765,17 @@ func TestAppendEvidenceStatusUsesOnlyRecognizedApplicationText(t *testing.T) {
 		got := appendEvidenceStatus(
 			"answer\n\n-# Evidence status: arbitrary text",
 			genai.EvidenceStatus("future-status"),
-			false,
 			nil,
 		)
 		assert.Equal(t, "answer", got)
 	})
 
-	t.Run("grounded source suppresses unconfirmed status", func(t *testing.T) {
+	t.Run("usable source suppresses unconfirmed status", func(t *testing.T) {
 		sources := []genai.Source{{URL: "https://example.com/article"}}
 		got := appendSources("answer", sources)
 		got = appendEvidence(got, []genai.Evidence{{Kind: genai.EvidenceKindRuntimeContext}})
-		got = appendEvidenceStatus(got, genai.EvidenceStatusWebUnconfirmed, true, sources)
-		assert.Equal(t, "answer\n\n-# Sources: [example.com](https://example.com/article)\n\n-# Evidence used: runtime context", got)
+		got = appendEvidenceStatus(got, genai.EvidenceStatusWebUnconfirmed, sources)
+		assert.Equal(t, "answer\n\n-# Sources consulted: [1 · example.com](https://example.com/article)\n\n-# Evidence used: runtime context", got)
 		assert.NotContains(t, got, "Evidence status")
 	})
 }
@@ -790,7 +815,7 @@ func TestProcessPlacesEvidenceStatusOnFinalMessageChunk(t *testing.T) {
 	require.Len(t, sent, 2)
 	assert.NotContains(t, sent[0], "Evidence status")
 	assert.Contains(t, sent[1], "-# Evidence used: runtime context")
-	assert.True(t, strings.HasSuffix(sent[1], webUnconfirmedEvidenceStatusLine))
+	assert.True(t, strings.HasSuffix(sent[1], "-# Evidence status: "+webUnconfirmedEvidenceStatusSentence))
 }
 
 func TestProcessPersistsEvidenceFooterInDiscordReply(t *testing.T) {
@@ -818,6 +843,17 @@ func TestSplitMessageForDiscord(t *testing.T) {
 func TestSanitizeAndPrefix(t *testing.T) {
 	assert.Equal(t, "ask this channel", sanitizeContent("<@bot> ask <#123>", "bot"))
 	assert.Equal(t, "hello", stripBotPrefix("Jarvis: hello"))
+}
+
+func TestPreviousSameAuthorRequestRejectsInterveningUser(t *testing.T) {
+	sections := []contextSection{{label: "CHANNEL HISTORY", messages: []*discordgo.Message{
+		{Author: &discordgo.User{ID: "agamemnon"}, Content: "Will AR500 steel work with 7.62?"},
+		{Author: &discordgo.User{ID: "bot", Bot: true}, Content: "Use appropriate target safety."},
+	}}}
+	assert.Equal(t, "Will AR500 steel work with 7.62?", previousSameAuthorRequest(sections, "agamemnon"))
+
+	sections[0].messages = append(sections[0].messages, &discordgo.Message{Author: &discordgo.User{ID: "other"}, Content: "What is a good ammo price?"})
+	assert.Empty(t, previousSameAuthorRequest(sections, "agamemnon"))
 }
 
 func TestTargetHelpers(t *testing.T) {

@@ -1,0 +1,69 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# gazelle:exclude google_ai_conformance_test.go manual_test_main_test.go openrouter_conformance_test.go
+
+go_library(
+    name = "llm",
+    srcs = [
+        "errors.go",
+        "openai_compatible.go",
+        "profiles.go",
+        "tools.go",
+        "types.go",
+        "vertex.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/pkg/llm",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_justinswe_std//errors",
+        "@org_golang_google_genai//:genai",
+    ],
+)
+
+go_test(
+    name = "llm_test",
+    srcs = [
+        "google_ai_test.go",
+        "llm_test.go",
+    ],
+    embed = [":llm"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_genai//:genai",
+    ],
+)
+
+# gazelle:ignore
+go_test(
+    name = "google_ai_conformance",
+    size = "large",
+    srcs = [
+        "google_ai_conformance_test.go",
+        "manual_test_main_test.go",
+    ],
+    embed = [":llm"],
+    tags = ["manual"],
+    deps = [
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# gazelle:ignore
+go_test(
+    name = "openrouter_conformance",
+    size = "large",
+    srcs = [
+        "manual_test_main_test.go",
+        "openrouter_conformance_test.go",
+    ],
+    embed = [":llm"],
+    tags = ["manual"],
+    deps = [
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_stretchr_testify//require",
+    ],
+)

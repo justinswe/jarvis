@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/justinswe/jarvis/internal/config"
+	"github.com/justinswe/jarvis/pkg/websearch"
+	"github.com/justinswe/std/app"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,7 +48,49 @@ func TestWorkerConfigDefaults(t *testing.T) {
 	assert.Equal(t, config.DefaultMessageRetentionDays, retention)
 	assert.Equal(t, 2048, maxOutputTokens)
 	assert.Empty(t, defaultPrompt)
+	assert.Nil(t, command.Flags().Lookup("model-provider"))
+	assert.Nil(t, command.Flags().Lookup("openrouter-model"))
+	assert.Nil(t, command.Flags().Lookup("tool-model-profile"))
+	assert.Nil(t, command.Flags().Lookup("text-only-model-profile"))
+	assert.Nil(t, command.Flags().Lookup("web-search-model-profile"))
+	googleAIKey := command.Flags().Lookup("google-ai-api-key")
+	require.NotNil(t, googleAIKey)
+	assert.Empty(t, googleAIKey.DefValue)
+	assert.Contains(t, googleAIKey.Usage, "Google AI Studio")
+	providers, err := command.Flags().GetStringSlice("web-search-providers")
+	require.NoError(t, err)
+	assert.Empty(t, providers)
 	assert.Contains(t, defaultPromptFlag.Usage, "may define the assistant name and personality")
+}
+
+func TestWorkerMapsGoogleAIKeyEnvironmentToBoundFlag(t *testing.T) {
+	t.Setenv("GOOGLE_AI_API_KEY", "bound-key")
+	command := newRootCommand()
+	command.SetArgs([]string{})
+	var got string
+	command.RunE = func(command *cobra.Command, _ []string) error {
+		var err error
+		got, err = command.Flags().GetString("google-ai-api-key")
+		return err
+	}
+	require.NoError(t, app.RunCobraCommand(context.Background(), command))
+	assert.Equal(t, "bound-key", got)
+}
+
+func TestWorkerDoesNotUseSDKGoogleKeyEnvironmentAliases(t *testing.T) {
+	t.Setenv("GOOGLE_AI_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "ignored-gemini-key")
+	t.Setenv("GOOGLE_API_KEY", "ignored-google-key")
+	command := newRootCommand()
+	command.SetArgs([]string{})
+	var got string
+	command.RunE = func(command *cobra.Command, _ []string) error {
+		var err error
+		got, err = command.Flags().GetString("google-ai-api-key")
+		return err
+	}
+	require.NoError(t, app.RunCobraCommand(context.Background(), command))
+	assert.Empty(t, got)
 }
 
 func TestWorkerServerSettingsAreRequestScopedDefaults(t *testing.T) {
@@ -53,6 +99,57 @@ func TestWorkerServerSettingsAreRequestScopedDefaults(t *testing.T) {
 	assert.True(t, settings.WebSearchEnabled)
 	assert.True(t, settings.ChannelSearchEnabled)
 	assert.Equal(t, cfg.messageTimeout, settings.MessageTimeout)
+}
+
+func TestWorkerParsesCommaSeparatedAndRepeatedModelProfiles(t *testing.T) {
+	command := newRootCommand()
+	require.NoError(t, command.Flags().Parse([]string{
+		"--model-profile=primary=openrouter:vendor/model,fallback=vertex:gemini",
+		"--model-profile=backup=nvidia-nim:meta/model,studio=google-ai:gemini-3.1-flash-lite",
+	}))
+	profiles, err := command.Flags().GetStringSlice("model-profile")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"primary=openrouter:vendor/model",
+		"fallback=vertex:gemini",
+		"backup=nvidia-nim:meta/model",
+		"studio=google-ai:gemini-3.1-flash-lite",
+	}, profiles)
+}
+
+func TestWorkerParsesCommaSeparatedWebSearchProviders(t *testing.T) {
+	command := newRootCommand()
+	require.NoError(t, command.Flags().Parse([]string{"--web-search-providers=serper,tavily"}))
+	providers, err := command.Flags().GetStringSlice("web-search-providers")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"serper", "tavily"}, providers)
+}
+
+func TestWorkerValidatesSelectedWebSearchProviderKeysAndOrder(t *testing.T) {
+	clients, err := (workerConfig{serperAPIKey: "ignored"}).webSearchClients()
+	require.NoError(t, err)
+	assert.Empty(t, clients, "unselected keys are ignored")
+
+	clients, err = (workerConfig{
+		webSearchProviders: []string{"serper", "firecrawl"},
+		serperAPIKey:       "serper-key",
+		firecrawlAPIKey:    "firecrawl-key",
+	}).webSearchClients()
+	require.NoError(t, err)
+	require.Len(t, clients, 2)
+	assert.Equal(t, websearch.ProviderSerper, clients[0].Provider())
+	assert.Equal(t, websearch.ProviderFirecrawl, clients[1].Provider())
+
+	for _, cfg := range []workerConfig{
+		{webSearchProviders: []string{"serper"}},
+		{webSearchProviders: []string{"tavily", "serper"}, serperAPIKey: "key", tavilyAPIKey: "key"},
+		{webSearchProviders: []string{"tavily", "tavily"}, tavilyAPIKey: "key"},
+		{webSearchProviders: []string{"unknown"}},
+		{webSearchProviders: []string{"serper", "tavily", "firecrawl"}},
+	} {
+		_, err := cfg.webSearchClients()
+		assert.Error(t, err)
+	}
 }
 
 func TestWorkerAddress(t *testing.T) {

@@ -25,7 +25,7 @@ const (
 	configSortKey               = "CONFIG"
 	configWriteAttempts         = 3
 	decodedMessageLimit         = 1 << 20
-	guildConfigSchemaVersion    = 1
+	guildConfigSchemaVersion    = 2
 	legacyMessageSchemaVersion  = 1
 	messageCompressionThreshold = 100
 	messageKeyWidth             = 20
@@ -118,6 +118,10 @@ func (r *Repository) Load(ctx context.Context, guildID string) (config.GuildConf
 		return config.GuildConfig{}, errors.Wrap(err, "decode guild configuration")
 	}
 	loaded := item.config()
+	if item.SchemaVersion < guildConfigSchemaVersion {
+		loaded.Settings.PrimaryModelProfile = r.defaults.Settings.PrimaryModelProfile
+		loaded.Settings.FallbackModelProfile = r.defaults.Settings.FallbackModelProfile
+	}
 	if err := loaded.Validate(); err != nil {
 		return config.GuildConfig{}, errors.Wrap(err, "validate stored guild configuration")
 	}
@@ -434,6 +438,8 @@ type guildConfigItem struct {
 	MessageRetentionDays  int      `dynamodbav:"message_retention_days"`
 	WebSearchEnabled      bool     `dynamodbav:"web_search_enabled"`
 	ChannelSearchEnabled  bool     `dynamodbav:"channel_search_enabled"`
+	PrimaryModelProfile   string   `dynamodbav:"primary_model_profile,omitempty"`
+	FallbackModelProfile  string   `dynamodbav:"fallback_model_profile,omitempty"`
 	AdminUserIDs          []string `dynamodbav:"admin_user_ids,stringset,omitempty"`
 	Version               int64    `dynamodbav:"version"`
 	UpdatedAtMillis       int64    `dynamodbav:"updated_at"`
@@ -449,7 +455,8 @@ func newGuildConfigItem(guildID, actorID string, value config.GuildConfig, updat
 		ChannelMessages: settings.ChannelMessages, HistoryRunes: settings.HistoryRunes, MaxOutputTokens: settings.MaxOutputTokens,
 		MessageTimeoutSeconds: int64(settings.MessageTimeout / time.Second),
 		MessageRetentionDays:  settings.MessageRetentionDays, WebSearchEnabled: settings.WebSearchEnabled,
-		ChannelSearchEnabled: settings.ChannelSearchEnabled, AdminUserIDs: value.AdminUserIDs, Version: value.Version,
+		ChannelSearchEnabled: settings.ChannelSearchEnabled, PrimaryModelProfile: settings.PrimaryModelProfile,
+		FallbackModelProfile: settings.FallbackModelProfile, AdminUserIDs: value.AdminUserIDs, Version: value.Version,
 		UpdatedAtMillis: updatedAt.UTC().UnixMilli(), UpdatedByUserID: actorID,
 	}
 }
@@ -462,7 +469,8 @@ func (i guildConfigItem) config() config.GuildConfig {
 			ChannelMessages: i.ChannelMessages, HistoryRunes: i.HistoryRunes, MaxOutputTokens: i.MaxOutputTokens,
 			MessageTimeout:       time.Duration(i.MessageTimeoutSeconds) * time.Second,
 			MessageRetentionDays: i.MessageRetentionDays, WebSearchEnabled: i.WebSearchEnabled,
-			ChannelSearchEnabled: i.ChannelSearchEnabled,
+			ChannelSearchEnabled: i.ChannelSearchEnabled, PrimaryModelProfile: i.PrimaryModelProfile,
+			FallbackModelProfile: i.FallbackModelProfile,
 		},
 		AdminUserIDs: normalizedUserIDs(i.AdminUserIDs), Version: i.Version,
 	}

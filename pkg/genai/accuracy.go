@@ -4,8 +4,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	googlegenai "google.golang.org/genai"
 )
 
 const (
@@ -15,21 +13,19 @@ const (
 
 	EvidenceKindRuntimeContext = "runtime_context"
 	EvidenceKindChannelHistory = "channel_history"
-	EvidenceKindCodeExecution  = "code_execution"
 	EvidenceKindWeb            = "web"
 )
 
 const (
-	accuracyFailureFallback       = "I couldn't verify that response against trusted evidence, so I don't want to guess."
-	codeExecutionFailureFallback  = "I couldn't verify that calculation with code execution, so I don't want to guess."
-	groundingDisabledFallback     = "Web search is disabled for this server, so I can't confirm current details. I can still explain stable background or help narrow the question."
+	accuracyFailureFallback       = "I couldn't confirm every detail with the available evidence. Treat this as a best-effort answer and verify important specifics independently."
+	webSearchDisabledFallback     = "Web search is disabled for this server, so I can't confirm current details. I can still explain stable background or help narrow the question."
 	provenanceFailureFallback     = "No source was preserved for that earlier claim, so I can't verify where it came from."
-	runtimeVerificationFallback   = "I couldn't verify the current runtime value, so I don't want to guess."
-	channelHistoryFailureFallback = "I couldn't search stored channel history, so I don't want to guess about earlier messages."
+	runtimeVerificationFallback   = "I couldn't retrieve the current runtime value. Your device or Discord timestamp will be more reliable for the exact value."
+	channelHistoryFailureFallback = "I couldn't retrieve stored channel history. Paste the earlier message here and I can still help with it."
 	timezoneClarificationFallback = "Which IANA timezone should I use, such as `America/Los_Angeles` or `Europe/London`?"
 
-	accuracyRetryPrompt      = "This is the single accuracy correction. Use only successful tool results and recorded evidence in the supplied conversation. Correct every conflicting runtime value. Never invent an internal clock, source, search, tool call, or evidence. Only a Sources or Evidence used footer establishes recorded provenance; an Evidence status footer means the prior claims remain unverified. If provenance was not preserved, say so explicitly."
-	codeExecutionRetryPrompt = "This is the single calculation correction. You must use code execution, check its successful result, and base the answer on that result. If code execution does not succeed, do not provide an unverified numeric answer."
+	accuracyRetryPrompt    = "This is the single accuracy correction. Use only successful tool results and recorded evidence in the supplied conversation. Correct every conflicting runtime value. Never invent an internal clock, source, search, tool call, or evidence. Only a Sources or Evidence used footer establishes recorded provenance; an Evidence status footer means the prior claims remain unverified. If provenance was not preserved, say so explicitly."
+	maxResolvedIntentRunes = 500
 )
 
 const (
@@ -44,11 +40,12 @@ var (
 	quotedTextPattern = regexp.MustCompile("(?s)\"[^\"]*\"|“[^”]*”|`[^`]*`|(?:^|\\s)'[^'\\n]+'(?:$|\\s|[.,!?;:])")
 	spacePattern      = regexp.MustCompile(`\s+`)
 
-	provenanceIntentPattern   = regexp.MustCompile(`(?i)\b(?:where did (?:you|that|it).*\b(?:get|come)\b.*\bfrom|what (?:was|is) (?:your|the) source|which source|how do you know(?: that| this)?|source for (?:that|this)|why did you say that)\b`)
-	runtimeIntentPattern      = regexp.MustCompile(`(?i)\b(?:what(?:'s| is) (?:the )?(?:current )?(?:time|date|day|weekday|year)|what (?:time|day|date|weekday|year) is (?:it|today)|what day of (?:the )?week is it|current (?:time|date|day|weekday|year)|today'?s date|what version (?:are you|is jarvis)|which jarvis version|jarvis version)\b`)
-	runtimeVersionOnlyPattern = regexp.MustCompile(`(?i)^\s*(?:what version are you|what version is jarvis|which jarvis version|what is (?:the )?(?:current )?jarvis version|jarvis version)\s*[?.!]*\s*$`)
-	localTimePattern          = regexp.MustCompile(`(?i)\b(?:my|local)\s+(?:time|date|day)\b|\b(?:time|date|day)\b[^.!?]*\b(?:for me|locally)\b`)
-	ianaTimezonePattern       = regexp.MustCompile(`\b[A-Z][A-Za-z_+-]*/[A-Z][A-Za-z_+-]+(?:/[A-Z][A-Za-z_+-]+)?\b`)
+	provenanceIntentPattern    = regexp.MustCompile(`(?i)\b(?:where did (?:you|that|it).*\b(?:get|come)\b.*\bfrom|what (?:was|is) (?:your|the) source|which source|how do you know(?: that| this)?|source for (?:that|this)|why did you say that)\b`)
+	runtimeIntentPattern       = regexp.MustCompile(`(?i)\b(?:what(?:'s| is) (?:the )?(?:current )?(?:time|date|day|weekday|year)|what (?:time|day|date|weekday|year) is (?:it|today)|what day of (?:the )?week is it|current (?:time|date|day|weekday|year)|today'?s date|what (?:version(?: and (?:model|provider))?|(?:model|provider) and version) (?:are you|is (?:this|jarvis))|which jarvis version|jarvis version)\b`)
+	runtimeVersionOnlyPattern  = regexp.MustCompile(`(?i)^\s*(?:what version are you|what version is jarvis|which jarvis version|what is (?:the )?(?:current )?jarvis version|jarvis version)\s*[?.!]*\s*$`)
+	modelIdentityIntentPattern = regexp.MustCompile(`(?i)\b(?:what (?:ai )?model (?:are you|is (?:this|jarvis)|are you (?:using|running))|which (?:ai )?model (?:answered|responded|generated|is responding|are you using|is jarvis using)|what are you running on|which provider(?: and model)? (?:are you using|is (?:this|jarvis) using|answered|responded)|what (?:version and (?:model|provider)|(?:model|provider) and version) (?:are you|is (?:this|jarvis)))\b`)
+	localTimePattern           = regexp.MustCompile(`(?i)\b(?:my|local)\s+(?:time|date|day)\b|\b(?:time|date|day)\b[^.!?]*\b(?:for me|locally)\b`)
+	ianaTimezonePattern        = regexp.MustCompile(`\b[A-Z][A-Za-z_+-]*/[A-Z][A-Za-z_+-]+(?:/[A-Z][A-Za-z_+-]+)?\b`)
 
 	explicitSearchPattern    = regexp.MustCompile(`(?i)\b(?:search|browse|look up|lookup|research|verify|fact[ -]?check|cite|find sources?)\b`)
 	volatilePattern          = regexp.MustCompile(`(?i)\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b.*\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b|\b(?:officeholder|president|prime minister|governor|mayor|ceo|release|version|price|stock|score|standings|weather|forecast|news|market|election|law|rule|schedule)\b.*\b(?:current|currently|latest|newest|today|tonight|right now|recent|breaking)\b|\b(?:weather|forecast|news|stock price|sports score|election results?)\b`)
@@ -61,8 +58,10 @@ var (
 	historicalMessagePattern = regexp.MustCompile(`(?i)\b(?:earlier|previous|past|older) (?:channel )?messages?\b|\bwhat did\b[^.!?\n]{0,80}\b(?:say|post|write|mention|share)(?:d)?\b[^.!?\n]{0,40}\b(?:here|earlier|before)\b`)
 	webScopePattern          = regexp.MustCompile(`(?i)\b(?:web|internet|online|google|websites?|external sources?)\b`)
 
-	computationPattern = regexp.MustCompile(`(?i)\b(?:calculate|compute|evaluate|solve|equation|exact(?:ly)?|statistics?|standard deviation|variance|median|percentile|unit conversion|convert\s+[-+]?\d+(?:\.\d+)?|data analysis|analy[sz]e (?:this )?(?:data|dataset))\b|\b(?:mean|average|sum|correlation|regression)\b[^.!?]*\d|\bhow many\s+(?:millimeters?|centimeters?|meters?|kilometers?|inches?|feet|yards?|miles?|grams?|kilograms?|ounces?|pounds?)\s+(?:are\s+)?in\b|[-+]?\d+(?:\.\d+)?\s*(?:\+|-|\*|/|\^|=)\s*[-+]?\d`)
-	numericPattern     = regexp.MustCompile(`\d`)
+	ellipticalFollowupPattern = regexp.MustCompile(`(?i)^\s*(?:(?:what|how) about\b[^.!?\n]{0,120}|(?:and|also)\b[^.!?\n]{0,120}|(?:it|that|this|those|them|this one|that one|the other one))\s*[?!.]*\s*$`)
+	commerceSearchPattern     = regexp.MustCompile(`(?i)\b(?:price|cost|deal|discount|sale|buy|purchase|seller|retailer|shipping|handling fee|in stock|availability|available near|where (?:can|should) i (?:buy|order)|best place to buy|good value|worth (?:buying|it)|recommend(?:ation|ed|ations)?|best\s+(?:rifle|firearm|ammunition|ammo|product|model)|fun range (?:gun|rifle))\b`)
+	regulationSearchPattern   = regexp.MustCompile(`(?i)\b(?:current|new|recent|changed|updated|latest)\b[^.!?\n]{0,80}\b(?:law|laws|regulation|regulations|rule|rules|legal|illegal)\b|\b(?:is|are)\b[^.!?\n]{1,100}\b(?:legal|illegal|regulated|allowed|prohibited)\b`)
+	safetySearchPattern       = regexp.MustCompile(`(?i)\b(?:safe(?:ly)?|safety|hazard|risk|danger|compatible|compatibility|protective|dosage|minimum distance|maximum distance)\b[^.!?\n]{0,100}\b(?:rifle|firearm|ammunition|ammo|cartridge|steel|target|medicine|drug|chemical|equipment|product|model)\b|\b(?:rifle|firearm|ammunition|ammo|cartridge|steel|target|medicine|drug|chemical|equipment|product|model)\b[^.!?\n]{0,100}\b(?:safe(?:ly)?|safety|hazard|risk|danger|compatible|compatibility|dosage|distance)\b`)
 
 	internalClockPattern         = regexp.MustCompile(`(?i)\b(?:my|an?|the) internal clock\b|\binternal clock says\b`)
 	inventedProvenancePattern    = regexp.MustCompile(`(?i)\b(?:i (?:got|pulled|retrieved) (?:that|it) from|my source (?:was|is)|i (?:used|called|checked|searched|browsed)|according to my (?:search|clock|source))\b`)
@@ -87,10 +86,16 @@ var (
 // AccuracyPolicy contains deterministic accuracy requirements for one request.
 type AccuracyPolicy struct {
 	RequiredFunctionNames  []string
-	GroundingRequired      bool
-	CodeExecutionEnabled   bool
+	WebSearchRequired      bool
 	RuntimeContextRelevant bool
+	ModelIdentityRelevant  bool
 	ProvenanceInquiry      bool
+}
+
+// IntentContext supplies bounded conversational context for intent classification.
+type IntentContext struct {
+	CurrentRequest      string
+	PreviousUserRequest string
 }
 
 // Evidence records safe provenance from a successful tool or provider-managed capability.
@@ -122,27 +127,68 @@ func ClassifyAccuracyPolicy(request string) AccuracyPolicy {
 		policy.RuntimeContextRelevant = true
 		policy.RequiredFunctionNames = appendRequiredFunction(policy.RequiredFunctionNames, runtimeContextFunctionName)
 	}
+	policy.ModelIdentityRelevant = modelIdentityIntentPattern.MatchString(unquoted)
 	channelHistory := channelHistoryIntent(unquoted)
 	if channelHistory {
 		policy.RequiredFunctionNames = appendRequiredFunction(policy.RequiredFunctionNames, ChannelSearchFunctionName)
 	}
-	explicitWebSearch := explicitSearchPattern.MatchString(unquoted) && (!channelHistory || webScopePattern.MatchString(unquoted))
-	policy.GroundingRequired = explicitWebSearch || (channelHistory && webScopePattern.MatchString(unquoted)) ||
-		volatilePattern.MatchString(unquoted) || implicitVolatilePattern.MatchString(unquoted) || recencyLanguagePattern.MatchString(unquoted)
+	configurationIntent := configurationToolIntentPattern.MatchString(unquoted)
+	explicitWebSearch := explicitSearchPattern.MatchString(unquoted) && !configurationIntent && (!channelHistory || webScopePattern.MatchString(unquoted))
+	policy.WebSearchRequired = explicitWebSearch || (channelHistory && webScopePattern.MatchString(unquoted)) ||
+		volatilePattern.MatchString(unquoted) || implicitVolatilePattern.MatchString(unquoted) || recencyLanguagePattern.MatchString(unquoted) ||
+		commerceSearchPattern.MatchString(unquoted) || regulationSearchPattern.MatchString(unquoted) || safetySearchPattern.MatchString(unquoted)
 	if runtimeVersionOnlyPattern.MatchString(unquoted) && !explicitSearchPattern.MatchString(unquoted) {
-		policy.GroundingRequired = false
+		policy.WebSearchRequired = false
 	}
 	if todayPattern.MatchString(unquoted) && !policy.RuntimeContextRelevant {
-		policy.GroundingRequired = policy.GroundingRequired || !channelHistory
+		policy.WebSearchRequired = policy.WebSearchRequired || !channelHistory
 		policy.RuntimeContextRelevant = true
 		policy.RequiredFunctionNames = appendRequiredFunction(policy.RequiredFunctionNames, runtimeContextFunctionName)
 	}
-	policy.CodeExecutionEnabled = computationPattern.MatchString(unquoted)
-	if strings.Contains(strings.ToLower(unquoted), "time complexity") && !numericPattern.MatchString(unquoted) {
-		policy.GroundingRequired = false
-		policy.CodeExecutionEnabled = false
+	if strings.Contains(strings.ToLower(unquoted), "time complexity") {
+		policy.WebSearchRequired = false
 	}
 	return policy
+}
+
+// ResolveIntentRequest adds the immediately preceding request only for elliptical follow-ups.
+func ResolveIntentRequest(context IntentContext) string {
+	current := sanitizeText(context.CurrentRequest)
+	if current == "" || !ellipticalFollowupPattern.MatchString(current) {
+		return current
+	}
+	previous := sanitizeText(context.PreviousUserRequest)
+	if previous == "" {
+		return current
+	}
+	const previousPrefix = "Previous request: "
+	const currentPrefix = "\nCurrent follow-up: "
+	maxPreviousRunes := maxResolvedIntentRunes - len([]rune(previousPrefix+currentPrefix+current))
+	if maxPreviousRunes <= 0 {
+		return current
+	}
+	previousRunes := []rune(previous)
+	if len(previousRunes) > maxPreviousRunes {
+		previous = string(previousRunes[:maxPreviousRunes])
+	}
+	return previousPrefix + previous + currentPrefix + current
+}
+
+func previousUserRequestFromHistory(history string) string {
+	lines := strings.Split(history, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.Contains(line, "[bot]:") {
+			continue
+		}
+		if !strings.HasPrefix(line, "[") {
+			continue
+		}
+		if separator := strings.Index(line, ": "); separator >= 0 {
+			return strings.TrimSpace(line[separator+2:])
+		}
+	}
+	return ""
 }
 
 func classifySearchTrigger(request string, policy AccuracyPolicy, webSearchEnabled bool) string {
@@ -159,7 +205,7 @@ func classifySearchTrigger(request string, policy AccuracyPolicy, webSearchEnabl
 	if implicitVolatilePattern.MatchString(unquoted) {
 		return searchTriggerImplicitVolatile
 	}
-	if policy.GroundingRequired {
+	if policy.WebSearchRequired {
 		return searchTriggerVolatile
 	}
 	if webSearchEnabled {
@@ -214,15 +260,15 @@ func mergeAccuracyPolicies(configured, classified AccuracyPolicy) AccuracyPolicy
 	for _, name := range classified.RequiredFunctionNames {
 		result.RequiredFunctionNames = appendRequiredFunction(result.RequiredFunctionNames, name)
 	}
-	result.GroundingRequired = result.GroundingRequired || classified.GroundingRequired
-	result.CodeExecutionEnabled = result.CodeExecutionEnabled || classified.CodeExecutionEnabled
+	result.WebSearchRequired = result.WebSearchRequired || classified.WebSearchRequired
 	result.RuntimeContextRelevant = result.RuntimeContextRelevant || classified.RuntimeContextRelevant
+	result.ModelIdentityRelevant = result.ModelIdentityRelevant || classified.ModelIdentityRelevant
 	result.ProvenanceInquiry = result.ProvenanceInquiry || classified.ProvenanceInquiry
 	if result.ProvenanceInquiry {
 		result.RequiredFunctionNames = nil
-		result.GroundingRequired = false
-		result.CodeExecutionEnabled = false
+		result.WebSearchRequired = false
 		result.RuntimeContextRelevant = false
+		result.ModelIdentityRelevant = false
 	}
 	return result
 }
@@ -267,7 +313,7 @@ func accuracyValidationFailure(text, request, history string, policy AccuracyPol
 		return "invented_internal_clock"
 	}
 	if policy.ProvenanceInquiry {
-		hasRecordedProvenance := strings.Contains(history, "-# Sources:") || strings.Contains(history, "-# Evidence used:")
+		hasRecordedProvenance := strings.Contains(history, "-# Sources:") || strings.Contains(history, "-# Sources consulted:") || strings.Contains(history, "-# Evidence used:")
 		if !hasRecordedProvenance && inventedProvenancePattern.MatchString(text) && !noProvenancePattern.MatchString(text) {
 			return "invented_provenance"
 		}
@@ -444,23 +490,6 @@ func timeClaimMatches(claim string, current time.Time) bool {
 	return true
 }
 
-func responseHasSuccessfulCodeExecution(resp *googlegenai.GenerateContentResponse) bool {
-	if resp == nil {
-		return false
-	}
-	for _, candidate := range resp.Candidates {
-		if candidate == nil || candidate.Content == nil {
-			continue
-		}
-		for _, part := range candidate.Content.Parts {
-			if part != nil && part.CodeExecutionResult != nil && part.CodeExecutionResult.Outcome == googlegenai.OutcomeOK {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func evidenceByKind(evidence []Evidence, kind string) (Evidence, bool) {
 	for i := len(evidence) - 1; i >= 0; i-- {
 		if evidence[i].Kind == kind {
@@ -490,6 +519,41 @@ func evidenceKinds(evidence []Evidence) []string {
 		kinds = append(kinds, item.Kind)
 	}
 	return kinds
+}
+
+func evidenceStatusForFailure(failure string) EvidenceStatus {
+	switch {
+	case strings.Contains(failure, "runtime"):
+		return EvidenceStatusRuntimeUnconfirmed
+	case strings.Contains(failure, "channel_history"):
+		return EvidenceStatusChannelUnconfirmed
+	default:
+		return EvidenceStatusGeneralUnconfirmed
+	}
+}
+
+func uniqueEvidenceStatuses(statuses []EvidenceStatus) []EvidenceStatus {
+	seen := make(map[EvidenceStatus]struct{}, len(statuses))
+	result := make([]EvidenceStatus, 0, len(statuses))
+	for _, status := range statuses {
+		if status == "" {
+			continue
+		}
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		result = append(result, status)
+	}
+	return result
+}
+
+func evidenceStatusStrings(statuses []EvidenceStatus) []string {
+	result := make([]string, 0, len(statuses))
+	for _, status := range uniqueEvidenceStatuses(statuses) {
+		result = append(result, string(status))
+	}
+	return result
 }
 
 func accuracyFallback(policy AccuracyPolicy, failure string) string {

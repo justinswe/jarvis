@@ -11,8 +11,8 @@ import (
 func TestMessageReactionToolDeclaration(t *testing.T) {
 	declaration := (messageReactionTool{}).Declaration()
 	assert.Equal(t, messageReactionToolName, declaration.Name)
-	assert.Equal(t, []string{"emoji"}, declaration.Parameters.Required)
-	assert.Contains(t, declaration.Parameters.Properties, "message_id")
+	assert.Equal(t, []string{"emoji"}, declaration.InputSchema["required"])
+	assert.Contains(t, schemaProperties(t, declaration), "message_id")
 }
 
 func TestMessageReactionToolUsesCurrentChannel(t *testing.T) {

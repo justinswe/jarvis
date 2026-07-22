@@ -1,17 +1,21 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# gazelle:exclude live_eval_test.go manual_test_main_test.go openrouter_conformance_test.go
+
 go_library(
     name = "genai",
     srcs = [
         "accuracy.go",
         "handler.go",
+        "orchestrator.go",
     ],
     importpath = "github.com/justinswe/jarvis/pkg/genai",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/llm",
+        "//pkg/websearch",
         "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",
-        "@org_golang_google_genai//:genai",
         "@org_uber_go_zap//:zap",
     ],
 )
@@ -20,22 +24,55 @@ go_test(
     name = "genai_test",
     srcs = [
         "accuracy_test.go",
+        "google_ai_test.go",
         "handler_test.go",
+        "orchestrator_test.go",
     ],
     embed = [":genai"],
     deps = [
+        "//pkg/llm",
+        "//pkg/websearch",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-        "@org_golang_google_genai//:genai",
+        "@org_uber_go_zap//:zap",
+        "@org_uber_go_zap//zaptest/observer",
     ],
 )
 
+# gazelle:ignore
+go_test(
+    name = "openrouter_conformance",
+    size = "large",
+    srcs = [
+        "manual_test_main_test.go",
+        "openrouter_conformance_test.go",
+    ],
+    embed = [":genai"],
+    tags = ["manual"],
+    deps = [
+        "//pkg/llm",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# gazelle:ignore
 go_test(
     name = "live_eval",
-    srcs = ["live_eval_test.go"],
+    size = "enormous",
+    srcs = [
+        "live_eval_test.go",
+        "manual_test_main_test.go",
+    ],
     data = ["search_eval_cases.jsonl"],
     embed = [":genai"],
-    size = "enormous",
     tags = ["manual"],
-    deps = ["@org_golang_google_genai//:genai"],
+    deps = [
+        "//pkg/llm",
+        "//pkg/websearch",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@rules_go//go/runfiles",
+    ],
 )

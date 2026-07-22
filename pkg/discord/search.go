@@ -8,10 +8,10 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
-	googlegenai "google.golang.org/genai"
 )
 
 const (
@@ -56,26 +56,19 @@ func (p *Processor) searchCurrentChannel(guildID, channelID, beforeID string) ge
 
 func (channelSearchTool) Name() string { return channelSearchToolName }
 
-func (channelSearchTool) Declaration() *googlegenai.FunctionDeclaration {
-	return &googlegenai.FunctionDeclaration{
+func (channelSearchTool) Declaration() *llm.ToolDefinition {
+	return &llm.ToolDefinition{
 		Name: channelSearchToolName,
 		Description: "Search stored, unexpired text messages in the current Discord channel. " +
 			"Use this for questions about earlier channel messages, never as a substitute for web search. " +
 			"Provide at least one text, author, or time criterion. Results contain the newest eight matches in chronological order.",
-		Parameters: &googlegenai.Schema{Type: googlegenai.TypeObject, Properties: map[string]*googlegenai.Schema{
-			"query": {
-				Type: googlegenai.TypeString, Description: "Optional case-insensitive text contained in the message.",
-			},
-			"author": {
-				Type: googlegenai.TypeString, Description: "Optional exact Discord user ID, mention, username, or display name.",
-			},
-			"start_time": {
-				Type: googlegenai.TypeString, Description: "Optional inclusive RFC3339 message timestamp.",
-			},
-			"end_time": {
-				Type: googlegenai.TypeString, Description: "Optional exclusive RFC3339 message timestamp.",
-			},
+		InputSchema: llm.JSONSchema{"type": "object", "properties": map[string]any{
+			"query":      map[string]any{"type": "string", "description": "Optional case-insensitive text contained in the message."},
+			"author":     map[string]any{"type": "string", "description": "Optional exact Discord user ID, mention, username, or display name."},
+			"start_time": map[string]any{"type": "string", "description": "Optional inclusive RFC3339 message timestamp."},
+			"end_time":   map[string]any{"type": "string", "description": "Optional exclusive RFC3339 message timestamp."},
 		}},
+		Effect: llm.ToolEffectReadOnly,
 	}
 }
 

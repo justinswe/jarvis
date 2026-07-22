@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	DefaultMessageRetentionDays = 30
+	DefaultMessageRetentionDays = 14
 	MaxGuildPromptRunes         = 4000
 	MaxMessageRetentionDays     = 3650
 	maxContextMessages          = 100
@@ -20,6 +20,9 @@ const (
 
 // ErrConflict indicates that a concurrent guild configuration update won bounded retries.
 var ErrConflict = errors.New("guild configuration changed concurrently")
+
+// ErrInvalidConfiguration identifies a rejected settings mutation.
+var ErrInvalidConfiguration = errors.New("invalid guild configuration")
 
 // ServerSettings controls how Jarvis handles a request for one Discord server.
 type ServerSettings struct {
@@ -34,6 +37,8 @@ type ServerSettings struct {
 	MessageRetentionDays int
 	WebSearchEnabled     bool
 	ChannelSearchEnabled bool
+	PrimaryModelProfile  string
+	FallbackModelProfile string
 }
 
 // Validate checks whether the settings are safe to use for message processing.
@@ -61,6 +66,9 @@ func (s ServerSettings) Validate() error {
 	}
 	if s.MessageRetentionDays < 1 || s.MessageRetentionDays > MaxMessageRetentionDays {
 		return errors.Errorf("message retention must be between 1 and %d days", MaxMessageRetentionDays)
+	}
+	if s.FallbackModelProfile != "" && s.FallbackModelProfile == s.PrimaryModelProfile {
+		return errors.New("primary and fallback model profiles must be different")
 	}
 	return nil
 }
@@ -101,24 +109,28 @@ func (c GuildConfig) IsAdmin(userID string) bool {
 
 // Patch contains optional server-setting replacements.
 type Patch struct {
-	Prompt               *string
-	GuildPrompt          *string
-	ThreadMessages       *int
-	ParentMessages       *int
-	ChannelMessages      *int
-	HistoryRunes         *int
-	MaxOutputTokens      *int
-	MessageTimeout       *time.Duration
-	MessageRetentionDays *int
-	WebSearchEnabled     *bool
-	ChannelSearchEnabled *bool
+	Prompt                *string
+	GuildPrompt           *string
+	ThreadMessages        *int
+	ParentMessages        *int
+	ChannelMessages       *int
+	HistoryRunes          *int
+	MaxOutputTokens       *int
+	MessageTimeout        *time.Duration
+	MessageRetentionDays  *int
+	WebSearchEnabled      *bool
+	ChannelSearchEnabled  *bool
+	PrimaryModelProfile   *string
+	FallbackModelProfile  *string
+	ValidateModelProfiles func(ServerSettings) error
 }
 
 // Empty reports whether the patch changes no fields.
 func (p Patch) Empty() bool {
 	return p.Prompt == nil && p.GuildPrompt == nil && p.ThreadMessages == nil && p.ParentMessages == nil && p.ChannelMessages == nil &&
 		p.HistoryRunes == nil && p.MaxOutputTokens == nil && p.MessageTimeout == nil &&
-		p.MessageRetentionDays == nil && p.WebSearchEnabled == nil && p.ChannelSearchEnabled == nil
+		p.MessageRetentionDays == nil && p.WebSearchEnabled == nil && p.ChannelSearchEnabled == nil &&
+		p.PrimaryModelProfile == nil && p.FallbackModelProfile == nil
 }
 
 // Apply applies the patch and validates the resulting configuration.
@@ -160,9 +172,20 @@ func (p Patch) Apply(current GuildConfig) (GuildConfig, error) {
 	if p.ChannelSearchEnabled != nil {
 		settings.ChannelSearchEnabled = *p.ChannelSearchEnabled
 	}
+	if p.PrimaryModelProfile != nil {
+		settings.PrimaryModelProfile = strings.TrimSpace(*p.PrimaryModelProfile)
+	}
+	if p.FallbackModelProfile != nil {
+		settings.FallbackModelProfile = strings.TrimSpace(*p.FallbackModelProfile)
+	}
 	current.Settings = settings
 	if err := current.Validate(); err != nil {
-		return GuildConfig{}, err
+		return GuildConfig{}, errors.Join(ErrInvalidConfiguration, err)
+	}
+	if p.ValidateModelProfiles != nil {
+		if err := p.ValidateModelProfiles(current.Settings); err != nil {
+			return GuildConfig{}, errors.Join(ErrInvalidConfiguration, err)
+		}
 	}
 	return current, nil
 }
