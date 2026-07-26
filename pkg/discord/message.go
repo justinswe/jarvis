@@ -12,7 +12,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
-	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
@@ -145,7 +144,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			Prompt:               settings.EffectivePrompt(),
 			MaxOutputTokens:      settings.MaxOutputTokens,
 			WebSearchEnabled:     settings.WebSearchEnabled,
-			ReasoningEffort:      llm.ReasoningMedium,
+			ReasoningEffort:      settings.ReasoningEffort,
 			AccuracyPolicy:       genai.ClassifyAccuracyPolicy(sanitizeContent(m.Content, p.botID)),
 			PrimaryModelProfile:  settings.PrimaryModelProfile,
 			FallbackModelProfile: settings.FallbackModelProfile,
@@ -158,7 +157,6 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	}
 	if tools, authorized := p.configurationTools(ctx, m, guildConfig); authorized {
 		request.Tools = append(request.Tools, tools...)
-		request.Config.ReasoningEffort = llm.ReasoningHigh
 	}
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded

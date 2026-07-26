@@ -145,9 +145,10 @@ func TestConfigurationToolSchemasLimitProtectedSettingsToRootUsers(t *testing.T)
 	prompt := schemaProperty(t, properties, "prompt")
 	assert.Contains(t, prompt["description"], "may define the assistant's name and personality")
 	assert.NotContains(t, prompt["description"], "Jarvis's core identity")
-	for _, field := range []string{"prompt", "thread_context_window", "parent_context_window", "message_retention_days"} {
+	for _, field := range []string{"prompt", "thread_context_window", "parent_context_window", "message_retention_days", "reasoning_effort"} {
 		assert.Contains(t, properties, field)
 	}
+	assert.Equal(t, []string{"low", "medium", "high"}, schemaProperty(t, properties, "reasoning_effort")["enum"])
 	assert.NotContains(t, properties, "temperature")
 	assert.NotContains(t, properties, "tool_model_profile")
 	assert.NotContains(t, properties, "web_search_model_profile")
@@ -225,6 +226,34 @@ func TestRootConfigurationReadPreservesStaleProfileAlias(t *testing.T) {
 	result, err := tool.Execute(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "removed-profile", result.(configurationResponse).PrimaryModelProfile)
+}
+
+func TestRootConfigurationUpdatesReasoningEffort(t *testing.T) {
+	manager := &fakeConfigManager{value: config.GuildConfig{Settings: testSettings()}}
+	root := configurationTool{
+		manager: manager, guildID: "guild", actorID: "123456789012345678", authorized: true, root: true,
+		access: "root", action: updateServerConfigurationToolName,
+	}
+
+	result, err := root.Execute(context.Background(), map[string]any{"reasoning_effort": "high"})
+	require.NoError(t, err)
+	response := result.(configurationResponse)
+	assert.Equal(t, string(llm.ReasoningHigh), response.ReasoningEffort)
+	assert.Equal(t, []string{"reasoning_effort"}, response.ChangedFields)
+
+	for _, value := range []any{"extreme", "", 3} {
+		_, err = root.Execute(context.Background(), map[string]any{"reasoning_effort": value})
+		var executionErr *genai.ExecutionError
+		require.ErrorAs(t, err, &executionErr)
+		assert.Equal(t, "invalid_configuration", executionErr.Code)
+	}
+
+	nonRoot := root
+	nonRoot.root = false
+	_, err = nonRoot.Execute(context.Background(), map[string]any{"reasoning_effort": "low"})
+	var denied *genai.ExecutionError
+	require.ErrorAs(t, err, &denied)
+	assert.Equal(t, "authorization_denied", denied.Code)
 }
 
 func TestConfigurationToolsUpdateAndDelegate(t *testing.T) {
@@ -332,7 +361,7 @@ func TestConfigurationToolReturnsSafeDatabaseFailure(t *testing.T) {
 	assert.NotContains(t, executionErr.Message, "secret")
 }
 
-func TestProcessUsesHighThinkingWhenAdminToolsAreExposed(t *testing.T) {
+func TestProcessKeepsConfiguredThinkingWhenAdminToolsAreExposed(t *testing.T) {
 	settings := testSettings()
 	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
 	manager := &fakeConfigManager{value: config.GuildConfig{Settings: settings}}
@@ -342,7 +371,7 @@ func TestProcessUsesHighThinkingWhenAdminToolsAreExposed(t *testing.T) {
 	}
 	require.NoError(t, processor.Process(context.Background(), targetedMessage("message", "show the configuration")))
 	require.NotNil(t, generator.request)
-	assert.Equal(t, llm.ReasoningHigh, generator.request.Config.ReasoningEffort)
+	assert.Equal(t, settings.ReasoningEffort, generator.request.Config.ReasoningEffort)
 	require.Len(t, generator.request.Tools, 8)
 	assert.Equal(t, getServerConfigurationToolName, generator.request.Tools[3].Name())
 	assert.Equal(t, setGuildPromptToolName, generator.request.Tools[5].Name())
@@ -359,7 +388,7 @@ func TestRootVersionRequestPreservesRuntimeToolRouteAndRequestShape(t *testing.T
 	require.NoError(t, processor.Process(context.Background(), targetedMessage("message", "what version are you")))
 	require.NotNil(t, generator.request)
 	assert.Equal(t, "CURRENT REQUEST:\nwhat version are you", generator.request.Messages[len(generator.request.Messages)-1].Content)
-	assert.Equal(t, llm.ReasoningHigh, generator.request.Config.ReasoningEffort)
+	assert.Equal(t, settings.ReasoningEffort, generator.request.Config.ReasoningEffort)
 	assert.Equal(t, genai.AccuracyPolicy{
 		RequiredFunctionNames: []string{runtimeContextToolName}, RuntimeContextRelevant: true,
 	}, generator.request.Config.AccuracyPolicy)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/errors"
 )
 
@@ -37,6 +38,7 @@ type ServerSettings struct {
 	MessageRetentionDays int
 	WebSearchEnabled     bool
 	ChannelSearchEnabled bool
+	ReasoningEffort      llm.ReasoningEffort
 	PrimaryModelProfile  string
 	FallbackModelProfile string
 }
@@ -66,6 +68,9 @@ func (s ServerSettings) Validate() error {
 	}
 	if s.MessageRetentionDays < 1 || s.MessageRetentionDays > MaxMessageRetentionDays {
 		return errors.Errorf("message retention must be between 1 and %d days", MaxMessageRetentionDays)
+	}
+	if !s.ReasoningEffort.Valid() {
+		return errors.New("reasoning effort must be low, medium, or high")
 	}
 	if s.FallbackModelProfile != "" && s.FallbackModelProfile == s.PrimaryModelProfile {
 		return errors.New("primary and fallback model profiles must be different")
@@ -120,6 +125,7 @@ type Patch struct {
 	MessageRetentionDays  *int
 	WebSearchEnabled      *bool
 	ChannelSearchEnabled  *bool
+	ReasoningEffort       *llm.ReasoningEffort
 	PrimaryModelProfile   *string
 	FallbackModelProfile  *string
 	ValidateModelProfiles func(ServerSettings) error
@@ -130,7 +136,7 @@ func (p Patch) Empty() bool {
 	return p.Prompt == nil && p.GuildPrompt == nil && p.ThreadMessages == nil && p.ParentMessages == nil && p.ChannelMessages == nil &&
 		p.HistoryRunes == nil && p.MaxOutputTokens == nil && p.MessageTimeout == nil &&
 		p.MessageRetentionDays == nil && p.WebSearchEnabled == nil && p.ChannelSearchEnabled == nil &&
-		p.PrimaryModelProfile == nil && p.FallbackModelProfile == nil
+		p.ReasoningEffort == nil && p.PrimaryModelProfile == nil && p.FallbackModelProfile == nil
 }
 
 // Apply applies the patch and validates the resulting configuration.
@@ -171,6 +177,9 @@ func (p Patch) Apply(current GuildConfig) (GuildConfig, error) {
 	}
 	if p.ChannelSearchEnabled != nil {
 		settings.ChannelSearchEnabled = *p.ChannelSearchEnabled
+	}
+	if p.ReasoningEffort != nil {
+		settings.ReasoningEffort = *p.ReasoningEffort
 	}
 	if p.PrimaryModelProfile != nil {
 		settings.PrimaryModelProfile = strings.TrimSpace(*p.PrimaryModelProfile)

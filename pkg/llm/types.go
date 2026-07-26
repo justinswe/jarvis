@@ -121,6 +121,16 @@ const (
 	ReasoningHigh   ReasoningEffort = "high"
 )
 
+// Valid reports whether the effort names a supported reasoning level.
+func (e ReasoningEffort) Valid() bool {
+	switch e {
+	case ReasoningLow, ReasoningMedium, ReasoningHigh:
+		return true
+	default:
+		return false
+	}
+}
+
 // ToolEffect describes whether a tool may change external state.
 type ToolEffect string
 

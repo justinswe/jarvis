@@ -52,6 +52,7 @@ type configurationResponse struct {
 	MessageRetentionDays  int                    `json:"message_retention_days,omitempty"`
 	WebSearchEnabled      bool                   `json:"web_search_enabled,omitempty"`
 	ChannelSearchEnabled  bool                   `json:"channel_search_enabled,omitempty"`
+	ReasoningEffort       string                 `json:"reasoning_effort,omitempty"`
 	AdminUserIDs          []string               `json:"admin_user_ids,omitempty"`
 	ChangedFields         []string               `json:"changed_fields,omitempty"`
 	PrimaryModelProfile   string                 `json:"primary_model_profile,omitempty"`
@@ -153,6 +154,10 @@ func (t configurationTool) Declaration() *llm.ToolDefinition {
 		properties["message_retention_days"] = integerSchema(
 			"Retention for newly ingested messages in whole days. Only root users may change this value.",
 			1, config.MaxMessageRetentionDays,
+		)
+		properties["reasoning_effort"] = enumStringSchema(
+			"Model thinking level for this server. Higher levels reason more deeply but are slower and cost more.",
+			[]string{string(llm.ReasoningLow), string(llm.ReasoningMedium), string(llm.ReasoningHigh)},
 		)
 		if t.models != nil {
 			properties["primary_model_profile"] = enumStringSchema("Tool-capable primary model profile for this server.", primaryModelProfileNames(t.models))
@@ -289,6 +294,8 @@ func configurationPatch(args map[string]any, models *llm.Registry) (config.Patch
 			patch.WebSearchEnabled, err = boolArgument(value, name)
 		case "channel_search_enabled":
 			patch.ChannelSearchEnabled, err = boolArgument(value, name)
+		case "reasoning_effort":
+			patch.ReasoningEffort, err = reasoningEffortArgument(value, name)
 		case "primary_model_profile":
 			patch.PrimaryModelProfile, err = modelProfileArgument(value, name, false)
 		case "fallback_model_profile":
@@ -350,6 +357,7 @@ func responseFromConfig(value config.GuildConfig, changed []string, root bool, a
 	response.MessageRetentionDays = settings.MessageRetentionDays
 	response.WebSearchEnabled = settings.WebSearchEnabled
 	response.ChannelSearchEnabled = settings.ChannelSearchEnabled
+	response.ReasoningEffort = string(settings.ReasoningEffort)
 	response.PrimaryModelProfile = settings.PrimaryModelProfile
 	response.FallbackModelProfile = settings.FallbackModelProfile
 	response.WebSearchProviders = append([]string{}, webSearchProviders...)
@@ -430,6 +438,18 @@ func modelProfileArgument(value any, name string, allowEmpty bool) (*string, err
 		return nil, errors.Errorf("%s must not be empty", name)
 	}
 	return &result, nil
+}
+
+func reasoningEffortArgument(value any, name string) (*llm.ReasoningEffort, error) {
+	result, ok := value.(string)
+	if !ok {
+		return nil, errors.Errorf("%s must be a string", name)
+	}
+	effort := llm.ReasoningEffort(strings.TrimSpace(result))
+	if !effort.Valid() {
+		return nil, errors.Errorf("%s must be low, medium, or high", name)
+	}
+	return &effort, nil
 }
 
 func modelProfileNames(models *llm.Registry) []string {

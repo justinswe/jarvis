@@ -11,6 +11,7 @@ import (
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
 	"github.com/justinswe/jarvis/internal/config"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,6 +50,7 @@ func repositoryDefaults() config.GuildConfig {
 		Prompt: "Jarvis", ThreadMessages: 15, ParentMessages: 10, ChannelMessages: 4, HistoryRunes: 4000,
 		MaxOutputTokens: 256, MessageTimeout: time.Minute,
 		MessageRetentionDays: config.DefaultMessageRetentionDays, WebSearchEnabled: true, ChannelSearchEnabled: true,
+		ReasoningEffort:     llm.ReasoningMedium,
 		PrimaryModelProfile: "default", FallbackModelProfile: "fallback",
 	}}
 }
@@ -329,6 +331,28 @@ func TestConfigurationV2RoundTripsModelProfiles(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "quality", loaded.Settings.PrimaryModelProfile)
 	assert.Empty(t, loaded.Settings.FallbackModelProfile)
+}
+
+func TestConfigurationRoundTripsReasoningEffortAndDefaultsMissingAttribute(t *testing.T) {
+	value := repositoryDefaults()
+	value.Settings.ReasoningEffort = llm.ReasoningHigh
+	attributes, err := attributevalue.MarshalMap(newGuildConfigItem("guild", "admin", value, time.Unix(1, 0)))
+	require.NoError(t, err)
+	client := &fakeDynamoClient{get: func(context.Context, *dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+		return &dynamodb.GetItemOutput{Item: attributes}, nil
+	}}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	defer repository.Close()
+
+	loaded, err := repository.Load(context.Background(), "guild")
+	require.NoError(t, err)
+	assert.Equal(t, llm.ReasoningHigh, loaded.Settings.ReasoningEffort)
+
+	delete(attributes, "reasoning_effort")
+	loaded, err = repository.Load(context.Background(), "guild")
+	require.NoError(t, err)
+	assert.Equal(t, llm.ReasoningMedium, loaded.Settings.ReasoningEffort)
 }
 
 func TestConfigurationIgnoresLegacyTemperatureAttribute(t *testing.T) {

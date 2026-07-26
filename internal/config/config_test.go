@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,6 +20,7 @@ func validSettings() ServerSettings {
 		MaxOutputTokens:      100,
 		MessageTimeout:       time.Second,
 		MessageRetentionDays: DefaultMessageRetentionDays,
+		ReasoningEffort:      llm.ReasoningMedium,
 	}
 }
 
@@ -45,6 +47,21 @@ func TestPatchAppliesAndValidatesCompleteConfiguration(t *testing.T) {
 	invalid := MaxMessageRetentionDays + 1
 	_, err = (Patch{MessageRetentionDays: &invalid}).Apply(value)
 	assert.ErrorContains(t, err, "message retention")
+}
+
+func TestPatchUpdatesReasoningEffortAndRejectsUnsupportedLevels(t *testing.T) {
+	value := GuildConfig{Settings: validSettings()}
+	high := llm.ReasoningHigh
+	patch := Patch{ReasoningEffort: &high}
+	assert.False(t, patch.Empty())
+
+	updated, err := patch.Apply(value)
+	require.NoError(t, err)
+	assert.Equal(t, llm.ReasoningHigh, updated.Settings.ReasoningEffort)
+
+	unsupported := llm.ReasoningEffort("extreme")
+	_, err = (Patch{ReasoningEffort: &unsupported}).Apply(value)
+	assert.ErrorContains(t, err, "reasoning effort must be low, medium, or high")
 }
 
 func TestPatchUpdatesAndClearsModelProfiles(t *testing.T) {

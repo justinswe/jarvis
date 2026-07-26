@@ -1,10 +1,13 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/png"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -74,6 +77,15 @@ func TestRegistryRequiresToolCapablePrimaryAndAllowsPresentationFallback(t *test
 	profiles[0].Capabilities.ToolChoice = false
 	_, err = NewRegistry(profiles, nil, Selection{Primary: "primary", Fallback: "fallback"})
 	assert.ErrorContains(t, err, "tools and tool choice")
+}
+
+func TestReasoningEffortValidatesSupportedLevels(t *testing.T) {
+	for _, effort := range []ReasoningEffort{ReasoningLow, ReasoningMedium, ReasoningHigh} {
+		assert.True(t, effort.Valid(), string(effort))
+	}
+	for _, effort := range []ReasoningEffort{"", "extreme", "LOW"} {
+		assert.False(t, effort.Valid(), string(effort))
+	}
 }
 
 func TestRetryableErrorClassification(t *testing.T) {
@@ -408,6 +420,62 @@ func TestVertexProbeConfirmsToolsWithNonGenerativeCountTokens(t *testing.T) {
 	assert.True(t, caps.Tools)
 	assert.True(t, caps.ToolChoice)
 	assert.True(t, caps.Images)
+}
+
+func newVertexImageProbeFailureHost(t *testing.T, imageErr error) Prober {
+	t.Helper()
+	countCalls := 0
+	_, prober, err := NewVertexHost(context.Background(), VertexConfig{
+		Generate: func(context.Context, string, []*googlegenai.Content, *googlegenai.GenerateContentConfig) (*googlegenai.GenerateContentResponse, error) {
+			return nil, errors.New("generation must not run during probe")
+		},
+		GetModel: func(context.Context, string, *googlegenai.GetModelConfig) (*googlegenai.Model, error) {
+			return &googlegenai.Model{Thinking: true}, nil
+		},
+		CountTokens: func(context.Context, string, []*googlegenai.Content, *googlegenai.CountTokensConfig) (*googlegenai.CountTokensResponse, error) {
+			countCalls++
+			if countCalls == 1 {
+				return &googlegenai.CountTokensResponse{TotalTokens: 1}, nil
+			}
+			return nil, imageErr
+		},
+	})
+	require.NoError(t, err)
+	return prober
+}
+
+func TestVertexProbeDowngradesImagesWhenProbePayloadIsRejected(t *testing.T) {
+	// Vertex rejects a malformed probe image with wording that names no unsupported feature. The
+	// rejection describes the probe payload, so it must not prevent the model from being used.
+	prober := newVertexImageProbeFailureHost(t, googlegenai.APIError{
+		Code: 400, Status: "INVALID_ARGUMENT", Message: "Provided image is not valid.",
+	})
+	caps, err := prober.Probe(context.Background(), Profile{Name: "tool", Provider: ProviderVertex, ModelID: "gemini"})
+	require.NoError(t, err)
+	assert.True(t, caps.Tools)
+	assert.True(t, caps.ToolChoice)
+	assert.False(t, caps.Images)
+}
+
+func TestVertexProbeFailsWhenImageProbeIsNotRejectedByRequest(t *testing.T) {
+	prober := newVertexImageProbeFailureHost(t, googlegenai.APIError{
+		Code: 401, Status: "UNAUTHENTICATED", Message: "credential secret-token is invalid",
+	})
+	_, err := prober.Probe(context.Background(), Profile{Name: "tool", Provider: ProviderVertex, ModelID: "gemini"})
+	require.Error(t, err)
+	var probeErr *Error
+	require.ErrorAs(t, err, &probeErr)
+	assert.Equal(t, ErrorAuthentication, probeErr.Kind)
+	assert.NotContains(t, err.Error(), "secret-token")
+}
+
+func TestCapabilityProbeImageIsDecodableAndNotDegenerate(t *testing.T) {
+	frame, format, err := image.Decode(bytes.NewReader(vertexCapabilityProbePNG))
+	require.NoError(t, err)
+	assert.Equal(t, "png", format)
+	bounds := frame.Bounds()
+	assert.Greater(t, bounds.Dx(), 1)
+	assert.Greater(t, bounds.Dy(), 1)
 }
 
 func TestProviderNeutralToolChoiceMapsAcrossAdapters(t *testing.T) {

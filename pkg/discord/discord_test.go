@@ -134,6 +134,7 @@ func testSettings() config.ServerSettings {
 		MessageRetentionDays: config.DefaultMessageRetentionDays,
 		WebSearchEnabled:     true,
 		ChannelSearchEnabled: true,
+		ReasoningEffort:      llm.ReasoningMedium,
 	}
 }
 
@@ -422,6 +423,39 @@ func TestSearchCurrentChannelPassesCancellationToHistory(t *testing.T) {
 	_, err := p.searchChannel(ctx, "guild", "channel", "current", channelSearchCriteria{query: "deploy"})
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.False(t, fetched)
+}
+
+func TestProcessAlwaysUsesTheConfiguredThinkingLevel(t *testing.T) {
+	// No condition raises the level above what the server is configured for, including requests that
+	// expose the root configuration tools.
+	for _, test := range []struct {
+		name       string
+		configured llm.ReasoningEffort
+		root       bool
+	}{
+		{name: "ordinary user keeps a low level", configured: llm.ReasoningLow},
+		{name: "ordinary user keeps a raised level", configured: llm.ReasoningHigh},
+		{name: "configuration tools leave a low level", configured: llm.ReasoningLow, root: true},
+		{name: "configuration tools leave a medium level", configured: llm.ReasoningMedium, root: true},
+		{name: "configuration tools leave a raised level", configured: llm.ReasoningHigh, root: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			settings := testSettings()
+			settings.ReasoningEffort = test.configured
+			generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
+			processor := &Processor{
+				botID: "bot", generator: generator, client: &fakeClient{}, configs: &countingProvider{settings: settings},
+				history: &fakeHistory{},
+			}
+			if test.root {
+				processor.manager = &fakeConfigManager{value: config.GuildConfig{Settings: settings}}
+				processor.rootUsers = map[string]struct{}{"u": {}}
+			}
+			require.NoError(t, processor.Process(context.Background(), targetedMessage("m", "question")))
+			require.NotNil(t, generator.request)
+			assert.Equal(t, test.configured, generator.request.Config.ReasoningEffort)
+		})
+	}
 }
 
 func TestProcessUsesPerServerSettings(t *testing.T) {

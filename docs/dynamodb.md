@@ -75,6 +75,7 @@ Usable messages returned alongside a DynamoDB or decode error are supplied to th
 | `message_timeout_seconds` | Number | Processing deadline. |
 | `message_retention_days` | Number | Retention for new messages, 1 through 3650 days. |
 | `web_search_enabled`, `channel_search_enabled` | Boolean | Web-search eligibility and DynamoDB current-channel-search eligibility. |
+| `reasoning_effort` | String | Root-selected thinking level: `low`, `medium`, or `high`. Rows written before this setting existed load as `medium`. |
 | `primary_model_profile`, `fallback_model_profile` | String | Root-selected model profile names. An empty fallback disables host fallback. |
 | `admin_user_ids` | String set | Delegated Jarvis configuration administrators. |
 | `version` | Number | Optimistic concurrency version. |
@@ -110,7 +111,7 @@ The model receives five narrow tools only when the caller is authorized:
 
 Authorization is granted to configured root users, stored delegated administrators, the Discord guild owner, Discord administrators, and users with Manage Guild permission. Those administrators may set or clear `guild_prompt`. Root users apply across guilds and are the only callers allowed to change `prompt`, context limits, retention, or the primary and fallback model profiles; protected fields are omitted from every other caller's tool schema and checked again during execution. Root reads include the available profile names and their confirmed tool, image, and reasoning capabilities. Only profiles with confirmed tools and tool choice may be selected as primary; any configured profile may be selected as the tools-disabled presentation fallback.
 
-The tools use flat, typed schemas with explicit bounds and return the complete effective state after a successful mutation. Mutation descriptions require an explicit, unambiguous administrator request. When these tools are exposed, Jarvis raises Gemini's thinking level from medium to high. Database errors are returned to the model as stable, sanitized error codes without backend details.
+The tools use flat, typed schemas with explicit bounds and return the complete effective state after a successful mutation. Mutation descriptions require an explicit, unambiguous administrator request. Exposing these tools does not change the thinking level; every request uses the level configured for the server. Database errors are returned to the model as stable, sanitized error codes without backend details.
 
 ## IAM and operations
 

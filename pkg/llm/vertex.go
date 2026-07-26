@@ -1,14 +1,21 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
+	"go.uber.org/zap"
 	googlegenai "google.golang.org/genai"
 )
 
@@ -103,13 +110,22 @@ type googleGenAIHost struct {
 
 var explicitGeminiModelPattern = regexp.MustCompile(`^gemini-([1-9][0-9]*)(?:\.[0-9]+)?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?$`)
 
-var vertexCapabilityProbePNG = []byte{
-	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-	0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-	0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00,
-	0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xff, 0x1f, 0x00,
-	0x02, 0xeb, 0x01, 0xf5, 0x8f, 0x59, 0x42, 0x67, 0x00, 0x00, 0x00, 0x00,
-	0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+// vertexCapabilityProbePNG is the smallest conventional image every Gemini image surface accepts.
+//
+// Vertex rejects a 1x1 grayscale+alpha PNG as malformed even though the Gemini Developer API accepts it,
+// so the probe carries an ordinary opaque RGBA image instead of a degenerate one.
+var vertexCapabilityProbePNG = mustEncodeCapabilityProbePNG()
+
+// mustEncodeCapabilityProbePNG encodes the startup probe image from a compile-time constant.
+func mustEncodeCapabilityProbePNG() []byte {
+	const size = 8
+	frame := image.NewRGBA(image.Rect(0, 0, size, size))
+	draw.Draw(frame, frame.Bounds(), image.NewUniform(color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff}), image.Point{}, draw.Src)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, frame); err != nil {
+		panic("encode capability probe image: " + err.Error())
+	}
+	return encoded.Bytes()
 }
 
 func (h *googleGenAIHost) Generate(ctx context.Context, request Request) (Response, error) {
@@ -358,12 +374,36 @@ func classifyGoogleGenAIError(provider Provider, err error) error {
 	return transportError(provider, err)
 }
 
+// logProbeFailure records the unsanitized provider rejection for one startup probe step.
+//
+// Probe failures are sanitized at the error boundary, which hides the provider message that
+// explains why a working model was rejected. Operators recover it with --log-level=-1.
+func logProbeFailure(provider Provider, modelID, step string, err error) {
+	if err == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.String("provider", string(provider)), zap.String("model_id", modelID),
+		zap.String("probe_step", step), zap.Error(err),
+	}
+	var apiError googlegenai.APIError
+	if errors.As(err, &apiError) {
+		fields = append(fields,
+			zap.Int("provider_status_code", apiError.Code),
+			zap.String("provider_status", apiError.Status),
+			zap.String("provider_message", apiError.Message),
+		)
+	}
+	app.L().Debug("Model capability probe step failed", fields...)
+}
+
 func (h *googleGenAIHost) Probe(ctx context.Context, profile Profile) (Capabilities, error) {
 	if profile.Provider != h.provider {
 		return Capabilities{}, &Error{Kind: ErrorInvalidRequest, Provider: h.provider, Scope: "profile", Err: errors.New("profile provider mismatch")}
 	}
 	model, err := h.getModel(ctx, profile.ModelID, nil)
 	if err != nil {
+		logProbeFailure(h.provider, profile.ModelID, "get_model", err)
 		return Capabilities{}, classifyGoogleGenAIError(h.provider, err)
 	}
 	if model == nil {
@@ -393,6 +433,7 @@ func (h *googleGenAIHost) Probe(ctx context.Context, profile Profile) (Capabilit
 	if err == nil && response == nil {
 		return Capabilities{}, malformedProbeResponse(h.provider)
 	}
+	logProbeFailure(h.provider, profile.ModelID, "count_tokens_tools", err)
 	if err == nil {
 		capabilities.Tools = true
 		capabilities.ToolChoice = true
@@ -410,6 +451,7 @@ func (h *googleGenAIHost) Probe(ctx context.Context, profile Profile) (Capabilit
 			if err == nil {
 				continue
 			}
+			logProbeFailure(h.provider, profile.ModelID, "count_tokens_reasoning_"+string(effort), err)
 			if googleGenAIFeatureUnsupported(err, "thinking", "reasoning") {
 				reasoningControls = false
 				continue
@@ -425,11 +467,17 @@ func (h *googleGenAIHost) Probe(ctx context.Context, profile Profile) (Capabilit
 	if err == nil && response == nil {
 		return Capabilities{}, malformedProbeResponse(h.provider)
 	}
+	logProbeFailure(h.provider, profile.ModelID, "count_tokens_image", err)
 	if err == nil {
 		capabilities.Images = true
 		return capabilities, nil
 	}
 	if googleGenAIFeatureUnsupported(err, "image", "inline data", "multimodal") {
+		return capabilities, nil
+	}
+	if googleGenAIProbeRejected(err) {
+		app.L().Warn("Model image capability could not be confirmed; image input will be refused for this profile",
+			zap.String("provider", string(h.provider)), zap.String("model_id", profile.ModelID))
 		return capabilities, nil
 	}
 	return Capabilities{}, classifyGoogleGenAIError(h.provider, err)
@@ -512,6 +560,15 @@ func googleAIModelResource(modelID string) string {
 
 func malformedProbeResponse(provider Provider) error {
 	return &Error{Kind: ErrorMalformed, Provider: provider, Scope: "capability-probe", Err: errors.New("capability probe returned no response")}
+}
+
+// googleGenAIProbeRejected reports whether a probe call was refused as an invalid request.
+//
+// Capability probes carry synthetic payloads, so a rejection describes the probe rather than the model and
+// must never prevent startup.
+func googleGenAIProbeRejected(err error) bool {
+	var apiError googlegenai.APIError
+	return errors.As(err, &apiError) && apiError.Code == http.StatusBadRequest
 }
 
 func googleGenAIFeatureUnsupported(err error, featureTerms ...string) bool {
