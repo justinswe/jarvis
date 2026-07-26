@@ -17,6 +17,7 @@ import (
 	workerservice "github.com/justinswe/jarvis/internal/worker"
 	"github.com/justinswe/jarvis/pkg/discord"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
@@ -152,6 +153,7 @@ func (cfg workerConfig) serverSettings() config.ServerSettings {
 		MessageRetentionDays: cfg.messageRetentionDays,
 		WebSearchEnabled:     true,
 		ChannelSearchEnabled: true,
+		ReasoningEffort:      llm.ReasoningEffort(strings.TrimSpace(cfg.reasoningEffort)),
 		PrimaryModelProfile:  primary,
 		FallbackModelProfile: strings.TrimSpace(cfg.fallbackModelProfile),
 	}

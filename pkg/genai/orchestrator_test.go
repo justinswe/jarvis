@@ -100,7 +100,7 @@ func TestNeutralOrchestrationHelloSkipsToolRounds(t *testing.T) {
 	assert.Equal(t, "hello", got.Text)
 	assert.Len(t, primary.requests, 1)
 	assert.Empty(t, primary.requests[0].Tools)
-	assert.Equal(t, llm.ReasoningMedium, primary.requests[0].ReasoningEffort)
+	assert.Equal(t, llm.ReasoningLow, primary.requests[0].ReasoningEffort)
 	assert.NotContains(t, primary.requests[0].System, "Call get_runtime_context")
 	assert.Contains(t, primary.requests[0].System, "No functions are available in this phase")
 	assert.Empty(t, searcher.queries)

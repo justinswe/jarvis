@@ -6,6 +6,7 @@ import (
 
 	"github.com/justinswe/jarvis/internal/config"
 	"github.com/justinswe/jarvis/pkg/genai"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/jarvis/pkg/websearch"
 	"github.com/justinswe/std/errors"
 	"github.com/spf13/cobra"
@@ -17,6 +18,7 @@ type workerConfig struct {
 	primaryModelProfile, fallbackModelProfile                       string
 	serperAPIKey, firecrawlAPIKey, tavilyAPIKey                     string
 	modelProfiles, webSearchProviders                               []string
+	reasoningEffort                                                 string
 	dynamodbTable, awsRoleARN, awsWebIdentityAudience               string
 	rootUserIDs                                                     []string
 	dynamodbEnabled                                                 bool
@@ -36,6 +38,7 @@ func newRootCommand() *cobra.Command {
 		channelMessages:      4,
 		historyRunes:         4000,
 		maxOutputTokens:      genai.DefaultMaxOutputTokens,
+		reasoningEffort:      string(llm.ReasoningLow),
 		messageRetentionDays: config.DefaultMessageRetentionDays,
 		messageTimeout:       time.Minute,
 		dynamodbTable:        "jarvis",
@@ -66,6 +69,7 @@ func newRootCommand() *cobra.Command {
 	flags.IntVar(&cfg.channelMessages, "channel-context-window", cfg.channelMessages, "Prior ordinary channel messages")
 	flags.IntVar(&cfg.historyRunes, "history-runes", cfg.historyRunes, "Combined context history rune budget")
 	flags.IntVar(&cfg.maxOutputTokens, "max-output-tokens", cfg.maxOutputTokens, "Maximum total generated tokens, including thinking and visible text (maximum 8192)")
+	flags.StringVar(&cfg.reasoningEffort, "reasoning-effort", cfg.reasoningEffort, "Default model thinking level: low, medium, or high")
 	flags.StringVar(&cfg.discordBotToken, "discord-bot-token", cfg.discordBotToken, "Discord bot token")
 	flags.DurationVar(&cfg.messageTimeout, "message-timeout", cfg.messageTimeout, "Overall message processing timeout")
 	flags.IntVar(&cfg.messageRetentionDays, "message-retention-days", cfg.messageRetentionDays, "Default message retention in days")

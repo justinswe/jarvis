@@ -5,7 +5,10 @@ go_library(
     srcs = ["config.go"],
     importpath = "github.com/justinswe/jarvis/internal/config",
     visibility = ["//visibility:public"],
-    deps = ["@com_github_justinswe_std//errors"],
+    deps = [
+        "//pkg/llm",
+        "@com_github_justinswe_std//errors",
+    ],
 )
 
 go_test(
@@ -13,6 +16,7 @@ go_test(
     srcs = ["config_test.go"],
     embed = [":config"],
     deps = [
+        "//pkg/llm",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

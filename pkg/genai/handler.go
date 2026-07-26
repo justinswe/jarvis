@@ -453,7 +453,7 @@ func (h *Handler) requestConfig(requestConfig *RequestConfig) (RequestConfig, er
 			Prompt:           h.cfg.DefaultPrompt,
 			MaxOutputTokens:  h.cfg.MaxOutputTokens,
 			WebSearchEnabled: true,
-			ReasoningEffort:  llm.ReasoningMedium,
+			ReasoningEffort:  llm.ReasoningLow,
 		}
 		if h.registry != nil {
 			selection := h.registry.Selection()
@@ -466,7 +466,7 @@ func (h *Handler) requestConfig(requestConfig *RequestConfig) (RequestConfig, er
 		return RequestConfig{}, errors.Errorf("max-output-tokens must be between 1 and %d", MaxOutputTokensLimit)
 	}
 	if requestConfig.ReasoningEffort == "" {
-		requestConfig.ReasoningEffort = llm.ReasoningMedium
+		requestConfig.ReasoningEffort = llm.ReasoningLow
 	}
 	if requestConfig.ReasoningEffort != llm.ReasoningLow && requestConfig.ReasoningEffort != llm.ReasoningMedium && requestConfig.ReasoningEffort != llm.ReasoningHigh {
 		return RequestConfig{}, errors.New("reasoning effort must be low, medium, or high")

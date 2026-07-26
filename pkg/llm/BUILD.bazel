@@ -15,8 +15,10 @@ go_library(
     importpath = "github.com/justinswe/jarvis/pkg/llm",
     visibility = ["//visibility:public"],
     deps = [
+        "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",
         "@org_golang_google_genai//:genai",
+        "@org_uber_go_zap//:zap",
     ],
 )
 

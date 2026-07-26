@@ -15,6 +15,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
 	"github.com/justinswe/jarvis/internal/config"
+	"github.com/justinswe/jarvis/pkg/llm"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"github.com/klauspost/compress/zstd"
@@ -438,6 +439,7 @@ type guildConfigItem struct {
 	MessageRetentionDays  int      `dynamodbav:"message_retention_days"`
 	WebSearchEnabled      bool     `dynamodbav:"web_search_enabled"`
 	ChannelSearchEnabled  bool     `dynamodbav:"channel_search_enabled"`
+	ReasoningEffort       string   `dynamodbav:"reasoning_effort,omitempty"`
 	PrimaryModelProfile   string   `dynamodbav:"primary_model_profile,omitempty"`
 	FallbackModelProfile  string   `dynamodbav:"fallback_model_profile,omitempty"`
 	AdminUserIDs          []string `dynamodbav:"admin_user_ids,stringset,omitempty"`
@@ -455,7 +457,8 @@ func newGuildConfigItem(guildID, actorID string, value config.GuildConfig, updat
 		ChannelMessages: settings.ChannelMessages, HistoryRunes: settings.HistoryRunes, MaxOutputTokens: settings.MaxOutputTokens,
 		MessageTimeoutSeconds: int64(settings.MessageTimeout / time.Second),
 		MessageRetentionDays:  settings.MessageRetentionDays, WebSearchEnabled: settings.WebSearchEnabled,
-		ChannelSearchEnabled: settings.ChannelSearchEnabled, PrimaryModelProfile: settings.PrimaryModelProfile,
+		ChannelSearchEnabled: settings.ChannelSearchEnabled, ReasoningEffort: string(settings.ReasoningEffort),
+		PrimaryModelProfile: settings.PrimaryModelProfile,
 		FallbackModelProfile: settings.FallbackModelProfile, AdminUserIDs: value.AdminUserIDs, Version: value.Version,
 		UpdatedAtMillis: updatedAt.UTC().UnixMilli(), UpdatedByUserID: actorID,
 	}
@@ -469,11 +472,21 @@ func (i guildConfigItem) config() config.GuildConfig {
 			ChannelMessages: i.ChannelMessages, HistoryRunes: i.HistoryRunes, MaxOutputTokens: i.MaxOutputTokens,
 			MessageTimeout:       time.Duration(i.MessageTimeoutSeconds) * time.Second,
 			MessageRetentionDays: i.MessageRetentionDays, WebSearchEnabled: i.WebSearchEnabled,
-			ChannelSearchEnabled: i.ChannelSearchEnabled, PrimaryModelProfile: i.PrimaryModelProfile,
+			ChannelSearchEnabled: i.ChannelSearchEnabled, ReasoningEffort: i.reasoningEffort(),
+			PrimaryModelProfile: i.PrimaryModelProfile,
 			FallbackModelProfile: i.FallbackModelProfile,
 		},
 		AdminUserIDs: normalizedUserIDs(i.AdminUserIDs), Version: i.Version,
 	}
+}
+
+// reasoningEffort defaults rows stored before the setting existed to the medium level.
+func (i guildConfigItem) reasoningEffort() llm.ReasoningEffort {
+	effort := llm.ReasoningEffort(i.ReasoningEffort)
+	if !effort.Valid() {
+		return llm.ReasoningMedium
+	}
+	return effort
 }
 
 type messageItem struct {

@@ -209,6 +209,7 @@ The primary configuration variables are:
 | `MODEL_PROFILE` | Yes | Comma-separated `name=provider:model-id` declarations. The command flag is also repeatable. Providers are `google-ai`, `vertex`, `openrouter`, and `nvidia-nim`. |
 | `PRIMARY_MODEL_PROFILE` | Yes | Default primary profile name. It must confirm tools and tool choice. |
 | `FALLBACK_MODEL_PROFILE` | No | Default fallback profile name; empty disables fallback. |
+| `REASONING_EFFORT` | No | Default thinking level applied to requests: `low`, `medium`, or `high`; defaults to `low`. Root users may override it per server. |
 | `WEB_SEARCH_PROVIDERS` | No | Ordered comma-separated list of zero to two distinct providers: `serper`, `firecrawl`, or `tavily`. Serper must be first. Empty disables Search globally. |
 | `SERPER_API_KEY` | When Serper is selected | Serper credential; ignored when Serper is unselected. |
 | `FIRECRAWL_API_KEY` | When Firecrawl is selected | Firecrawl credential; ignored when Firecrawl is unselected. |
