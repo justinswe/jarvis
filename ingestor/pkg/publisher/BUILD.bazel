@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "publisher",
+    srcs = ["publisher.go"],
+    importpath = "github.com/justinswe/jarvis/ingestor/pkg/publisher",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "@com_github_justinswe_std//errors",
+        "@com_github_nats_io_nats_go//jetstream",
+        "@org_golang_google_protobuf//proto",
+    ],
+)
+
+go_test(
+    name = "publisher_test",
+    srcs = ["publisher_test.go"],
+    embed = [":publisher"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "@com_github_justinswe_std//errors",
+        "@com_github_nats_io_nats_go//jetstream",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@org_golang_google_protobuf//proto",
+    ],
+)

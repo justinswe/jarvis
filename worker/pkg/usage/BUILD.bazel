@@ -1,0 +1,62 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# gazelle:exclude live_test.go manual_test_main_test.go
+
+go_library(
+    name = "usage",
+    srcs = [
+        "keys.go",
+        "meter.go",
+        "script.go",
+        "usage.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/usage",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//worker/pkg/discord",
+        "//worker/pkg/genai",
+        "//worker/pkg/valkeyconn",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_valkey_io_valkey_go//:valkey-go",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "usage_test",
+    srcs = [
+        "keys_test.go",
+        "meter_test.go",
+        "usage_test.go",
+    ],
+    embed = [":usage"],
+    deps = [
+        "//worker/pkg/discord",
+        "//worker/pkg/genai",
+        "//worker/pkg/llm",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# gazelle:ignore
+go_test(
+    name = "valkey_live",
+    size = "large",
+    srcs = [
+        "live_test.go",
+        "manual_test_main_test.go",
+    ],
+    embed = [":usage"],
+    tags = ["manual"],
+    deps = [
+        "//worker/pkg/genai",
+        "//worker/pkg/llm",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+        "@com_github_valkey_io_valkey_go//:valkey-go",
+    ],
+)

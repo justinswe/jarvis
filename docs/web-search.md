@@ -105,4 +105,4 @@ Production logs never include queries, prompts, snippets, response bodies, compl
 
 ## Testing
 
-Normal tests use injected fakes and require no provider credentials. Live provider smoke tests are opt-in through `//pkg/genai:live_eval` and must use newly rotated credentials supplied through the manual harness flags. Never add credentials to Bazel files, checked-in environment files, fixtures, test logs, or command history.
+Normal tests use injected fakes and require no provider credentials. Live provider smoke tests are opt-in through `//worker/pkg/genai:live_eval` and must use newly rotated credentials supplied through the manual harness flags. Never add credentials to Bazel files, checked-in environment files, fixtures, test logs, or command history.

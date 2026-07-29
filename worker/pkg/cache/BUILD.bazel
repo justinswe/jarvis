@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cache",
+    srcs = [
+        "cache.go",
+        "memory.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/cache",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//worker/pkg/valkeyconn",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_valkey_io_valkey_go//:valkey-go",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "cache_test",
+    srcs = ["cache_test.go"],
+    embed = [":cache"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

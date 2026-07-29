@@ -1,0 +1,60 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "worker_lib",
+    srcs = [
+        "config.go",
+        "main.go",
+        "run.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/worker",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "//worker/pkg/awsidentity",
+        "//worker/pkg/cache",
+        "//worker/pkg/config",
+        "//worker/pkg/consumer",
+        "//worker/pkg/discord",
+        "//worker/pkg/dynamostore",
+        "//worker/pkg/genai",
+        "//worker/pkg/llm",
+        "//worker/pkg/server",
+        "//worker/pkg/usage",
+        "//worker/pkg/valkeyconn",
+        "//worker/pkg/version",
+        "//worker/pkg/websearch",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_service_dynamodb//:dynamodb",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_nats_io_nats_go//:nats_go",
+        "@com_github_nats_io_nats_go//jetstream",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_valkey_io_valkey_go//:valkey-go",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_binary(
+    name = "worker",
+    embed = [":worker_lib"],
+    visibility = ["//visibility:public"],
+    x_defs = {"github.com/justinswe/jarvis/worker/pkg/version.Value": module_version()},
+)
+
+go_test(
+    name = "worker_test",
+    srcs = ["worker_test.go"],
+    embed = [":worker_lib"],
+    deps = [
+        "//worker/pkg/config",
+        "//worker/pkg/llm",
+        "//worker/pkg/usage",
+        "//worker/pkg/websearch",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

@@ -98,8 +98,6 @@
     "https://bcr.bazel.build/modules/platforms/1.1.0/MODULE.bazel": "1c0c09f5bdcf4b3f924720d2478a3711cb39f4977019ca5988685e5b7e18b3d2",
     "https://bcr.bazel.build/modules/platforms/1.1.0/source.json": "fcf351c47596c939140ab0d333dfdd08ed1ea6ce33c2fe70c12493a301cf1344",
     "https://bcr.bazel.build/modules/protobuf/21.7/MODULE.bazel": "a5a29bb89544f9b97edce05642fac225a808b5b7be74038ea3640fae2f8e66a7",
-    "https://bcr.bazel.build/modules/protobuf/23.1/MODULE.bazel": "88b393b3eb4101d18129e5db51847cd40a5517a53e81216144a8c32dfeeca52a",
-    "https://bcr.bazel.build/modules/protobuf/24.4/MODULE.bazel": "7bc7ce5f2abf36b3b7b7c8218d3acdebb9426aeb35c2257c96445756f970eb12",
     "https://bcr.bazel.build/modules/protobuf/27.0/MODULE.bazel": "7873b60be88844a0a1d8f80b9d5d20cfbd8495a689b8763e76c6372998d3f64c",
     "https://bcr.bazel.build/modules/protobuf/27.1/MODULE.bazel": "703a7b614728bb06647f965264967a8ef1c39e09e8f167b3ca0bb1fd80449c0d",
     "https://bcr.bazel.build/modules/protobuf/29.0-rc2.bcr.1/MODULE.bazel": "52f4126f63a2f0bbf36b99c2a87648f08467a4eaf92ba726bc7d6a500bbf770c",
@@ -160,7 +158,6 @@
     "https://bcr.bazel.build/modules/rules_java/4.0.0/MODULE.bazel": "5a78a7ae82cd1a33cef56dc578c7d2a46ed0dca12643ee45edbb8417899e6f74",
     "https://bcr.bazel.build/modules/rules_java/5.3.5/MODULE.bazel": "a4ec4f2db570171e3e5eb753276ee4b389bae16b96207e9d3230895c99644b86",
     "https://bcr.bazel.build/modules/rules_java/6.5.2/MODULE.bazel": "1d440d262d0e08453fa0c4d8f699ba81609ed0e9a9a0f02cd10b3e7942e61e31",
-    "https://bcr.bazel.build/modules/rules_java/7.1.0/MODULE.bazel": "30d9135a2b6561c761bd67bd4990da591e6bdc128790ce3e7afd6a3558b2fb64",
     "https://bcr.bazel.build/modules/rules_java/7.10.0/MODULE.bazel": "530c3beb3067e870561739f1144329a21c851ff771cd752a49e06e3dc9c2e71a",
     "https://bcr.bazel.build/modules/rules_java/7.12.2/MODULE.bazel": "579c505165ee757a4280ef83cda0150eea193eed3bef50b1004ba88b99da6de6",
     "https://bcr.bazel.build/modules/rules_java/7.2.0/MODULE.bazel": "06c0334c9be61e6cef2c8c84a7800cef502063269a5af25ceb100b192453d4ab",
@@ -183,8 +180,6 @@
     "https://bcr.bazel.build/modules/rules_license/0.0.7/MODULE.bazel": "088fbeb0b6a419005b89cf93fe62d9517c0a2b8bb56af3244af65ecfe37e7d5d",
     "https://bcr.bazel.build/modules/rules_license/1.0.0/MODULE.bazel": "a7fda60eefdf3d8c827262ba499957e4df06f659330bbe6cdbdb975b768bb65c",
     "https://bcr.bazel.build/modules/rules_license/1.0.0/source.json": "a52c89e54cc311196e478f8382df91c15f7a2bfdf4c6cd0e2675cc2ff0b56efb",
-    "https://bcr.bazel.build/modules/rules_multirun/0.14.0/MODULE.bazel": "7b5a01844515db132c256d415e9f4c27149bcbaf2c5ee40f5cb9355aa7c83302",
-    "https://bcr.bazel.build/modules/rules_multirun/0.14.0/source.json": "b80960b7da5a86dca4e699ef32ca5402024c76b55ed4c406e11f75b2c4065399",
     "https://bcr.bazel.build/modules/rules_pkg/0.7.0/MODULE.bazel": "df99f03fc7934a4737122518bb87e667e62d780b610910f0447665a7e2be62dc",
     "https://bcr.bazel.build/modules/rules_pkg/1.0.1/MODULE.bazel": "5b1df97dbc29623bccdf2b0dcd0f5cb08e2f2c9050aab1092fd39a41e82686ff",
     "https://bcr.bazel.build/modules/rules_pkg/1.0.1/source.json": "bd82e5d7b9ce2d31e380dd9f50c111d678c3bdaca190cb76b0e1c71b05e1ba8a",
@@ -202,7 +197,6 @@
     "https://bcr.bazel.build/modules/rules_python/0.28.0/MODULE.bazel": "cba2573d870babc976664a912539b320cbaa7114cd3e8f053c720171cde331ed",
     "https://bcr.bazel.build/modules/rules_python/0.31.0/MODULE.bazel": "93a43dc47ee570e6ec9f5779b2e64c1476a6ce921c48cc9a1678a91dd5f8fd58",
     "https://bcr.bazel.build/modules/rules_python/0.33.2/MODULE.bazel": "3e036c4ad8d804a4dad897d333d8dce200d943df4827cb849840055be8d2e937",
-    "https://bcr.bazel.build/modules/rules_python/0.36.0/MODULE.bazel": "a4ce1ccea92b9106c7d16ab9ee51c6183107e78ba4a37aa65055227b80cd480c",
     "https://bcr.bazel.build/modules/rules_python/0.4.0/MODULE.bazel": "9208ee05fd48bf09ac60ed269791cf17fb343db56c8226a720fbb1cdf467166c",
     "https://bcr.bazel.build/modules/rules_python/1.3.0/MODULE.bazel": "8361d57eafb67c09b75bf4bbe6be360e1b8f4f18118ab48037f2bd50aa2ccb13",
     "https://bcr.bazel.build/modules/rules_python/1.4.1/MODULE.bazel": "8991ad45bdc25018301d6b7e1d3626afc3c8af8aaf4bc04f23d0b99c938b73a6",
@@ -213,7 +207,6 @@
     "https://bcr.bazel.build/modules/rules_runfiles_group/0.0.1-rc.5/source.json": "32efc01a4b29cbb5b2b97fd1f7d6025e68eb20eea498f1127b068082e315d6cf",
     "https://bcr.bazel.build/modules/rules_shell/0.2.0/MODULE.bazel": "fda8a652ab3c7d8fee214de05e7a9916d8b28082234e8d2c0094505c5268ed3c",
     "https://bcr.bazel.build/modules/rules_shell/0.3.0/MODULE.bazel": "de4402cd12f4cc8fda2354fce179fdb068c0b9ca1ec2d2b17b3e21b24c1a937b",
-    "https://bcr.bazel.build/modules/rules_shell/0.4.1/MODULE.bazel": "00e501db01bbf4e3e1dd1595959092c2fadf2087b2852d3f553b5370f5633592",
     "https://bcr.bazel.build/modules/rules_shell/0.6.1/MODULE.bazel": "72e76b0eea4e81611ef5452aa82b3da34caca0c8b7b5c0c9584338aa93bae26b",
     "https://bcr.bazel.build/modules/rules_shell/0.6.1/source.json": "20ec05cd5e592055e214b2da8ccb283c7f2a421ea0dc2acbf1aa792e11c03d0c",
     "https://bcr.bazel.build/modules/rules_swift/1.16.0/MODULE.bazel": "4a09f199545a60d09895e8281362b1ff3bb08bbde69c6fc87aff5b92fcc916ca",
@@ -232,7 +225,6 @@
     "https://bcr.bazel.build/modules/toolchains_buildbuddy/0.0.4/MODULE.bazel": "735f0ed45a0334971a61157432127380ae9ce285aea6d489565cb81c7a4cf487",
     "https://bcr.bazel.build/modules/toolchains_buildbuddy/0.0.4/source.json": "a5b69ff999ea39cf89df03cb5c174ae6fd621d7a1a7e4bd6be302ff9f2910695",
     "https://bcr.bazel.build/modules/upb/0.0.0-20220923-a547704/MODULE.bazel": "7298990c00040a0e2f121f6c32544bab27d4452f80d9ce51349b1a28f3005c43",
-    "https://bcr.bazel.build/modules/upb/0.0.0-20230516-61a97ef/MODULE.bazel": "c0df5e35ad55e264160417fd0875932ee3c9dda63d9fccace35ac62f45e1b6f9",
     "https://bcr.bazel.build/modules/zlib/1.2.11/MODULE.bazel": "07b389abc85fdbca459b69e2ec656ae5622873af3f845e1c9d80fe179f3effa0",
     "https://bcr.bazel.build/modules/zlib/1.2.12/MODULE.bazel": "3b1a8834ada2a883674be8cbd36ede1b6ec481477ada359cd2d3ddc562340b27",
     "https://bcr.bazel.build/modules/zlib/1.3.1.bcr.5/MODULE.bazel": "eec517b5bbe5492629466e11dae908d043364302283de25581e3eb944326c4ca",
@@ -244,7 +236,7 @@
     "//third_party/images:images.bzl%images": {
       "general": {
         "bzlTransitiveDigest": "QarGnYuOv+e0zcegzLgXf72+SC9lguSGRn25sdbavE0=",
-        "usagesDigest": "5Qrfm4XoUpzObmCuu/8GwRUH//y2NMD6f9REHycOnYY=",
+        "usagesDigest": "AJgmFPAsjqvO/tQTRr1R50HTbCVPIf0nlIiEJmkOZ6w=",
         "recordedInputs": [
           "REPO_MAPPING:,rules_img rules_img+",
           "REPO_MAPPING:rules_img+,bazel_skylib bazel_skylib+",
@@ -259,6 +251,88 @@
               "registry": "gcr.io",
               "repository": "distroless/base-debian13",
               "tag": "nonroot"
+            }
+          }
+        }
+      }
+    },
+    "//third_party/nats:nats.bzl%nats": {
+      "general": {
+        "bzlTransitiveDigest": "FCQwHpYEdYBCah9QTphHenlpqThRavB7mrA+991kqn0=",
+        "usagesDigest": "KM8yvHNiNEoCRBnEBHOjFMQ5Qgd0SCumU23EGS/MfXM=",
+        "recordedInputs": [
+          "REPO_MAPPING:,bazel_tools bazel_tools"
+        ],
+        "generatedRepoSpecs": {
+          "nats_server_darwin_amd64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "build_file_content": "filegroup(\n    name = \"nats-server\",\n    srcs = [\"nats-server-v2.14.3-darwin-amd64/nats-server\"],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "sha256": "effa518fe623433d7c3321991db419bb1e00aa9b19ae761b559b580434afc3ab",
+              "urls": [
+                "https://github.com/nats-io/nats-server/releases/download/v2.14.3/nats-server-v2.14.3-darwin-amd64.tar.gz"
+              ]
+            }
+          },
+          "nats_server_darwin_arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "build_file_content": "filegroup(\n    name = \"nats-server\",\n    srcs = [\"nats-server-v2.14.3-darwin-arm64/nats-server\"],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "sha256": "e086395457a7a93a440433a446c9f161f917d35c0374640555123e8d8d4b7fe9",
+              "urls": [
+                "https://github.com/nats-io/nats-server/releases/download/v2.14.3/nats-server-v2.14.3-darwin-arm64.tar.gz"
+              ]
+            }
+          },
+          "nats_server_linux_amd64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "build_file_content": "filegroup(\n    name = \"nats-server\",\n    srcs = [\"nats-server-v2.14.3-linux-amd64/nats-server\"],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "sha256": "f3d0c820c749f81d717310fb00d4903919e70e3e66b268bd352a088b9788eb93",
+              "urls": [
+                "https://github.com/nats-io/nats-server/releases/download/v2.14.3/nats-server-v2.14.3-linux-amd64.tar.gz"
+              ]
+            }
+          },
+          "nats_server_linux_arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "build_file_content": "filegroup(\n    name = \"nats-server\",\n    srcs = [\"nats-server-v2.14.3-linux-arm64/nats-server\"],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "sha256": "1759b6a0ddebade9471b7c02891dfaa8c73b526c6f3ce391d4e21ec3eceffab8",
+              "urls": [
+                "https://github.com/nats-io/nats-server/releases/download/v2.14.3/nats-server-v2.14.3-linux-arm64.tar.gz"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "//third_party/valkey:valkey.bzl%valkey": {
+      "general": {
+        "bzlTransitiveDigest": "qwm2QnFj2Tvh+w0wYU84FCl8GaoJFhVl/qrw/eEaG4o=",
+        "usagesDigest": "9kwGv1IECcrkl1poiDrlU0quZYbOLrRAkIP/X99LjTo=",
+        "recordedInputs": [
+          "REPO_MAPPING:,bazel_tools bazel_tools"
+        ],
+        "generatedRepoSpecs": {
+          "valkey_server_linux_amd64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "build_file_content": "filegroup(\n    name = \"valkey-server\",\n    srcs = [\"valkey-8.1.9-jammy-x86_64/bin/valkey-server\"],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "sha256": "2d9282868c39e98ef636abf68b46a2c7741c4fbeeb4a0a1327070dbc4dce194f",
+              "urls": [
+                "https://download.valkey.io/releases/valkey-8.1.9-jammy-x86_64.tar.gz"
+              ]
+            }
+          },
+          "valkey_server_linux_arm64": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "build_file_content": "filegroup(\n    name = \"valkey-server\",\n    srcs = [\"valkey-8.1.9-jammy-arm64/bin/valkey-server\"],\n    visibility = [\"//visibility:public\"],\n)\n",
+              "sha256": "d1b1e99f9e737ab42a720cca25f795c5c62648a1f79bd06f46381deca522f541",
+              "urls": [
+                "https://download.valkey.io/releases/valkey-8.1.9-jammy-arm64.tar.gz"
+              ]
             }
           }
         }
@@ -289,7 +363,7 @@
     "@@rules_buf+//buf:extensions.bzl%buf": {
       "general": {
         "bzlTransitiveDigest": "IjW2he5lp+L/zEfsBKIilXijyHH6PC4Lf3y19MA6G4c=",
-        "usagesDigest": "MUinT5PqT+ZqNZ7Ryu1rTOJ0Z2TrlKrdWTt+rhCnmIU=",
+        "usagesDigest": "jffK16Tuf53mw3bu+BtKci510WTIku2iJJ6FjarAnmI=",
         "recordedInputs": [
           "REPO_MAPPING:rules_buf+,bazel_tools bazel_tools"
         ],
@@ -562,7 +636,7 @@
     "@@toolchains_buildbuddy+//:extensions.bzl%buildbuddy": {
       "general": {
         "bzlTransitiveDigest": "YThiSErJv+jiCHJzZIEyk0yegQRS/x+T/ce309eGTvA=",
-        "usagesDigest": "2eeD3xQ5p9ao3vs4plqFM01xbC2cXCpYeJ6Y7YOdRHo=",
+        "usagesDigest": "15MXTmFoVS7U1MK3nAbOC5uKYbGV4zZ0+y2gYxmDtKU=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "buildbuddy_toolchain": {

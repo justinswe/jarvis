@@ -1,0 +1,11 @@
+# Pinned valkey-server binaries for `bazel run //jarvis -- --valkey-enabled`.
+#
+# Deliberately not baked into //:image the way nats-server is: every upstream build
+# links libsystemd, which the distroless base does not carry, and Valkey is opt-in
+# anyway. The image still expects an external Valkey.
+valkey = use_extension("//third_party/valkey:valkey.bzl", "valkey")
+use_repo(
+    valkey,
+    "valkey_server_linux_amd64",
+    "valkey_server_linux_arm64",
+)
