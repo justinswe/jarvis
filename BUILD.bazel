@@ -1,6 +1,7 @@
+load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
 load("@gazelle//:def.bzl", "gazelle")
 load("@rules_buf//buf:defs.bzl", "buf_format")
-load("@rules_multirun//:defs.bzl", "command", "multirun")
+load("@rules_img//img:layer.bzl", "file_metadata")
 load("//tools/container/go:defs.bzl", "go_container_image")
 
 MODULE_VERSION = module_version()
@@ -15,28 +16,79 @@ gazelle(
     name = "gazelle",
 )
 
-command(
-    name = "ingestor",
-    arguments = [
-        "--port=8080",
-        "--worker-url=http://127.0.0.1:8081/v1/messages:process",
+config_setting(
+    name = "darwin_arm64",
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:macos",
     ],
-    command = "//cmd/ingestor:ingestor",
 )
 
-command(
-    name = "worker",
-    arguments = ["--port=8081"],
-    command = "//cmd/worker:worker",
+config_setting(
+    name = "darwin_x86_64",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:macos",
+    ],
 )
 
-multirun(
-    name = "jarvis",
-    commands = [
-        "ingestor",
-        "worker",
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:linux",
     ],
-    jobs = 0,  # Set to 0 to run in parallel, defaults to sequential
+)
+
+# The image only ever ships linux/amd64; the other platforms exist so local runs
+# and manual live tests can start a real broker on the developer's machine.
+alias(
+    name = "nats_server_host",
+    actual = select({
+        ":darwin_arm64": "@nats_server_darwin_arm64//:nats-server",
+        ":darwin_x86_64": "@nats_server_darwin_amd64//:nats-server",
+        ":linux_arm64": "@nats_server_linux_arm64//:nats-server",
+        "//conditions:default": "@nats_server_linux_amd64//:nats-server",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+native_binary(
+    name = "nats_server",
+    src = ":nats_server_host",
+    out = "nats-server",
+    visibility = ["//visibility:public"],
+)
+
+# Unlike nats-server there is no macOS build to select: upstream publishes none.
+alias(
+    name = "valkey_server_host",
+    actual = select({
+        ":linux_arm64": "@valkey_server_linux_arm64//:valkey-server",
+        "//conditions:default": "@valkey_server_linux_amd64//:valkey-server",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+native_binary(
+    name = "valkey_server",
+    src = ":valkey_server_host",
+    out = "valkey-server",
+    visibility = ["//visibility:public"],
+)
+
+# Empty on macOS, because staging a Linux valkey-server there would be worse than
+# staging nothing: locate() would find it and the supervisor would exec a binary
+# built for the wrong platform. With no runfiles entry, resolution falls through to
+# a valkey-server on PATH instead. See locateValkey in jarvis/locate.go.
+filegroup(
+    name = "valkey_server_runfiles",
+    srcs = select({
+        ":darwin_arm64": [],
+        ":darwin_x86_64": [],
+        "//conditions:default": [":valkey_server"],
+    }),
+    visibility = ["//visibility:public"],
 )
 
 platform(
@@ -50,7 +102,7 @@ platform(
 go_container_image(
     name = "ingestor_image",
     base = "@distroless_base_debian13_nonroot",
-    binary = "//cmd/ingestor",
+    binary = "//ingestor",
     platform = ":linux_amd64",
     registry = "index.docker.io",
     repository = "justinswe/jarvis-ingestor",
@@ -62,7 +114,7 @@ go_container_image(
 go_container_image(
     name = "worker_image",
     base = "@distroless_base_debian13_nonroot",
-    binary = "//cmd/worker",
+    binary = "//worker",
     platform = ":linux_amd64",
     registry = "index.docker.io",
     repository = "justinswe/jarvis-worker",
@@ -74,14 +126,19 @@ go_container_image(
 go_container_image(
     name = "image",
     additional_binaries = {
-        "/app/ingestor": "//cmd/ingestor",
-        "/app/worker": "//cmd/worker",
+        "/app/ingestor": "//ingestor",
+        "/app/worker": "//worker",
     },
     additional_tags = {
         "latest": "latest",
     },
     base = "@distroless_base_debian13_nonroot",
-    binary = "//cmd/jarvis",
+    binary = "//jarvis",
+    file_metadata = {"/app/nats-server": file_metadata(mode = "0755")},
+    files = {
+        "/app/nats-server": "@nats_server_linux_amd64//:nats-server",
+        "/app/nats.conf": "//jarvis:nats.conf",
+    },
     platform = ":linux_amd64",
     registry = "index.docker.io",
     repository = "justinswe/jarvis",

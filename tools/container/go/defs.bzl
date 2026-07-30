@@ -16,6 +16,7 @@ def go_container_image(
         additional_binaries = {},
         additional_tags = {},
         files = {},
+        file_metadata = {},
         visibility = None,
         **kwargs):
     """Creates an image plus runnable load and push targets for a Go binary.
@@ -33,6 +34,8 @@ def go_container_image(
         additional_binaries: Mapping of absolute container paths to additional binary labels.
         additional_tags: Mapping of target suffixes to additional image tags.
         files: Mapping of absolute container paths to source labels.
+        file_metadata: Mapping of absolute container paths in `files` to
+            `file_metadata` values, used to make packaged files executable.
         visibility: Visibility applied to the generated public targets.
         **kwargs: Additional attributes forwarded to `image_from_binary`.
     """
@@ -53,6 +56,7 @@ def go_container_image(
         image_layer(
             name = layer_name,
             srcs = files,
+            file_metadata = file_metadata,
             visibility = ["//visibility:private"],
         )
         layers.append(":" + layer_name)

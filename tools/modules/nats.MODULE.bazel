@@ -1,0 +1,11 @@
+# Pinned nats-server binaries baked into the combined image and used by local runs.
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+
+nats = use_extension("//third_party/nats:nats.bzl", "nats")
+use_repo(
+    nats,
+    "nats_server_darwin_amd64",
+    "nats_server_darwin_arm64",
+    "nats_server_linux_amd64",
+    "nats_server_linux_arm64",
+)

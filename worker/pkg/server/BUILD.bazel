@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "server",
+    srcs = ["server.go"],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/server",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_justinswe_std//errors"],
+)
+
+go_test(
+    name = "server_test",
+    srcs = ["server_test.go"],
+    embed = [":server"],
+    deps = ["@com_github_stretchr_testify//assert"],
+)

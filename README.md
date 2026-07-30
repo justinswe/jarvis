@@ -22,14 +22,15 @@ Jarvis brings sourced current answers, conversation recall, and server-specific 
 
 ## Features
 
-| Capability | What it does |
-| --- | --- |
-| **Provider-agnostic web search** | Uses Serper, Firecrawl, or Tavily and supplies only normalized results to the presentation model. |
-| **Conversation recall** | Includes recent Discord context by default. Optional DynamoDB storage adds persistent history and model-directed search across the current channel or thread. |
-| **Fast by design** | Go services, compact raw-protobuf transport, bounded context windows, and a direct request path keep the runtime small and responsive. |
-| **Provider-neutral models** | Hosts generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM with named profiles, confirmed capabilities, and retryable failover. |
-| **Server customization** | Authorized administrators can manage prompts, response settings, search, history, retention, and delegated access from Discord. |
-| **Accuracy and resilience** | Tracks source availability, permits one bounded recovery call for Search, exposes health checks, and qualifies source-less current answers. |
+| Capability                       | What it does                                                                                                                                                                                                   |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Provider-agnostic web search** | Uses Serper, Firecrawl, or Tavily and supplies only normalized results to the presentation model.                                                                                                              |
+| **Conversation recall**          | Includes recent Discord context by default. Optional DynamoDB storage adds persistent history and model-directed search across the current channel or thread.                                                  |
+| **Fast by design**               | Go services, compact raw-protobuf transport, bounded context windows, and a direct request path keep the runtime small and responsive.                                                                         |
+| **Provider-neutral models**      | Hosts generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM with named profiles, confirmed capabilities, and retryable failover.                                                                |
+| **Server customization**         | Authorized administrators can manage prompts, response settings, search, history, retention, and delegated access from Discord.                                                                                |
+| **Accuracy and resilience**      | Tracks source availability, permits one bounded recovery call for Search, exposes health checks, and qualifies source-less current answers.                                                                    |
+| **Usage metering and limits**    | Optional Valkey integration records per-guild request rates and per-model token use for an external reader, and enforces per-server subscription tiers. One round trip on the request path, and it fails open. |
 
 ## Quick start
 
@@ -71,7 +72,21 @@ Jarvis has no implicit model. The selected primary must advertise both tools and
 
 The container exposes health and readiness checks at `http://localhost:8080/healthz` and `http://localhost:8080/readyz`. The published image currently targets `linux/amd64`.
 
-The combined image runs a small PID 1 supervisor. It starts the worker on loopback port 8081, waits for readiness, and then starts the Discord Gateway ingestor on port 8080. If either process exits, the supervisor stops the other so the container platform can replace the instance cleanly.
+The combined image runs a small PID 1 supervisor over three processes. It starts a bundled NATS server on loopback port 4222, waits for its monitoring endpoint, starts the worker on loopback port 8081, waits for readiness, and then starts the Discord Gateway ingestor on port 8080. If any process exits, the supervisor stops the rest so the container platform can replace the instance cleanly. The supervisor passes no flags to the two Jarvis binaries: it hands each one an environment and lets the `app` package resolve the configuration from it. It does pass `--port` and `--http_port` to nats-server, which override `nats.conf`, so `--nats-port` and `--nats-monitor-port` move the bus and the supervisor together.
+
+On shutdown the worker stops taking new messages and gives the replies already in flight up to `--nats-drain-timeout` (20s) to finish before cancelling them; anything cancelled is left un-acknowledged and redelivered. The supervisor's `--shutdown-timeout` (30s) must stay above that, or it would kill the worker part-way through draining.
+
+The supervisor can also run a Valkey, which is off by default. With `--valkey-enabled` and no `--valkey-address`, or one naming loopback, it starts `valkey-server` after the bus and before the worker, waits for the server to answer `PING`, and passes `VALKEY_ENABLED` and `VALKEY_ADDRESS` down to the worker; it stops with everything else. Persistence is off, since rate-limit counters expire on their own and the guild-configuration cache is read-through.
+
+`--valkey-enabled` is the worker's own switch, so the supervisor shares `VALKEY_ENABLED` with it, and the host in `--valkey-address` decides which server it owns. A host other than loopback says the server already exists: the supervisor starts nothing and leaves that address alone, which is what every container image needs since none ships a `valkey-server`. Loopback, or no address at all, is the server the supervisor runs itself — on the port the address names. Left off entirely, `VALKEY_*` passes through untouched. See [docs/valkey.md](docs/valkey.md#supervised-local-valkey).
+
+| Flag                     | Environment variable   | Default              | Purpose                                                                                                                                |
+| ------------------------ | ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `--valkey-enabled`       | `VALKEY_ENABLED`       | `false`              | Use Valkey. A supervised one is started unless `--valkey-address` names a host other than loopback.                                     |
+| `--valkey-address`       | `VALKEY_ADDRESS`       | empty                | Valkey `host:port` the worker uses. Loopback is supervised on the port it names; any other host is used as-is and nothing is started, which is what every image needs. |
+| `--valkey-port`          | `VALKEY_PORT`          | `6379`               | Port for the supervised Valkey when `--valkey-address` names none.                                                                      |
+| `--valkey-binary`        | `VALKEY_BINARY`        | `/app/valkey-server` | Path to the `valkey-server` binary.                                                                                                    |
+| `--valkey-start-timeout` | `VALKEY_START_TIMEOUT` | `15s`                | Maximum time to wait for Valkey readiness.                                                                                             |
 
 ### Configure primary and fallback models
 
@@ -163,17 +178,19 @@ The resolved primary handles runtime, configuration, reaction, channel-history, 
 
 ### Run from source
 
-Run both services locally with Bazel:
+Run the whole deployment locally with Bazel:
 
 ```sh
 export PROJECT_ID=YOUR_GCP_PROJECT_ID
 export DISCORD_BOT_TOKEN=YOUR_DISCORD_BOT_TOKEN
 export MODEL_PROFILE=primary=vertex:YOUR_TOOL_CAPABLE_VERTEX_MODEL_ID
 export PRIMARY_MODEL_PROFILE=primary
-bazel run //:jarvis
+bazel run //jarvis
 ```
 
-The multirun target starts the ingestor health server on port 8080 and the worker HTTP server on port 8081. Run `bazel run //:ingestor -- --help` or `bazel run //:worker -- --help` to inspect and start either service independently.
+`//jarvis` is the same supervisor the container runs as PID 1, so a local run follows the identical sequence: NATS on port 4222, then the worker health server on port 8081 once NATS answers its monitoring endpoint, then the ingestor health server on port 8080 once the worker reports ready. Stopping it stops all three. Locally it finds NATS and its two siblings in the Bazel runfiles tree; in the image it finds them under `/app`.
+
+Run `bazel run //ingestor -- --help` or `bazel run //worker -- --help` to inspect or start either service on its own; each needs a reachable `NATS_URL`.
 
 ## Search and conversation recall
 
@@ -198,29 +215,33 @@ For a keyless deployment, Jarvis retrieves a short-lived identity token from its
 
 The primary configuration variables are:
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `PROJECT_ID` | With Vertex | Google Cloud project used by Vertex AI. |
-| `DISCORD_BOT_TOKEN` | Yes | Token used for Discord Gateway and REST access. |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Environment-dependent | Path to application credentials for local or container execution. |
-| `GOOGLE_AI_API_KEY` | With Google AI | Restricted Google AI Studio credential used only for `google-ai` profiles. Jarvis does not use `GEMINI_API_KEY` or SDK key auto-discovery. |
-| `LOCATION` | No | Vertex AI location; defaults to `global`. |
-| `DEFAULT_PROMPT` | No | Root-controlled assistant customization that may define its name and personality; empty by default. |
-| `MODEL_PROFILE` | Yes | Comma-separated `name=provider:model-id` declarations. The command flag is also repeatable. Providers are `google-ai`, `vertex`, `openrouter`, and `nvidia-nim`. |
-| `PRIMARY_MODEL_PROFILE` | Yes | Default primary profile name. It must confirm tools and tool choice. |
-| `FALLBACK_MODEL_PROFILE` | No | Default fallback profile name; empty disables fallback. |
-| `REASONING_EFFORT` | No | Default thinking level applied to requests: `low`, `medium`, or `high`; defaults to `low`. Root users may override it per server. |
-| `WEB_SEARCH_PROVIDERS` | No | Ordered comma-separated list of zero to two distinct providers: `serper`, `firecrawl`, or `tavily`. Serper must be first. Empty disables Search globally. |
-| `SERPER_API_KEY` | When Serper is selected | Serper credential; ignored when Serper is unselected. |
-| `FIRECRAWL_API_KEY` | When Firecrawl is selected | Firecrawl credential; ignored when Firecrawl is unselected. |
-| `TAVILY_API_KEY` | When Tavily is selected | Tavily credential; ignored when Tavily is unselected. |
-| `OPENROUTER_API_KEY` | With OpenRouter | API key used only for OpenRouter generation. |
-| `NVIDIA_API_KEY` | With NVIDIA NIM | Bearer key for hosted `integrate.api.nvidia.com`; self-hosted NIM endpoints are not configured here. |
-| `DYNAMODB_ENABLED` | No | Enables persistent history and server configuration; defaults to `false`. |
-| `DYNAMODB_TABLE` | With DynamoDB | Existing DynamoDB table name; defaults to `jarvis`. |
-| `AWS_REGION` | With DynamoDB | DynamoDB region resolved by the AWS SDK. |
-| `AWS_ROLE_ARN` | For federation | AWS role assumed with a Google identity token. |
-| `AWS_WEB_IDENTITY_AUDIENCE` | For federation | Audience placed in the Google identity token. |
+| Variable                         | Required                   | Purpose                                                                                                                                                                   |
+| -------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PROJECT_ID`                     | With Vertex                | Google Cloud project used by Vertex AI.                                                                                                                                   |
+| `DISCORD_BOT_TOKEN`              | Yes                        | Token used for Discord Gateway and REST access.                                                                                                                           |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Environment-dependent      | Path to application credentials for local or container execution.                                                                                                         |
+| `GOOGLE_AI_API_KEY`              | With Google AI             | Restricted Google AI Studio credential used only for `google-ai` profiles. Jarvis does not use `GEMINI_API_KEY` or SDK key auto-discovery.                                |
+| `LOCATION`                       | No                         | Vertex AI location; defaults to `global`.                                                                                                                                 |
+| `DEFAULT_PROMPT`                 | No                         | Root-controlled assistant customization that may define its name and personality; empty by default.                                                                       |
+| `MODEL_PROFILE`                  | Yes                        | Comma-separated `name=provider:model-id` declarations. The command flag is also repeatable. Providers are `google-ai`, `vertex`, `openrouter`, and `nvidia-nim`.          |
+| `PRIMARY_MODEL_PROFILE`          | Yes                        | Default primary profile name. It must confirm tools and tool choice.                                                                                                      |
+| `FALLBACK_MODEL_PROFILE`         | No                         | Default fallback profile name; empty disables fallback.                                                                                                                   |
+| `REASONING_EFFORT`               | No                         | Default thinking level applied to requests: `low`, `medium`, or `high`; defaults to `low`. Root users may override it per server.                                         |
+| `WEB_SEARCH_PROVIDERS`           | No                         | Ordered comma-separated list of zero to two distinct providers: `serper`, `firecrawl`, or `tavily`. Serper must be first. Empty disables Search globally.                 |
+| `SERPER_API_KEY`                 | When Serper is selected    | Serper credential; ignored when Serper is unselected.                                                                                                                     |
+| `FIRECRAWL_API_KEY`              | When Firecrawl is selected | Firecrawl credential; ignored when Firecrawl is unselected.                                                                                                               |
+| `TAVILY_API_KEY`                 | When Tavily is selected    | Tavily credential; ignored when Tavily is unselected.                                                                                                                     |
+| `OPENROUTER_API_KEY`             | With OpenRouter            | API key used only for OpenRouter generation.                                                                                                                              |
+| `NVIDIA_API_KEY`                 | With NVIDIA NIM            | Bearer key for hosted `integrate.api.nvidia.com`; self-hosted NIM endpoints are not configured here.                                                                      |
+| `VALKEY_ENABLED`                 | No                         | Enables per-guild usage metering, subscription rate limits, and (with DynamoDB) the guild-configuration cache; defaults to `false`. See [docs/valkey.md](docs/valkey.md). |
+| `VALKEY_ADDRESS`                 | With Valkey                | Comma-separated `host:port` addresses.                                                                                                                                    |
+| `GUILD_TIER`                     | No                         | Subscription tier limits as `name=requests-per-second:burst:tokens-per-hour`. Declaring none records usage without enforcing limits.                                      |
+| `DEFAULT_GUILD_TIER`             | No                         | Tier applied to servers with no assigned tier; defaults to `free`.                                                                                                        |
+| `DYNAMODB_ENABLED`               | No                         | Enables persistent history and server configuration; defaults to `false`.                                                                                                 |
+| `DYNAMODB_TABLE`                 | With DynamoDB              | Existing DynamoDB table name; defaults to `jarvis`.                                                                                                                       |
+| `AWS_REGION`                     | With DynamoDB              | DynamoDB region resolved by the AWS SDK.                                                                                                                                  |
+| `AWS_ROLE_ARN`                   | For federation             | AWS role assumed with a Google identity token.                                                                                                                            |
+| `AWS_WEB_IDENTITY_AUDIENCE`      | For federation             | Audience placed in the Google identity token.                                                                                                                             |
 
 Every non-repeatable command flag is also available as an uppercase environment variable with hyphens replaced by underscores. For example, `--message-retention-days` maps to `MESSAGE_RETENTION_DAYS`. Use `--help` to see all options.
 
@@ -258,7 +279,8 @@ Credentials remain provider-wide: configure `GOOGLE_AI_API_KEY`, `OPENROUTER_API
 Jarvis separates the stateful Discord connection from independently deployable message processing:
 
 ```text
-Discord Gateway -> ingestor -> HTTP/1.1 raw protobuf -> worker
+Discord Gateway -> ingestor -> NATS JetStream -> worker
+                              jarvis.discord.v1.messages
                                                        |-> Discord REST
                                                        |-> Google AI Gemini Developer API (generation and tools)
                                                        |-> Vertex AI (generation and tools)
@@ -268,9 +290,15 @@ Discord Gateway -> ingestor -> HTTP/1.1 raw protobuf -> worker
                                                        `-> DynamoDB (optional)
 ```
 
-The ingestor owns the Discord Gateway connection and normalizes each message into the versioned protobuf contract at `api/jarvis/discord/v1/worker.proto`. It synchronously sends those bytes to the configured `WORKER_URL`; it does not manage the worker process.
+The two services follow Cloud Pub/Sub push semantics.
 
-The worker exposes `POST /v1/messages:process` with the `application/x-protobuf` content type and returns `204 No Content` after processing completes. The contract is compatible with an unwrapped Pub/Sub push payload, allowing the transport to change without changing the worker handler.
+The ingestor owns the Discord Gateway connection and normalizes each message into the versioned protobuf contract at `api/jarvis/discord/v1/worker.proto`. It publishes those bytes to the `jarvis.discord.v1.messages` subject on the configured `NATS_URL` and returns as soon as the broker has stored the message. It never waits for processing, so a slow or restarting worker cannot stall Discord event handling.
+
+The worker consumes the `JARVIS_DISCORD` stream through the `jarvis-worker` durable consumer, and provisions both on startup. A message is held un-acknowledged for as long as the worker is working on it — the worker resets the redelivery timer every `NATS_ACK_WAIT`/2 while processing — and is acknowledged only once processing completes. A worker that crashes mid-message therefore has that message redelivered rather than losing it. Processing failures are negatively acknowledged and retried up to `NATS_MAX_DELIVER` times; messages that redelivery could never fix, such as an unparseable payload, are terminated instead of retried. Each worker holds at most `NATS_MAX_ACK_PENDING` messages at once and processes them concurrently.
+
+Because the consumer is durable and shared, running more than one worker replica load-balances the stream across them with no further coordination.
+
+The worker owns provisioning, so the stream must exist before the ingestor can publish. The combined image guarantees this by starting the ingestor only after the worker reports ready. In a split deployment where the ingestor starts first, its publishes are logged and dropped until a worker has provisioned the stream.
 
 Build and load the combined or individual service images locally:
 
@@ -282,8 +310,12 @@ bazel run //:worker_image_load
 
 Only the combined `justinswe/jarvis` image is currently published. Publication of `justinswe/jarvis-ingestor` and `justinswe/jarvis-worker` is intentionally deferred.
 
+The combined image bakes in a pinned upstream `nats-server` binary as its own layer; the individual service images do not, and expect `NATS_URL` to point at an external cluster. The bundled broker keeps JetStream state under `/tmp/jetstream`, which is ephemeral: it gives redelivery when the worker crashes during processing, but does not survive a container restart. Durable delivery across restarts is a property of an external NATS cluster in the split deployment.
+
+No image bakes in `valkey-server`, including the combined one: every upstream Valkey build links `libsystemd`, which the distroless base does not carry. Every image therefore expects `VALKEY_ADDRESS` to point at a Valkey on another host, and because the supervisor shares `VALKEY_ENABLED` with the worker, enabling it without such an address fails at startup rather than silently metering nothing. The vendored binary under `third_party/valkey` exists for local runs, and upstream publishes it for Linux only — on macOS `brew install valkey` puts one on `PATH`, which is where the supervisor looks when Bazel has staged nothing.
+
 > [!WARNING]
-> The worker endpoint has no application-level authentication. The combined image binds it to loopback. A standalone worker must remain behind an internal VPC or another trusted network boundary and must not be exposed directly to the public internet.
+> The NATS bus has no application-level authentication. The combined image binds its bundled broker to loopback, so only that container can reach it. A split deployment must keep its NATS cluster behind an internal VPC or another trusted network boundary, must not expose it directly to the public internet, and should enable NATS authentication and TLS.
 
 Direct HTTP publishing makes one synchronous attempt because processing has Discord side effects. Durable retries and deduplication are deferred until Pub/Sub is introduced.
 

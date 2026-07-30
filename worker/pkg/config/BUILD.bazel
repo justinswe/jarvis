@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "config",
+    srcs = [
+        "cache.go",
+        "config.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/config",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//worker/pkg/cache",
+        "//worker/pkg/llm",
+        "@com_github_justinswe_std//errors",
+    ],
+)
+
+go_test(
+    name = "config_test",
+    srcs = [
+        "cache_test.go",
+        "config_test.go",
+    ],
+    embed = [":config"],
+    deps = [
+        "//worker/pkg/cache",
+        "//worker/pkg/llm",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

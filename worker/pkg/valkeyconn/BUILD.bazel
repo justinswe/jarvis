@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "valkeyconn",
+    srcs = ["valkeyconn.go"],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/valkeyconn",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_justinswe_std//errors",
+        "@com_github_valkey_io_valkey_go//:valkey-go",
+    ],
+)

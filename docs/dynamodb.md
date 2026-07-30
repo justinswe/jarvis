@@ -78,11 +78,12 @@ Usable messages returned alongside a DynamoDB or decode error are supplied to th
 | `reasoning_effort` | String | Root-selected thinking level: `low`, `medium`, or `high`. Rows written before this setting existed load as `medium`. |
 | `primary_model_profile`, `fallback_model_profile` | String | Root-selected model profile names. An empty fallback disables host fallback. |
 | `admin_user_ids` | String set | Delegated Jarvis configuration administrators. |
+| `tier` | String | Optional subscription tier governing Valkey usage limits. Absent means the deployment default tier. Root-only, and deliberately outside the settings patch. See [Valkey](valkey.md). |
 | `version` | Number | Optimistic concurrency version. |
 | `updated_at` | Number | Unix milliseconds. |
 | `updated_by_user_id` | String | Discord actor ID for the latest update. |
 
-Missing guild configuration items materialize from the worker's validated defaults on their first mutation. Schema-version 1 items inherit the deployment's primary and fallback profile defaults when read and become version 2 on their next write; no bulk migration is required. Existing items without `guild_prompt` load it as empty. Legacy `temperature` attributes are ignored during reads and disappear on the next full configuration write. Updates use conditional writes and bounded conflict retries.
+Missing guild configuration items materialize from the worker's validated defaults on their first mutation. Schema-version 1 items inherit the deployment's primary and fallback profile defaults when read and become version 2 on their next write; no bulk migration is required. Existing items without `guild_prompt` load it as empty. Existing items without `tier` load it as empty, which means the default tier; adding the attribute did not require a schema-version bump. Legacy `temperature` attributes are ignored during reads and disappear on the next full configuration write. Updates use conditional writes and bounded conflict retries.
 
 Jarvis does not scan stored guild selectors during startup. If a later deployment removes a selected profile, request processing logs the stale alias and uses the validated deployment defaults for that request. Root configuration reads continue to show the stored stale value so an operator can repair it.
 
