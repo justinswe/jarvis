@@ -85,7 +85,10 @@ func TestNeutralOrchestrationHostsOrdinaryGenerationAcrossProviders(t *testing.T
 	}
 }
 
-func TestNeutralOrchestrationHelloSkipsToolRounds(t *testing.T) {
+// TestNeutralOrchestrationHelloAnswersInOneRoundWithToolsOffered pins the agent-first
+// contract: every tool (including search_web) is offered ungated, and the model stops
+// the loop by answering directly.
+func TestNeutralOrchestrationHelloAnswersInOneRoundWithToolsOffered(t *testing.T) {
 	primary := &scriptedHost{responses: []llm.Response{neutralText("hello")}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "gemma"}
 	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": primary}, llm.Selection{Primary: "primary"})
@@ -98,24 +101,22 @@ func TestNeutralOrchestrationHelloSkipsToolRounds(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "hello", got.Text)
-	assert.Len(t, primary.requests, 1)
-	assert.Empty(t, primary.requests[0].Tools)
+	require.Len(t, primary.requests, 1)
+	assert.Len(t, primary.requests[0].Tools, 2, "the runtime tool and search_web are both offered ungated")
+	assert.Equal(t, llm.ToolChoiceAutomatic, primary.requests[0].ToolChoice.Mode)
 	assert.Equal(t, llm.ReasoningLow, primary.requests[0].ReasoningEffort)
+	assert.Contains(t, primary.requests[0].System, "# Tools")
 	assert.NotContains(t, primary.requests[0].System, "Call get_runtime_context")
-	assert.Contains(t, primary.requests[0].System, "No functions are available in this phase")
-	assert.Empty(t, searcher.queries)
+	assert.Empty(t, searcher.queries, "the model answered without researching a greeting")
 }
 
 func TestNeutralOrchestrationConfigurationRequestBypassesSearch(t *testing.T) {
-	toolHost := &scriptedHost{responses: []llm.Response{
+	primary := &scriptedHost{responses: []llm.Response{
 		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "configuration", Name: "update_server_configuration", Arguments: map[string]any{"web_search_enabled": false}}}}},
-		neutralText("configuration tool phase complete"),
+		neutralText("Web search is now disabled."),
 	}}
-	primary := &scriptedHost{responses: []llm.Response{neutralText("Web search is now disabled.")}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
-	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": phaseScriptedHost{
-		orchestration: toolHost, presentation: primary,
-	}}, llm.Selection{Primary: "primary"})
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": primary}, llm.Selection{Primary: "primary"})
 	searcher := &fakeWebSearcher{provider: websearch.ProviderSerper, responses: []websearch.Response{searchResponse("unused.example")}}
 	handler.webSearchers = []webSearcher{searcher}
 	executions := 0
@@ -135,6 +136,9 @@ func TestNeutralOrchestrationConfigurationRequestBypassesSearch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Web search is now disabled.", got.Text)
 	assert.Equal(t, 1, executions)
+	require.Len(t, primary.requests, 2)
+	require.Len(t, primary.requests[1].Messages, 3, "the second round continues the native conversation")
+	require.NotNil(t, primary.requests[1].Messages[2].ToolResult)
 	assert.Empty(t, searcher.queries)
 }
 
@@ -162,17 +166,15 @@ func TestNeutralOrchestrationReportsAuthoritativeModelIdentity(t *testing.T) {
 }
 
 func TestNeutralOrchestrationCombinedVersionAndModelUsesRuntimeOnce(t *testing.T) {
-	toolHost := &scriptedHost{responses: []llm.Response{{
-		Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "runtime", Name: runtimeContextFunctionName, Arguments: map[string]any{}}}},
-	}}}
-	primary := &scriptedHost{responses: []llm.Response{{
-		Message:  llm.TextMessage(llm.RoleAssistant, "Jarvis version v0.6.0."),
-		Metadata: llm.ResponseMetadata{ActualModelID: "actual/model", UpstreamProvider: "Upstream"},
-	}}}
+	primary := &scriptedHost{responses: []llm.Response{
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "runtime", Name: runtimeContextFunctionName, Arguments: map[string]any{}}}}},
+		{
+			Message:  llm.TextMessage(llm.RoleAssistant, "Jarvis version v0.6.0."),
+			Metadata: llm.ResponseMetadata{ActualModelID: "actual/model", UpstreamProvider: "Upstream"},
+		},
+	}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "configured/model"}
-	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": phaseScriptedHost{
-		orchestration: toolHost, presentation: primary,
-	}}, llm.Selection{Primary: "primary"})
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": primary}, llm.Selection{Primary: "primary"})
 
 	got, err := handler.Generate(context.Background(), GenerateRequest{
 		Messages: []Message{{Role: "user", Content: "Hey, what version and model are you?"}},
@@ -183,8 +185,8 @@ func TestNeutralOrchestrationCombinedVersionAndModelUsesRuntimeOnce(t *testing.T
 	assert.Contains(t, got.Text, "v0.6.0")
 	assert.Contains(t, got.Text, "configured/model")
 	assert.Contains(t, got.Text, "actual/model")
-	assert.Len(t, toolHost.requests, 1)
-	assert.Len(t, primary.requests, 1)
+	require.Len(t, primary.requests, 2)
+	assert.Equal(t, llm.ToolChoiceFunction, primary.requests[0].ToolChoice.Mode, "the classifier still forces the runtime tool")
 }
 
 func TestNeutralOrchestrationRepairsNemotronStylePseudoToolText(t *testing.T) {
@@ -271,19 +273,19 @@ func TestNeutralOrchestrationRejectsBlockedFinishWithText(t *testing.T) {
 }
 
 func TestNeutralOrchestrationDoesNotReplayMutationDuringSemanticRepairAndFallback(t *testing.T) {
-	toolHost := &scriptedHost{responses: []llm.Response{
-		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "mutation", Name: "update_server_configuration", Arguments: map[string]any{"value": "x"}}}}},
-		neutralText("mutation planned"),
-	}}
 	pseudo := neutralText(`{"tool":"update_server_configuration","arguments":{"value":"x"}}`)
-	primary := &scriptedHost{responses: []llm.Response{pseudo, pseudo}}
+	primary := &scriptedHost{responses: []llm.Response{
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "mutation", Name: "update_server_configuration", Arguments: map[string]any{"value": "x"}}}}},
+		pseudo, // the final answer degenerates into pseudo tool syntax
+		pseudo, // and the repair round repeats it
+	}}
 	fallback := &scriptedHost{responses: []llm.Response{neutralText("The configuration was updated once.")}}
 	profiles := []llm.Profile{
 		{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "nemotron"},
 		{Name: "fallback", Provider: llm.ProviderVertex, ModelID: "gemini"},
 	}
 	handler := neutralHandler(t, profiles, map[string]llm.Host{
-		"primary": phaseScriptedHost{orchestration: toolHost, presentation: primary}, "fallback": fallback,
+		"primary": primary, "fallback": fallback,
 	}, llm.Selection{Primary: "primary", Fallback: "fallback"})
 	executions := 0
 	mutation := fakeTool{
@@ -303,23 +305,13 @@ func TestNeutralOrchestrationDoesNotReplayMutationDuringSemanticRepairAndFallbac
 	require.NoError(t, err)
 	assert.Equal(t, "The configuration was updated once.", got.Text)
 	assert.Equal(t, 1, executions)
-	assert.Len(t, toolHost.requests, 2)
-	assert.Len(t, primary.requests, 2)
-	assert.Len(t, fallback.requests, 1)
+	assert.Len(t, primary.requests, 3)
+	require.Len(t, fallback.requests, 1)
 	assert.Empty(t, fallback.requests[0].Tools)
+	assert.Contains(t, fallback.requests[0].Messages[1].Text(), "application_tool_context",
+		"the fallback provider gets the portable envelope, not native tool history")
 }
 
-func TestNeutralToolPhaseClassifierCoversConfigurationAndReactionOnly(t *testing.T) {
-	tool := testTool("tool", func(context.Context, map[string]any) (any, error) { return nil, nil })
-	for _, request := range []string{"Disable web search.", "Show the server settings.", "React to this with a thumbs up."} {
-		assert.True(t, shouldRunNeutralToolPhase(GenerateRequest{
-			Messages: []Message{{Role: "user", Content: request}}, Tools: []FunctionTool{tool},
-		}, AccuracyPolicy{}), request)
-	}
-	assert.False(t, shouldRunNeutralToolPhase(GenerateRequest{
-		Messages: []Message{{Role: "user", Content: "hello"}}, Tools: []FunctionTool{tool},
-	}, AccuracyPolicy{}))
-}
 
 func TestNeutralOrchestrationUsesPrimaryForToolsBeforePresentation(t *testing.T) {
 	for _, provider := range []llm.Provider{llm.ProviderGoogleAI, llm.ProviderVertex, llm.ProviderOpenRouter} {
@@ -349,8 +341,9 @@ func TestNeutralOrchestrationUsesPrimaryForToolsBeforePresentation(t *testing.T)
 			assert.Len(t, host.requests[0].Tools, 9)
 			assert.Equal(t, llm.ToolChoiceFunction, host.requests[0].ToolChoice.Mode)
 			assert.Equal(t, runtimeContextFunctionName, host.requests[0].ToolChoice.FunctionName)
-			assert.Empty(t, host.requests[1].Tools)
-			assert.Contains(t, host.requests[1].Messages[1].Text(), "application_tool_context")
+			assert.Len(t, host.requests[1].Tools, 9, "the loop keeps every tool on offer after the forced round")
+			require.Len(t, host.requests[1].Messages, 3)
+			require.NotNil(t, host.requests[1].Messages[2].ToolResult, "the forced call's result stays in the native conversation")
 		})
 	}
 }
@@ -377,19 +370,18 @@ func TestNeutralOrchestrationPreservesImagesForPrimaryToolRounds(t *testing.T) {
 	require.Len(t, host.requests[0].Messages, 1)
 	require.Len(t, host.requests[0].Messages[0].Parts, 2)
 	require.NotNil(t, host.requests[0].Messages[0].Parts[0].Image)
-	assert.Empty(t, host.requests[1].Tools)
+	require.Len(t, host.requests[1].Messages, 3)
+	require.NotNil(t, host.requests[1].Messages[0].Parts[0].Image, "the image survives into the loop rounds")
 }
 
 func TestNeutralOrchestrationForcesRequiredFunctionsSequentially(t *testing.T) {
 	toolHost := &scriptedHost{responses: []llm.Response{
 		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1", Name: "first"}}}},
 		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "2", Name: "second"}}}},
+		neutralText("both results used"),
 	}}
-	presentation := &scriptedHost{responses: []llm.Response{neutralText("both results used")}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
-	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": phaseScriptedHost{
-		orchestration: toolHost, presentation: presentation,
-	}}, llm.Selection{Primary: "primary"})
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": toolHost}, llm.Selection{Primary: "primary"})
 	executions := []string(nil)
 	tools := []FunctionTool{
 		testTool("first", func(context.Context, map[string]any) (any, error) {
@@ -410,19 +402,21 @@ func TestNeutralOrchestrationForcesRequiredFunctionsSequentially(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "both results used", got.Text)
 	assert.Equal(t, []string{"first", "second"}, executions)
-	require.Len(t, toolHost.requests, 2)
+	require.Len(t, toolHost.requests, 3)
 	assert.Equal(t, "first", toolHost.requests[0].ToolChoice.FunctionName)
 	assert.Equal(t, "second", toolHost.requests[1].ToolChoice.FunctionName)
 	assert.Len(t, toolHost.requests[1].Messages, 3)
+	assert.Equal(t, llm.ToolChoiceAutomatic, toolHost.requests[2].ToolChoice.Mode)
+	assert.Len(t, toolHost.requests[2].Messages, 5, "both forced results stay in the loop conversation")
 }
 
 func TestNeutralOrchestrationCarriesMutationAcrossRetryableFallbackWithoutReplay(t *testing.T) {
-	toolHost := &scriptedHost{responses: []llm.Response{
-		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1", Name: "mutate", Arguments: map[string]any{"value": "x"}}}}},
-		neutralText("configuration mutation planned"),
-	}}
 	primary := &scriptedHost{
-		errors: []error{&llm.Error{Kind: llm.ErrorService, Provider: llm.ProviderGoogleAI, Err: errors.New("unavailable")}},
+		responses: []llm.Response{
+			{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1", Name: "mutate", Arguments: map[string]any{"value": "x"}}}}},
+			{},
+		},
+		errors: []error{nil, &llm.Error{Kind: llm.ErrorService, Provider: llm.ProviderGoogleAI, Err: errors.New("unavailable")}},
 	}
 	fallback := &scriptedHost{responses: []llm.Response{neutralText("mutation completed")}}
 	profiles := []llm.Profile{
@@ -430,7 +424,7 @@ func TestNeutralOrchestrationCarriesMutationAcrossRetryableFallbackWithoutReplay
 		{Name: "fallback", Provider: llm.ProviderVertex, ModelID: "b"},
 	}
 	handler := neutralHandler(t, profiles, map[string]llm.Host{
-		"primary": phaseScriptedHost{orchestration: toolHost, presentation: primary}, "fallback": fallback,
+		"primary": primary, "fallback": fallback,
 	}, llm.Selection{Primary: "primary", Fallback: "fallback"})
 	executions := 0
 	tool := fakeTool{
@@ -445,9 +439,8 @@ func TestNeutralOrchestrationCarriesMutationAcrossRetryableFallbackWithoutReplay
 	require.NoError(t, err)
 	assert.Equal(t, "mutation completed", got.Text)
 	assert.Equal(t, 1, executions)
-	assert.Len(t, toolHost.requests, 2)
+	assert.Len(t, primary.requests, 2)
 	require.Len(t, fallback.requests, 1)
-	assert.Empty(t, primary.requests[0].Tools)
 	assert.Empty(t, fallback.requests[0].Tools)
 	assert.Contains(t, fallback.requests[0].Messages[1].Text(), "application_tool_context")
 }
@@ -463,13 +456,10 @@ func TestNeutralOrchestrationAllowsSameMutationWithDifferentArguments(t *testing
 			{ID: "1", Name: "mutate", Arguments: map[string]any{"value": "one"}},
 			{ID: "2", Name: "mutate", Arguments: map[string]any{"value": "two"}},
 		}}},
-		neutralText("tool phase complete"),
+		neutralText("Both changes completed."),
 	}}
-	presentation := &scriptedHost{responses: []llm.Response{neutralText("Both changes completed.")}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
-	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": phaseScriptedHost{
-		orchestration: toolHost, presentation: presentation,
-	}}, llm.Selection{Primary: "primary"})
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": toolHost}, llm.Selection{Primary: "primary"})
 	var values []any
 	tool := fakeTool{
 		name: "mutate", decl: &llm.ToolDefinition{Name: "mutate", InputSchema: llm.JSONSchema{"type": "object"}, Effect: llm.ToolEffectMutation},
@@ -495,12 +485,10 @@ func TestNeutralOrchestrationRetriesFailedIdenticalMutation(t *testing.T) {
 	toolHost := &scriptedHost{responses: []llm.Response{
 		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1", Name: "mutate", Arguments: map[string]any{"value": "one"}}}}},
 		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "2", Name: "mutate", Arguments: map[string]any{"value": "one"}}}}},
+		neutralText("The change completed on retry."),
 	}}
-	presentation := &scriptedHost{responses: []llm.Response{neutralText("The change completed on retry.")}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
-	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": phaseScriptedHost{
-		orchestration: toolHost, presentation: presentation,
-	}}, llm.Selection{Primary: "primary"})
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": toolHost}, llm.Selection{Primary: "primary"})
 	executions := 0
 	tool := fakeTool{
 		name: "mutate", decl: &llm.ToolDefinition{Name: "mutate", InputSchema: llm.JSONSchema{"type": "object"}, Effect: llm.ToolEffectMutation},
@@ -528,13 +516,10 @@ func TestNeutralOrchestrationExecutesSuccessfulDuplicateMutationOnce(t *testing.
 			{ID: "provider-call-1", Name: "mutate", Arguments: map[string]any{"nested": map[string]any{"b": 2, "a": 1}}},
 			{ID: "provider-call-2", Name: "mutate", Arguments: map[string]any{"nested": map[string]any{"a": 1, "b": 2}}},
 		}}},
-		neutralText("tool phase complete"),
+		neutralText("The change completed once."),
 	}}
-	presentation := &scriptedHost{responses: []llm.Response{neutralText("The change completed once.")}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
-	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": phaseScriptedHost{
-		orchestration: toolHost, presentation: presentation,
-	}}, llm.Selection{Primary: "primary"})
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": toolHost}, llm.Selection{Primary: "primary"})
 	executions := 0
 	tool := fakeTool{
 		name: "mutate", decl: &llm.ToolDefinition{Name: "mutate", InputSchema: llm.JSONSchema{"type": "object"}, Effect: llm.ToolEffectMutation},
@@ -579,7 +564,6 @@ func TestNeutralOrchestrationNeverReportsFailedMutationAsSuccessful(t *testing.T
 func TestNeutralOrchestrationKeepsToolSchemasDuringSameHostContinuation(t *testing.T) {
 	host := &scriptedHost{responses: []llm.Response{
 		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1", Name: "mutate", Arguments: map[string]any{"value": "x"}}}}},
-		neutralText("tool phase complete"),
 		neutralText("mutation completed"),
 	}}
 	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "model", Capabilities: llm.Capabilities{Tools: true, ToolChoice: true}}
@@ -602,12 +586,11 @@ func TestNeutralOrchestrationKeepsToolSchemasDuringSameHostContinuation(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, "mutation completed", got.Text)
 	assert.Equal(t, 1, executions)
-	require.Len(t, host.requests, 3)
+	require.Len(t, host.requests, 2)
 	assert.Len(t, host.requests[0].Tools, 1)
 	assert.Len(t, host.requests[1].Tools, 1, "schemas must remain stable across OpenAI-compatible tool rounds")
 	require.Len(t, host.requests[1].Messages, 3)
 	require.NotNil(t, host.requests[1].Messages[2].ToolResult)
-	assert.Empty(t, host.requests[2].Tools, "presentation must not receive function schemas")
 }
 
 func TestNeutralOrchestrationDoesNotUseFailureFallbackAsCapabilityRouter(t *testing.T) {
@@ -982,7 +965,7 @@ func TestOptionalSearchRecovers(t *testing.T) {
 			}
 			require.Len(t, host.requests, 2)
 			assert.Len(t, host.requests[0].Tools, 1)
-			assert.Empty(t, host.requests[1].Tools)
+			assert.Len(t, host.requests[1].Tools, 1, "search_web stays on offer after being served")
 			require.Len(t, observed, 1)
 			assert.Equal(t, 1, observed[0].searchInvocationCount)
 			assert.Equal(t, 2, observed[0].searchProviderCalls)
@@ -1311,4 +1294,151 @@ func TestSearchRecoveryDoesNotReplayCompletedMutation(t *testing.T) {
 	assert.Equal(t, 1, observed[0].searchInvocationCount)
 	assert.Equal(t, 2, observed[0].searchProviderCalls)
 	assert.Equal(t, 2, observed[0].modelCalls)
+}
+
+// mutationTestTool is a state-changing tool, the kind that must not be reachable from
+// injected tool output.
+func mutationTestTool(name string, execute func(context.Context, map[string]any) (any, error)) fakeTool {
+	return fakeTool{
+		name: name,
+		decl: &llm.ToolDefinition{Name: name, InputSchema: llm.JSONSchema{"type": "object"}, Effect: llm.ToolEffectMutation},
+		exec: execute,
+	}
+}
+
+// TestMutationToolsAreWithheldUntilTheUserAsksForOne is the prompt-injection guard: a
+// third-party MCP result or a search snippet shares the tool list with the configuration
+// mutators, so the offer must be decided by the user's own request and nothing else.
+func TestMutationToolsAreWithheldUntilTheUserAsksForOne(t *testing.T) {
+	tools := []FunctionTool{
+		testTool(runtimeContextFunctionName, func(context.Context, map[string]any) (any, error) { return nil, nil }),
+		mutationTestTool(messageReactionFunctionName, func(context.Context, map[string]any) (any, error) { return "reacted", nil }),
+		mutationTestTool("add_mcp_server", func(context.Context, map[string]any) (any, error) { return "attached", nil }),
+	}
+	offeredNames := func(t *testing.T, request string) []string {
+		t.Helper()
+		host := &scriptedHost{responses: []llm.Response{neutralText("done")}}
+		profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
+		handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": host}, llm.Selection{Primary: "primary"})
+		_, err := handler.Generate(context.Background(), GenerateRequest{
+			Messages: []Message{{Role: "user", Content: request}},
+			Tools:    tools,
+			Config:   &RequestConfig{MaxOutputTokens: 256},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, host.requests)
+		names := make([]string, 0, len(host.requests[0].Tools))
+		for _, tool := range host.requests[0].Tools {
+			names = append(names, tool.Name)
+		}
+		return names
+	}
+
+	ordinary := offeredNames(t, "summarize this article for me")
+	assert.Contains(t, ordinary, runtimeContextFunctionName, "read-only tools stay ungated")
+	assert.Contains(t, ordinary, messageReactionFunctionName, "reacting to the message being answered needs no gate")
+	assert.NotContains(t, ordinary, "add_mcp_server", "an ordinary request never sees an administrative schema")
+
+	asked := offeredNames(t, "please add an mcp server named helper to this guild config")
+	assert.Contains(t, asked, "add_mcp_server", "the user's own request opens the offer")
+
+	// Asking for a reaction must not open the administrative surface as a side effect.
+	reacting := offeredNames(t, "react to that message with a thumbs up")
+	assert.Contains(t, reacting, messageReactionFunctionName)
+	assert.NotContains(t, reacting, "add_mcp_server", "reaction intent is not configuration intent")
+
+	// The phrasings a regex would miss reach the tool anyway, because it is never gated.
+	for _, phrasing := range []string{"give this a thumbs up", "👍 that", "throw a party emoji on it"} {
+		assert.Contains(t, offeredNames(t, phrasing), messageReactionFunctionName, phrasing)
+	}
+}
+
+// TestAttachedMCPToolsStayOfferedRegardlessOfIntent guards the per-guild MCP feature
+// against its own protection: remote tools carry the mutation effect whenever their server
+// declared no readOnlyHint, so gating on effect alone would withhold nearly all of them.
+func TestAttachedMCPToolsStayOfferedRegardlessOfIntent(t *testing.T) {
+	host := &scriptedHost{responses: []llm.Response{neutralText("done")}}
+	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": host}, llm.Selection{Primary: "primary"})
+
+	_, err := handler.Generate(context.Background(), GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "what does the tracker say about issue 12"}},
+		Tools: []FunctionTool{
+			mutationTestTool("mcp_tracker_lookup_issue", func(context.Context, map[string]any) (any, error) { return "open", nil }),
+			mutationTestTool("add_mcp_server", func(context.Context, map[string]any) (any, error) { return "attached", nil }),
+		},
+		Config: &RequestConfig{MaxOutputTokens: 256},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, host.requests)
+	names := make([]string, 0, len(host.requests[0].Tools))
+	for _, tool := range host.requests[0].Tools {
+		names = append(names, tool.Name)
+	}
+	assert.Contains(t, names, "mcp_tracker_lookup_issue", "a guild's attached tools remain usable without configuration intent")
+	assert.NotContains(t, names, "add_mcp_server", "Jarvis's own administrative tools stay gated")
+}
+
+// TestFinalRoundKeepsDeclarationsWhileForbiddingCalls guards a provider contract: Gemini
+// rejects a conversation containing function calls when the declarations are absent, so the
+// forced-answer round must disable the choice rather than drop the schemas.
+func TestFinalRoundKeepsDeclarationsWhileForbiddingCalls(t *testing.T) {
+	host := &scriptedHost{responses: []llm.Response{
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "a", Name: "look", Arguments: map[string]any{}}}}},
+		neutralText("final answer"),
+	}}
+	profile := llm.Profile{Name: "primary", Provider: llm.ProviderVertex, ModelID: "gemini"}
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": host}, llm.Selection{Primary: "primary"})
+	handler.cfg.MaxToolRounds = 1
+
+	got, err := handler.Generate(context.Background(), GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "look something up"}},
+		Tools:    []FunctionTool{testTool("look", func(context.Context, map[string]any) (any, error) { return "seen", nil })},
+		Config:   &RequestConfig{MaxOutputTokens: 256},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "final answer", got.Text)
+
+	require.Len(t, host.requests, 2, "one tool-bearing round plus the forced answer")
+	assert.Equal(t, llm.ToolChoiceAutomatic, host.requests[0].ToolChoice.Mode, "--agent-max-tool-rounds=1 still grants a tool round")
+	assert.NotEmpty(t, host.requests[0].Tools)
+	assert.NotEmpty(t, host.requests[1].Tools, "declarations accompany the function-call history")
+	assert.Equal(t, llm.ToolChoiceDisabled, host.requests[1].ToolChoice.Mode, "but no further call is permitted")
+}
+
+// TestMutationReportIgnoresAFailureACorrectedRetryRecovered keeps the model's own answer
+// when it fixed its arguments and the change landed.
+func TestMutationReportIgnoresAFailureACorrectedRetryRecovered(t *testing.T) {
+	records := []portableToolRecord{
+		{Name: "set_server_configuration", Status: "failed", Effect: llm.ToolEffectMutation, LogicalCall: "set_server_configuration\x00{\"context_window\":9000}"},
+		{Name: "set_server_configuration", Status: "success", Effect: llm.ToolEffectMutation, LogicalCall: "set_server_configuration\x00{\"context_window\":40}"},
+	}
+	succeeded, failed, _ := mutationOutcomes(records)
+	assert.Equal(t, 1, succeeded)
+	assert.Zero(t, failed, "the corrected retry landed, so nothing failed overall")
+	assert.Empty(t, failedToolReport(records), "no tool-failure report contradicts the answer")
+	assert.Equal(t, "the change is described", safeMutationPresentation("the change is described", records),
+		"the model's explanation survives instead of being replaced by a canned report")
+}
+
+// TestRetryableLoopFailureAnswersOnTheSameHostWithoutAFallback covers the single-profile
+// deployment: one transient error must not cost the whole reply.
+func TestRetryableLoopFailureAnswersOnTheSameHostWithoutAFallback(t *testing.T) {
+	transient := &llm.Error{Kind: llm.ErrorRateLimit, Provider: llm.ProviderOpenRouter, ErrorType: "rate_limited", Scope: "request", Err: errors.New("429")}
+	host := &scriptedHost{
+		responses: []llm.Response{{}, neutralText("recovered answer")},
+		errors:    []error{transient, nil},
+	}
+	profile := llm.Profile{Name: "primary", Provider: llm.ProviderOpenRouter, ModelID: "text"}
+	handler := neutralHandler(t, []llm.Profile{profile}, map[string]llm.Host{"primary": host}, llm.Selection{Primary: "primary"})
+
+	got, err := handler.Generate(context.Background(), GenerateRequest{
+		Messages: []Message{{Role: "user", Content: "hello"}},
+		Tools:    []FunctionTool{testTool("look", func(context.Context, map[string]any) (any, error) { return "seen", nil })},
+		Config:   &RequestConfig{MaxOutputTokens: 256},
+	})
+	require.NoError(t, err, "a transient blip on the only profile still answers")
+	assert.Equal(t, "recovered answer", got.Text)
+	require.Len(t, host.requests, 2)
+	assert.Empty(t, host.requests[1].Tools, "the retry uses the portable envelope, not native tool history")
 }

@@ -21,6 +21,7 @@ environment-variable mapping.
 | `--postgres-dsn` | `POSTGRES_DSN` | empty | Connection string, e.g. `postgres://user:pass@host:5432/jarvis?sslmode=require`. |
 | `--sqlite-path` | `SQLITE_PATH` | empty | Database file path. Put it on a volume; WAL journaling is enabled automatically. |
 | `--store-sweep-interval` | `STORE_SWEEP_INTERVAL` | `1h` | How often expired messages and lapsed reply claims are deleted. |
+| `--mcp-encryption-key` | `MCP_ENCRYPTION_KEY` | empty | 64 hex chars (32 bytes) — the AES-256 key sealing guild MCP auth tokens at rest. Required to attach an MCP server with a token. |
 | `--message-retention-days` | `MESSAGE_RETENTION_DAYS` | `14` | Default retention for newly recorded messages. |
 | `--root-user-ids` | `ROOT_USER_IDS` | empty | Discord user IDs with cross-guild configuration access. |
 
@@ -77,6 +78,26 @@ SQLite share. Message content is plain `TEXT`.
 | `reply_claims` | `(channel_id, message_id)` | The multi-site reply dedup. Claims compare expiries against the **database server's clock**, never a worker's. See [failover.md](failover.md). |
 | `schema_migrations` | `version` | Applied migration versions. |
 
+### Written by Jarvis and the external accounts API — `guild_mcp_servers`
+
+Remote MCP tool servers attached to a guild, keyed by `(guild_id, name)`. Jarvis writes rows
+through the root-only `add_mcp_server`/`remove_mcp_server` tools; the external accounts API may
+also manage them directly (self-service attachment). The write contract:
+
+- `name`: 1–32 lowercase letters, digits, or hyphens. It becomes part of the model-facing tool
+  namespace `mcp_<name>_<tool>`.
+- `url`: `https` only, no userinfo. The worker additionally refuses URLs resolving to loopback,
+  private, or link-local addresses at dial time (`--mcp-allow-private-networks` overrides), so
+  writes are not the last line of defense.
+- `auth_ciphertext`: empty for unauthenticated servers, otherwise AES-256-GCM under
+  `--mcp-encryption-key`, encoded `base64(nonce || ciphertext)` with the AEAD's 12-byte nonce
+  prefixed. An external writer must use the same key and format. The plaintext token is sent as
+  an `Authorization: Bearer` header and is never readable back through any Jarvis surface.
+- `enabled`: 0/1; disabled rows are kept but never dialed.
+
+Changes become visible within `--valkey-config-cache-ttl` when the configuration cache is
+enabled, exactly like `accounts.tier` writes; Jarvis-side mutations invalidate immediately.
+
 ### Written by the external accounts API — the write contract
 
 Jarvis's migrations create these tables but Jarvis only ever **reads** them, and only to resolve a
@@ -106,6 +127,14 @@ The `search_current_channel` model tool reads stored messages newest first in pa
 filters by text, author, and time range, stopping after the newest eight matches. Because only
 bot-involved conversation is stored, the searchable set is the bot's own conversation history, not
 the channel's traffic. Search never mixes stored and Discord REST results.
+
+The same `channel_search_enabled` setting also exposes the Discord MCP read tools —
+`read_messages` and `get_message` — which serve live Discord history for the **current channel
+only**, complementing the stored view. They run through an in-process MCP server on a view pinned
+to the message's guild and channel, so neither the model nor a tool result can redirect them
+elsewhere. `list_channels` and guild-wide `search_messages` are deliberately not registered: they
+are scoped to the bot's permissions rather than the requesting user's, so offering them would let
+any member read a channel they cannot see themselves.
 
 ## Administration tools
 

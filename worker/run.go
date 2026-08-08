@@ -17,6 +17,7 @@ import (
 	"github.com/justinswe/jarvis/worker/pkg/discord"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
+	"github.com/justinswe/jarvis/worker/pkg/mcpx"
 	"github.com/justinswe/jarvis/worker/pkg/server"
 	"github.com/justinswe/jarvis/worker/pkg/usage"
 	"github.com/justinswe/jarvis/worker/pkg/valkeyconn"
@@ -51,6 +52,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 	var manager config.Manager
 	var recorder discord.Recorder
 	var claimer discord.ReplyClaimer
+	var mcpAuth mcpx.AuthSource
 	if cfg.storeEnabled() {
 		persistent, storeErr := store.Open(ctx, cfg.storeConfig())
 		if storeErr != nil {
@@ -62,7 +64,12 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		// mid-generation strands every retry of the message it was holding.
 		persistent.SetReplyClaimTTL(cfg.mqAckWait)
 		claimer = persistent
+		mcpAuth = persistent
 		app.L().Info("Message store initialized", zap.String("driver", cfg.storeDriver))
+	}
+	defaultMCPServers, err := cfg.defaultMCPServers()
+	if err != nil {
+		return errors.Wrap(err, "initialize default MCP servers")
 	}
 	var limiter discord.Limiter
 	var usageRecorder genai.UsageRecorder
@@ -89,6 +96,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		Location:             cfg.location,
 		DefaultPrompt:        cfg.defaultPrompt,
 		MaxOutputTokens:      cfg.maxOutputTokens,
+		MaxToolRounds:        cfg.agentMaxToolRounds,
 		OpenRouterAPIKey:     cfg.openRouterAPIKey,
 		GoogleAIAPIKey:       cfg.googleAIAPIKey,
 		NVIDIAAPIKey:         cfg.nvidiaAPIKey,
@@ -120,6 +128,8 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		Limiter:            limiter,
 		Recorder:           recorder,
 		ReplyClaimer:       claimer,
+		MCP:                mcpx.New(cfg.mcpConfig(), mcpAuth),
+		DefaultMCPServers:  defaultMCPServers,
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize Discord processor")
@@ -219,6 +229,12 @@ func (cfg workerConfig) validate() error {
 	}
 	if !mq.Driver(cfg.mqDriver).Valid() {
 		return errors.Errorf("unsupported message queue driver %q", cfg.mqDriver)
+	}
+	if cfg.agentMaxToolRounds < 1 {
+		return errors.New("agent max tool rounds must be at least 1")
+	}
+	if _, err := cfg.mcpKey(); err != nil {
+		return err
 	}
 	// A message may not be released before its first keepalive is even due, or every
 	// message would be redelivered once while the first delivery was still working.

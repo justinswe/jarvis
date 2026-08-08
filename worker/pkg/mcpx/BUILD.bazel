@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "mcpx",
+    srcs = [
+        "builtin.go",
+        "dial.go",
+        "mcpx.go",
+        "sanitize.go",
+        "tools.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/mcpx",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//worker/pkg/config",
+        "//worker/pkg/genai",
+        "//worker/pkg/llm",
+        "@com_github_justinswe_discord_mcp//:discord-mcp",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_modelcontextprotocol_go_sdk//mcp",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "mcpx_test",
+    srcs = ["mcpx_test.go"],
+    embed = [":mcpx"],
+    deps = [
+        "//worker/pkg/config",
+        "//worker/pkg/genai",
+        "//worker/pkg/llm",
+        "@com_github_justinswe_discord_mcp//:discord-mcp",
+        "@com_github_modelcontextprotocol_go_sdk//mcp",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

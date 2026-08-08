@@ -29,6 +29,7 @@ Jarvis brings sourced current answers, conversation recall, and server-specific 
 | **Fast by design**               | Go services, compact raw-protobuf transport, bounded context windows, and a direct request path keep the runtime small and responsive.                                                                         |
 | **Provider-neutral models**      | Hosts generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM with named profiles, confirmed capabilities, and retryable failover.                                                                |
 | **Server customization**         | Authorized administrators can manage prompts, response settings, search, history, retention, and delegated access from Discord.                                                                                |
+| **Agent-first tool loop**        | Every tool is offered on every message and the model decides when to stop, except Jarvis's own configuration tools, which need the requesting user's message to ask for a configuration change — so a web-search snippet or a third-party tool result cannot talk the bot into reconfiguring itself. Live current-channel reads are served over an in-process MCP server, and each guild can attach remote MCP tool servers (root-managed, tokens encrypted at rest, strict per-guild isolation). |
 | **Accuracy and resilience**      | Tracks source availability, permits one bounded recovery call for Search, exposes health checks, and qualifies source-less current answers.                                                                    |
 | **Usage metering and limits**    | Optional Valkey integration records per-guild request rates and per-model token use for an external reader, and enforces per-server subscription tiers. One round trip on the request path, and it fails open. |
 
@@ -206,6 +207,10 @@ Within one worker instance, overlapping requests in the same Discord thread use 
 
 Explicit model profiles may host generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM. Web-search providers are configured independently from model profiles. An optional SQL store provides persistent Discord history, per-server configuration, and the reply claim multi-site deployments require. PostgreSQL 16 is the shared, HA-capable backend; SQLite is the zero-infrastructure single-site backend — one file next to the container, no server to run. Both sit behind one implementation, selected by `STORE_DRIVER`. See [Storage](docs/store.md).
 
+Remote MCP tool servers extend what the assistant can do: deployment-wide defaults come from `MCP_SERVER`, and root users attach per-guild servers from Discord with `add_mcp_server` (bearer tokens are encrypted at rest under `MCP_ENCRYPTION_KEY`). Their tools appear to the model as `mcp_<name>_<tool>`, results are treated as untrusted data, each interaction is pinned to its own guild, URLs resolving to private networks are refused at dial time, and a server that redirects across hosts is refused rather than handed the guild's credential.
+
+Jarvis also serves its own Discord reads over an in-process MCP server: `read_messages` and `get_message`, scoped to the current channel and gated by the guild's `channel_search_enabled` setting. Guild-wide listing and search are deliberately not offered, because they follow the bot's permissions rather than the requesting user's.
+
 The primary configuration variables are:
 
 | Variable                         | Required                   | Purpose                                                                                                                                                                   |
@@ -236,6 +241,11 @@ The primary configuration variables are:
 | `POSTGRES_DSN`                   | With postgres              | PostgreSQL connection string.                                                                                                                                             |
 | `SQLITE_PATH`                    | With sqlite                | SQLite database file path; put it on a volume to survive container restarts.                                                                                              |
 | `STORE_SWEEP_INTERVAL`           | No                         | How often expired messages and lapsed reply claims are deleted; defaults to `1h`.                                                                                         |
+| `AGENT_MAX_TOOL_ROUNDS`          | No                         | Maximum model rounds with tools per message; the final round always forces a text answer. Defaults to `8`.                                                                |
+| `MCP_SERVER`                     | No                         | Deployment-default remote MCP servers offered to every guild, as `name=url` (repeatable).                                                                                 |
+| `MCP_ENCRYPTION_KEY`             | To store MCP tokens        | 64-hex-char AES-256 key sealing per-guild MCP auth tokens at rest. See [docs/store.md](docs/store.md).                                                                    |
+| `MCP_CALL_TIMEOUT`               | No                         | Deadline for each MCP connect, tool listing, and tool call; defaults to `15s`.                                                                                            |
+| `MCP_ALLOW_PRIVATE_NETWORKS`     | No                         | Permits MCP URLs on loopback/private networks and plain `http` — for self-hosted servers only; defaults to `false`.                                                       |
 
 Every non-repeatable command flag is also available as an uppercase environment variable with hyphens replaced by underscores. For example, `--message-retention-days` maps to `MESSAGE_RETENTION_DAYS`. Use `--help` to see all options.
 

@@ -10,13 +10,17 @@ go_library(
     name = "store",
     srcs = [
         "config.go",
+        "crypto.go",
         "dialect.go",
         "messages.go",
         "migrate.go",
         "reply.go",
         "store.go",
     ],
-    embedsrcs = ["migrations/0001_init.sql"],
+    embedsrcs = [
+        "migrations/0001_init.sql",
+        "migrations/0002_mcp_servers.sql",
+    ],
     importpath = "github.com/justinswe/jarvis/store",
     visibility = ["//visibility:public"],
     deps = [
@@ -33,7 +37,10 @@ go_library(
 
 go_test(
     name = "store_test",
-    srcs = ["store_test.go"],
+    srcs = [
+        "crypto_test.go",
+        "store_test.go",
+    ],
     embed = [":store"],
     deps = [
         "//worker/pkg/config",

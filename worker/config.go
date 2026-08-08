@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/hex"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
+	"github.com/justinswe/jarvis/worker/pkg/mcpx"
 	"github.com/justinswe/jarvis/worker/pkg/usage"
 	"github.com/justinswe/jarvis/worker/pkg/websearch"
 	"github.com/justinswe/std/errors"
@@ -32,6 +35,10 @@ type workerConfig struct {
 	modelProfiles, webSearchProviders                               []string
 	reasoningEffort                                                 string
 	storeDriver, postgresDSN, sqlitePath                            string
+	mcpEncryptionKey                                                string
+	mcpServers                                                      []string
+	mcpCallTimeout                                                  time.Duration
+	mcpAllowPrivateNetworks                                         bool
 	storeSweepInterval                                              time.Duration
 	rootUserIDs                                                     []string
 	valkeyEnabled, valkeyTLSEnabled                                 bool
@@ -44,6 +51,7 @@ type workerConfig struct {
 	valkeyConfigCacheTTL                                            time.Duration
 	threadMessages, parentMessages, channelMessages, historyRunes   int
 	maxOutputTokens                                                 int
+	agentMaxToolRounds                                              int
 	messageRetentionDays                                            int
 	messageTimeout                                                  time.Duration
 }
@@ -59,9 +67,11 @@ func newWorkerConfig() workerConfig {
 		channelMessages:      4,
 		historyRunes:         4000,
 		maxOutputTokens:      genai.DefaultMaxOutputTokens,
+		agentMaxToolRounds:   genai.DefaultMaxToolRounds,
 		reasoningEffort:      string(llm.ReasoningLow),
 		messageRetentionDays: config.DefaultMessageRetentionDays,
 		messageTimeout:       time.Minute,
+		mcpCallTimeout:       15 * time.Second,
 		storeDriver:          string(store.DriverNone),
 		storeSweepInterval:   time.Hour,
 
@@ -135,6 +145,7 @@ func newRootCommand() *cobra.Command {
 	flags.IntVar(&cfg.channelMessages, "channel-context-window", cfg.channelMessages, "Prior ordinary channel messages")
 	flags.IntVar(&cfg.historyRunes, "history-runes", cfg.historyRunes, "Combined context history rune budget")
 	flags.IntVar(&cfg.maxOutputTokens, "max-output-tokens", cfg.maxOutputTokens, "Maximum total generated tokens, including thinking and visible text (maximum 8192)")
+	flags.IntVar(&cfg.agentMaxToolRounds, "agent-max-tool-rounds", cfg.agentMaxToolRounds, "Maximum model rounds with tools per message; the final round always forces a text answer")
 	flags.StringVar(&cfg.reasoningEffort, "reasoning-effort", cfg.reasoningEffort, "Default model thinking level: low, medium, or high")
 	flags.StringVar(&cfg.discordBotToken, "discord-bot-token", cfg.discordBotToken, "Discord bot token")
 	flags.DurationVar(&cfg.messageTimeout, "message-timeout", cfg.messageTimeout, "Overall message processing timeout")
@@ -143,6 +154,10 @@ func newRootCommand() *cobra.Command {
 	flags.StringVar(&cfg.postgresDSN, "postgres-dsn", cfg.postgresDSN, "PostgreSQL connection string (required when the store driver is postgres)")
 	flags.StringVar(&cfg.sqlitePath, "sqlite-path", cfg.sqlitePath, "SQLite database file path (required when the store driver is sqlite)")
 	flags.DurationVar(&cfg.storeSweepInterval, "store-sweep-interval", cfg.storeSweepInterval, "How often expired messages and lapsed reply claims are deleted")
+	flags.StringVar(&cfg.mcpEncryptionKey, "mcp-encryption-key", cfg.mcpEncryptionKey, "64-hex-char AES-256 key encrypting guild MCP auth tokens at rest; required to attach an MCP server with a token")
+	flags.StringSliceVar(&cfg.mcpServers, "mcp-server", cfg.mcpServers, "Deployment-default remote MCP servers offered to every guild, as name=url (comma-capable and repeatable)")
+	flags.DurationVar(&cfg.mcpCallTimeout, "mcp-call-timeout", cfg.mcpCallTimeout, "Deadline for each MCP connect, tool listing, and tool call")
+	flags.BoolVar(&cfg.mcpAllowPrivateNetworks, "mcp-allow-private-networks", cfg.mcpAllowPrivateNetworks, "Permit MCP URLs on loopback, private, or link-local networks, and plain http (self-hosted escape hatch)")
 	flags.StringSliceVar(&cfg.rootUserIDs, "root-user-ids", cfg.rootUserIDs, "Discord user IDs with cross-server root access")
 	flags.BoolVar(&cfg.valkeyEnabled, "valkey-enabled", cfg.valkeyEnabled, "Enable Valkey per-guild usage metering and subscription limits")
 	flags.StringSliceVar(&cfg.valkeyAddresses, "valkey-address", cfg.valkeyAddresses, "Valkey host:port addresses (comma-capable and repeatable)")
@@ -191,13 +206,64 @@ func (cfg workerConfig) storeEnabled() bool {
 
 // storeConfig maps the operator's flags onto the store package.
 func (cfg workerConfig) storeConfig() store.Config {
+	key, _ := cfg.mcpKey() // validate() already rejected an undecodable key
 	return store.Config{
-		Driver:        store.Driver(cfg.storeDriver),
-		PostgresDSN:   cfg.postgresDSN,
-		SQLitePath:    cfg.sqlitePath,
-		Defaults:      config.GuildConfig{Settings: cfg.serverSettings()},
-		SweepInterval: cfg.storeSweepInterval,
+		Driver:           store.Driver(cfg.storeDriver),
+		PostgresDSN:      cfg.postgresDSN,
+		SQLitePath:       cfg.sqlitePath,
+		Defaults:         config.GuildConfig{Settings: cfg.serverSettings()},
+		SweepInterval:    cfg.storeSweepInterval,
+		MCPEncryptionKey: key,
 	}
+}
+
+// mcpConfig maps the operator's flags onto the MCP connector.
+func (cfg workerConfig) mcpConfig() mcpx.Config {
+	return mcpx.Config{CallTimeout: cfg.mcpCallTimeout, AllowPrivateNetworks: cfg.mcpAllowPrivateNetworks}
+}
+
+// defaultMCPServers parses the deployment-wide MCP server list. Scheme policy beyond
+// the parse (https unless --mcp-allow-private-networks) is enforced at dial time.
+func (cfg workerConfig) defaultMCPServers() ([]config.MCPServer, error) {
+	entries := cfg.mcpServers
+	if len(entries) == 1 && strings.TrimSpace(entries[0]) == "" {
+		entries = nil
+	}
+	servers := make([]config.MCPServer, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		name, rawURL, ok := strings.Cut(strings.TrimSpace(entry), "=")
+		if !ok {
+			return nil, errors.Errorf("mcp-server %q must be name=url", entry)
+		}
+		server := config.MCPServer{Name: strings.TrimSpace(name), URL: strings.TrimSpace(rawURL), Enabled: true}
+		value, err := url.Parse(server.URL)
+		if err != nil || value.Host == "" || (value.Scheme != "https" && value.Scheme != "http") || value.User != nil {
+			return nil, errors.Errorf("mcp-server %q must carry an http(s) URL without credentials", entry)
+		}
+		if server.Name == "" {
+			return nil, errors.Errorf("mcp-server %q needs a name", entry)
+		}
+		if _, duplicate := seen[server.Name]; duplicate {
+			return nil, errors.Errorf("duplicate mcp-server name %q", server.Name)
+		}
+		seen[server.Name] = struct{}{}
+		servers = append(servers, server)
+	}
+	return servers, nil
+}
+
+// mcpKey decodes the optional MCP secret encryption key.
+func (cfg workerConfig) mcpKey() ([]byte, error) {
+	value := strings.TrimSpace(cfg.mcpEncryptionKey)
+	if value == "" {
+		return nil, nil
+	}
+	key, err := hex.DecodeString(value)
+	if err != nil || len(key) != 32 {
+		return nil, errors.New("the MCP encryption key must be 64 hexadecimal characters (32 bytes)")
+	}
+	return key, nil
 }
 
 // guildTiers parses and validates the deployment subscription tier table.

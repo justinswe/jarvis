@@ -176,13 +176,13 @@ message for the same guild until the entry expires or is invalidated.
 
 | Key | Type | Contents | TTL |
 | --- | --- | --- | --- |
-| `P:v1:c:{G}:guildconfig` | String | JSON-encoded `config.GuildConfig` for guild `G`. | `--valkey-config-cache-ttl` (default `5m`) |
+| `P:v1:c:{G}:guildconfig` | String | JSON-encoded `config.GuildConfig` for guild `G`, including its attached MCP server rows — never their auth tokens, which exist only encrypted in the store. | `--valkey-config-cache-ttl` (default `5m`) |
 
 `{G}` carries the same cluster hash tag as the usage-metering keys, for the same reason: it keeps
 a guild's keys in one cluster slot.
 
-**Invalidation.** `Update`, `AddAdmin`, `RemoveAdmin`, and `SetTier` each delete the guild's cache
-entry immediately after their store write commits, so every worker replica observes the change
+**Invalidation.** `Update`, `AddAdmin`, `RemoveAdmin`, `AddMCPServer`, and `RemoveMCPServer` each
+delete the guild's cache entry immediately after their store write commits, so every worker replica observes the change
 on its next read — Valkey is the shared cache every replica already reads from, so no separate
 invalidation broadcast is needed. `--valkey-config-cache-ttl` is a backstop for the rare case a
 delete itself fails (for example, a transient Valkey error): worst case, a replica serves a stale

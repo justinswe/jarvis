@@ -3,6 +3,7 @@ package config
 
 import (
 	"context"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -103,11 +104,58 @@ func (s ServerSettings) EffectivePrompt() string {
 	return s.Prompt + "\n\nGuild-specific instructions:\n" + guildPrompt
 }
 
-// GuildConfig contains behavior settings, delegated administrators, and the subscription
-// tier for one Discord server.
+// MCPServer is one remote MCP tool server attached to a Discord server. It never
+// carries secret material — HasAuth only reports that a token is stored — so the value
+// is safe to cache and to echo in configuration responses.
+type MCPServer struct {
+	Name    string
+	URL     string
+	HasAuth bool
+	Enabled bool
+}
+
+// MCPServerInput carries the write-only auth token for one MCP server attach
+// operation. The token is encrypted at rest and never reported back.
+type MCPServerInput struct {
+	Name      string
+	URL       string
+	AuthToken string
+}
+
+// ErrMCPServerNotAttached reports an operation on an MCP server the guild does not have.
+var ErrMCPServerNotAttached = errors.New("the MCP server is not attached to this server")
+
+// ErrMCPEncryptionUnavailable reports that no MCP encryption key is configured, so an
+// auth token cannot be stored or read.
+var ErrMCPEncryptionUnavailable = errors.New("the MCP encryption key is not configured")
+
+// mcpServerNamePattern bounds names to a slug that stays valid inside a model-facing
+// namespaced tool name.
+var mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// ValidateMCPServerInput checks the write-side fields of one MCP server attachment.
+// The URL rule is structural; the worker separately refuses private and internal
+// addresses at dial time, which also covers rows written by the external accounts API.
+func ValidateMCPServerInput(input MCPServerInput) error {
+	if !mcpServerNamePattern.MatchString(strings.TrimSpace(input.Name)) {
+		return errors.New("MCP server name must be 1-32 lowercase letters, digits, or hyphens")
+	}
+	value, err := url.Parse(strings.TrimSpace(input.URL))
+	if err != nil {
+		return errors.Wrap(err, "parse MCP server URL")
+	}
+	if value.Scheme != "https" || value.Host == "" || value.User != nil {
+		return errors.New("MCP server URL must be https, name a host, and carry no credentials")
+	}
+	return nil
+}
+
+// GuildConfig contains behavior settings, delegated administrators, attached MCP
+// servers, and the subscription tier for one Discord server.
 type GuildConfig struct {
 	Settings     ServerSettings
 	AdminUserIDs []string
+	MCPServers   []MCPServer
 	Tier         string
 	Version      int64
 }
@@ -123,6 +171,11 @@ func (c GuildConfig) Validate() error {
 	for _, userID := range c.AdminUserIDs {
 		if strings.TrimSpace(userID) == "" {
 			return errors.New("admin user ID must not be empty")
+		}
+	}
+	for _, server := range c.MCPServers {
+		if strings.TrimSpace(server.Name) == "" || strings.TrimSpace(server.URL) == "" {
+			return errors.New("MCP server name and URL must not be empty")
 		}
 	}
 	return nil
@@ -234,6 +287,12 @@ type Manager interface {
 	Update(context.Context, string, string, Patch) (GuildConfig, error)
 	AddAdmin(context.Context, string, string, string) (GuildConfig, error)
 	RemoveAdmin(context.Context, string, string, string) (GuildConfig, error)
+	// AddMCPServer attaches or updates one remote MCP server for the guild. The auth
+	// token in the input is write-only; an empty token on an existing server keeps
+	// its stored credential.
+	AddMCPServer(context.Context, string, string, MCPServerInput) (GuildConfig, error)
+	// RemoveMCPServer detaches one remote MCP server by name.
+	RemoveMCPServer(context.Context, string, string, string) (GuildConfig, error)
 }
 
 // StaticProvider returns one immutable configuration for every server.

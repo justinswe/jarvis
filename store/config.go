@@ -185,6 +185,11 @@ func (s *Store) loadGuildConfig(ctx context.Context, q querier, gid int64, lock 
 		return config.GuildConfig{}, err
 	}
 	loaded.Tier = tier
+	servers, err := s.loadMCPServers(ctx, q, gid)
+	if err != nil {
+		return config.GuildConfig{}, err
+	}
+	loaded.MCPServers = servers
 	return loaded, nil
 }
 
@@ -224,6 +229,122 @@ func (s *Store) loadTier(ctx context.Context, q querier, gid int64) (string, err
 		return "", errors.Wrap(err, "resolve account tier")
 	}
 	return tier, nil
+}
+
+// loadMCPServers reads the guild's attached MCP servers. The ciphertext never leaves
+// this function: callers see only whether a credential exists.
+func (s *Store) loadMCPServers(ctx context.Context, q querier, gid int64) ([]config.MCPServer, error) {
+	rows, err := q.QueryContext(ctx, s.q(
+		`SELECT name, url, auth_ciphertext, enabled FROM guild_mcp_servers WHERE guild_id = ? ORDER BY name`), gid)
+	if err != nil {
+		return nil, errors.Wrap(err, "read guild MCP servers")
+	}
+	defer rows.Close()
+	var servers []config.MCPServer
+	for rows.Next() {
+		var (
+			server     config.MCPServer
+			ciphertext string
+			enabled    int
+		)
+		if err := rows.Scan(&server.Name, &server.URL, &ciphertext, &enabled); err != nil {
+			return nil, errors.Wrap(err, "decode guild MCP server")
+		}
+		server.HasAuth = ciphertext != ""
+		server.Enabled = enabled != 0
+		servers = append(servers, server)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Wrap(err, "read guild MCP servers")
+	}
+	return servers, nil
+}
+
+// AddMCPServer attaches or updates one remote MCP server. It writes the row directly —
+// not through the guild_configs mutation funnel — so the external accounts API can
+// manage the same rows without racing Jarvis's version counter. An empty auth token on
+// an existing row keeps the stored credential.
+func (s *Store) AddMCPServer(ctx context.Context, guildID, actorID string, server config.MCPServerInput) (config.GuildConfig, error) {
+	gid, err := mcpMutationIDs(guildID, actorID)
+	if err != nil {
+		return config.GuildConfig{}, err
+	}
+	if err := config.ValidateMCPServerInput(server); err != nil {
+		return config.GuildConfig{}, err
+	}
+	name := strings.TrimSpace(server.Name)
+	serverURL := strings.TrimSpace(server.URL)
+	ciphertext := ""
+	if strings.TrimSpace(server.AuthToken) != "" {
+		ciphertext, err = sealSecret(s.mcpKey, strings.TrimSpace(server.AuthToken))
+		if err != nil {
+			return config.GuildConfig{}, err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, s.q(`
+		INSERT INTO guild_mcp_servers (guild_id, name, url, auth_ciphertext, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, @now, @now)
+		ON CONFLICT (guild_id, name) DO UPDATE SET
+			url = excluded.url,
+			auth_ciphertext = CASE WHEN excluded.auth_ciphertext = ''
+				THEN guild_mcp_servers.auth_ciphertext ELSE excluded.auth_ciphertext END,
+			enabled = 1, updated_at = excluded.updated_at`),
+		gid, name, serverURL, ciphertext); err != nil {
+		return config.GuildConfig{}, errors.Wrap(err, "write guild MCP server")
+	}
+	return s.Load(ctx, guildID)
+}
+
+// RemoveMCPServer detaches one remote MCP server by name.
+func (s *Store) RemoveMCPServer(ctx context.Context, guildID, actorID, name string) (config.GuildConfig, error) {
+	gid, err := mcpMutationIDs(guildID, actorID)
+	if err != nil {
+		return config.GuildConfig{}, err
+	}
+	name = strings.TrimSpace(name)
+	result, err := s.db.ExecContext(ctx,
+		s.q(`DELETE FROM guild_mcp_servers WHERE guild_id = ? AND name = ?`), gid, name)
+	if err != nil {
+		return config.GuildConfig{}, errors.Wrap(err, "remove guild MCP server")
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return config.GuildConfig{}, errors.Wrapf(config.ErrMCPServerNotAttached, "MCP server %q", name)
+	}
+	return s.Load(ctx, guildID)
+}
+
+// MCPServerAuth decrypts the stored bearer token for one enabled server; "" means the
+// server needs no authentication. This is the only place the credential is decrypted.
+func (s *Store) MCPServerAuth(ctx context.Context, guildID, name string) (string, error) {
+	gid, err := snowflake(guildID)
+	if err != nil {
+		return "", err
+	}
+	var ciphertext string
+	err = s.db.QueryRowContext(ctx, s.q(
+		`SELECT auth_ciphertext FROM guild_mcp_servers WHERE guild_id = ? AND name = ? AND enabled = 1`),
+		gid, strings.TrimSpace(name)).Scan(&ciphertext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errors.Wrapf(config.ErrMCPServerNotAttached, "MCP server %q", name)
+	}
+	if err != nil {
+		return "", errors.Wrap(err, "read guild MCP server credential")
+	}
+	if ciphertext == "" {
+		return "", nil
+	}
+	return openSecret(s.mcpKey, ciphertext)
+}
+
+// mcpMutationIDs validates the actor and resolves the guild for an MCP row write.
+func mcpMutationIDs(guildID, actorID string) (int64, error) {
+	if strings.TrimSpace(actorID) == "" {
+		return 0, errors.New("configuration actor ID is required")
+	}
+	if _, err := snowflake(actorID); err != nil {
+		return 0, err
+	}
+	return snowflake(guildID)
 }
 
 // writeGuildConfig upserts the settings row and replaces the administrator set, all
@@ -302,11 +423,13 @@ func normalizedUserIDs(userIDs []string) []string {
 
 func cloneConfig(value config.GuildConfig) config.GuildConfig {
 	value.AdminUserIDs = slices.Clone(value.AdminUserIDs)
+	value.MCPServers = slices.Clone(value.MCPServers)
 	return value
 }
 
 func equalConfig(left, right config.GuildConfig) bool {
 	left.Version, right.Version = 0, 0
 	return left.Settings == right.Settings && left.Tier == right.Tier &&
-		slices.Equal(normalizedUserIDs(left.AdminUserIDs), normalizedUserIDs(right.AdminUserIDs))
+		slices.Equal(normalizedUserIDs(left.AdminUserIDs), normalizedUserIDs(right.AdminUserIDs)) &&
+		slices.Equal(left.MCPServers, right.MCPServers)
 }

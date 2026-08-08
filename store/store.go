@@ -45,6 +45,9 @@ type Config struct {
 	// SweepInterval is how often expired messages and lapsed claims are deleted. Zero
 	// disables the sweeper, which only tests want.
 	SweepInterval time.Duration
+	// MCPEncryptionKey is the 32-byte AES-256 key sealing guild MCP auth tokens at
+	// rest. Empty disables attaching servers that need authentication.
+	MCPEncryptionKey []byte
 }
 
 // Store implements guild configuration, message history, reply claims, and tier
@@ -53,7 +56,9 @@ type Store struct {
 	db       *sql.DB
 	d        dialect
 	defaults config.GuildConfig
-	now      func() time.Time
+	// mcpKey seals guild MCP auth tokens at rest; see crypto.go.
+	mcpKey []byte
+	now    func() time.Time
 	// replyOwner names this process in the claims it takes. It is recorded for the
 	// operator reading a claim row, never matched on: see ClaimReply.
 	replyOwner string
@@ -69,6 +74,9 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	if err := cfg.Defaults.Validate(); err != nil {
 		return nil, errors.Wrap(err, "validate default guild configuration")
 	}
+	if len(cfg.MCPEncryptionKey) != 0 && len(cfg.MCPEncryptionKey) != 32 {
+		return nil, errors.New("the MCP encryption key must be exactly 32 bytes")
+	}
 	db, d, err := open(cfg)
 	if err != nil {
 		return nil, err
@@ -83,6 +91,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 	}
 	s := &Store{
 		db: db, d: d, defaults: cloneConfig(cfg.Defaults), now: time.Now,
+		mcpKey:     append([]byte(nil), cfg.MCPEncryptionKey...),
 		replyOwner: replyClaimOwner(), replyClaimTTL: defaultReplyClaimTTL,
 		stop: make(chan struct{}),
 	}

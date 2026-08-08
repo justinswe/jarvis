@@ -19,6 +19,7 @@ go_library(
         "//worker/pkg/discord",
         "//worker/pkg/genai",
         "//worker/pkg/llm",
+        "//worker/pkg/mcpx",
         "//worker/pkg/server",
         "//worker/pkg/usage",
         "//worker/pkg/valkeyconn",

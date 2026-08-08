@@ -196,14 +196,16 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			FallbackModelProfile: settings.FallbackModelProfile,
 		},
 	}
-	request.Tools = append(request.Tools, p.runtimeContext())
-	request.Tools = append(request.Tools, p.reactToMessage(m.ChannelID, m.ID))
+	native := []genai.FunctionTool{p.runtimeContext(), p.reactToMessage(m.ChannelID, m.ID)}
 	if settings.ChannelSearchEnabled && p.history != nil {
-		request.Tools = append(request.Tools, p.searchCurrentChannel(m.GuildID, m.ChannelID, m.ID))
+		native = append(native, p.searchCurrentChannel(m.GuildID, m.ChannelID, m.ID))
 	}
 	if tools, authorized := p.configurationTools(ctx, m, guildConfig); authorized {
-		request.Tools = append(request.Tools, tools...)
+		native = append(native, tools...)
 	}
+	tools, releaseMCP := p.mcpTools(ctx, m, guildConfig, native)
+	defer releaseMCP()
+	request.Tools = tools
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
 	}

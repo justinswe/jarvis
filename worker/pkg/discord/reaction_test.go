@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +51,9 @@ func TestMessageReactionToolValidatesArguments(t *testing.T) {
 		{name: "surrounding whitespace", args: map[string]any{"emoji": " 👍 "}},
 		{name: "emoji whitespace", args: map[string]any{"emoji": "👍 ✅"}},
 		{name: "custom emoji", args: map[string]any{"emoji": "party:123"}},
+		{name: "shortcode name", args: map[string]any{"emoji": ":100:"}},
+		{name: "bare digits", args: map[string]any{"emoji": "100"}},
+		{name: "emoji name as a word", args: map[string]any{"emoji": "hundred"}},
 		{name: "processing emoji", args: map[string]any{"emoji": processingReaction}},
 		{name: "invalid message ID", args: map[string]any{"emoji": "👍", "message_id": 123}},
 		{name: "empty message ID", args: map[string]any{"emoji": "👍", "message_id": " "}},
@@ -71,4 +75,38 @@ func TestMessageReactionToolPropagatesCancellation(t *testing.T) {
 	_, err := processor.reactToMessage("channel", "current").Execute(ctx, map[string]any{"emoji": "👍"})
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.ErrorContains(t, err, "add Discord message reaction")
+}
+
+// TestMessageReactionToolAcceptsEveryEmojiForm keeps the local pre-check permissive: a
+// rejected valid emoji is worse than a symbol Discord would refuse anyway.
+func TestMessageReactionToolAcceptsEveryEmojiForm(t *testing.T) {
+	for _, emoji := range []string{"💯", "👍", "❤️", "✅", "1️⃣", "🇺🇸"} {
+		t.Run(emoji, func(t *testing.T) {
+			processor := &Processor{client: &fakeClient{addReaction: func(context.Context, string, string, string) error { return nil }}}
+			_, err := processor.reactToMessage("channel", "current").Execute(context.Background(), map[string]any{"emoji": emoji})
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestMessageReactionToolTellsTheModelHowToFixTheEmoji is the regression guard for a real
+// failure: "can you add a 100 on my message" produced a bare mutation-failure report,
+// because the loop only forwards a genai.ExecutionError's message to the model and this
+// tool returned plain errors. Without the reason, the corrected retry the system prompt
+// asks for is impossible.
+func TestMessageReactionToolTellsTheModelHowToFixTheEmoji(t *testing.T) {
+	tool := (&Processor{client: &fakeClient{}}).reactToMessage("channel", "current")
+	for _, test := range []struct{ name, emoji string }{
+		{name: "shortcode", emoji: ":100:"},
+		{name: "digits", emoji: "100"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := tool.Execute(context.Background(), map[string]any{"emoji": test.emoji})
+			require.Error(t, err)
+			var execution *genai.ExecutionError
+			require.ErrorAs(t, err, &execution, "the loop forwards only ExecutionError text to the model")
+			assert.Equal(t, "invalid_emoji", execution.Code)
+			assert.Contains(t, execution.Message, "💯", "the message names the character to send instead")
+		})
+	}
 }

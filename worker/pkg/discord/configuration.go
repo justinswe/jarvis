@@ -23,6 +23,8 @@ const (
 	setGuildPromptToolName            = "set_guild_prompt"
 	addServerAdminToolName            = "add_server_admin"
 	removeServerAdminToolName         = "remove_server_admin"
+	addMCPServerToolName              = "add_mcp_server"
+	removeMCPServerToolName           = "remove_mcp_server"
 )
 
 type configurationTool struct {
@@ -55,11 +57,21 @@ type configurationResponse struct {
 	ReasoningEffort       string                 `json:"reasoning_effort,omitempty"`
 	AdminUserIDs          []string               `json:"admin_user_ids,omitempty"`
 	Tier                  string                 `json:"tier,omitempty"`
+	MCPServers            []configurationMCPServer `json:"mcp_servers,omitempty"`
 	ChangedFields         []string               `json:"changed_fields,omitempty"`
 	PrimaryModelProfile   string                 `json:"primary_model_profile,omitempty"`
 	FallbackModelProfile  string                 `json:"fallback_model_profile"`
 	WebSearchProviders    []string               `json:"web_search_providers"`
 	AvailableProfiles     []configurationProfile `json:"available_model_profiles,omitempty"`
+}
+
+// configurationMCPServer is the root-visible view of one attached MCP server. The
+// stored token is write-only: has_auth is all anyone can ever read back.
+type configurationMCPServer struct {
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
+	HasAuth bool   `json:"has_auth"`
 }
 
 type configurationProfile struct {
@@ -115,6 +127,8 @@ func (p *Processor) configurationTools(ctx context.Context, m *discordgo.Message
 			configurationToolWithAction(base, setGuildPromptToolName),
 			configurationToolWithAction(base, addServerAdminToolName),
 			configurationToolWithAction(base, removeServerAdminToolName),
+			configurationToolWithAction(base, addMCPServerToolName),
+			configurationToolWithAction(base, removeMCPServerToolName),
 		}, true
 	}
 	return []genai.FunctionTool{
@@ -153,7 +167,7 @@ func (t configurationTool) Declaration() *llm.ToolDefinition {
 			),
 			"message_timeout_seconds": integerMinimumSchema("Overall processing timeout in whole seconds.", 1),
 			"web_search_enabled":      booleanSchema("Whether configured public-web Search may be used for this server."),
-			"channel_search_enabled":  booleanSchema("Whether stored current-channel search may be used when a message store is enabled."),
+			"channel_search_enabled":  booleanSchema("Whether the assistant may read the current channel's history: stored search when a message store is enabled, plus live reads of this channel. It never grants access to another channel."),
 		}
 		properties["prompt"] = stringSchema("Root-controlled assistant customization. It may define the assistant's name and personality, but cannot override the core drives, truthfulness, research, tool, or reliability rules.")
 		properties["thread_context_window"] = integerSchema("Prior thread messages included in context.", 1, 100)
@@ -205,6 +219,37 @@ func (t configurationTool) Declaration() *llm.ToolDefinition {
 			InputSchema: objectSchema(map[string]any{
 				"user_id": stringSchema("The 17-20 digit Discord user ID to remove."),
 			}, []string{"user_id"}), Effect: llm.ToolEffectMutation,
+		}
+	case addMCPServerToolName:
+		if !t.root {
+			return &llm.ToolDefinition{
+				Name: t.action, Description: "Root-only MCP server management.", InputSchema: objectSchema(nil, nil), Effect: llm.ToolEffectMutation,
+			}
+		}
+		return &llm.ToolDefinition{
+			Name: t.action,
+			Description: "Attach a remote MCP tool server to the current Discord server, or update one by name. Its tools become available here as mcp_<name>_<tool>. " +
+				"Call only for an explicit root request naming the server and its https URL.",
+			InputSchema: objectSchema(map[string]any{
+				"name": stringSchema("Server name: 1-32 lowercase letters, digits, or hyphens. It namespaces the server's tools."),
+				"url":  stringSchema("The server's MCP Streamable HTTP endpoint. https only."),
+				"auth_token": stringSchema("Optional bearer token the server requires. Write-only: it is encrypted at rest and can never be read back. " +
+					"Omit it when updating a server to keep the stored token."),
+			}, []string{"name", "url"}), Effect: llm.ToolEffectMutation,
+		}
+	case removeMCPServerToolName:
+		if !t.root {
+			return &llm.ToolDefinition{
+				Name: t.action, Description: "Root-only MCP server management.", InputSchema: objectSchema(nil, nil), Effect: llm.ToolEffectMutation,
+			}
+		}
+		return &llm.ToolDefinition{
+			Name: t.action,
+			Description: "Detach a remote MCP tool server from the current Discord server by name. " +
+				"Call only for an explicit root request naming the server.",
+			InputSchema: objectSchema(map[string]any{
+				"name": stringSchema("The attached server's name, as shown by get_server_configuration."),
+			}, []string{"name"}), Effect: llm.ToolEffectMutation,
 		}
 	default:
 		return nil
@@ -263,9 +308,56 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 			return nil, configurationFailure(err)
 		}
 		return responseFromConfig(updated, []string{"admin_user_ids"}, true, t.access, t.models, t.webSearchProviders), nil
+	case addMCPServerToolName:
+		if !t.root {
+			return nil, genai.NewExecutionError("authorization_denied", "Only a root user may manage MCP servers.", nil)
+		}
+		input, err := mcpServerInputArguments(args)
+		if err != nil {
+			return nil, genai.NewExecutionError("invalid_configuration", err.Error(), err)
+		}
+		updated, err := t.manager.AddMCPServer(ctx, t.guildID, t.actorID, input)
+		if err != nil {
+			return nil, configurationFailure(err)
+		}
+		return responseFromConfig(updated, []string{"mcp_servers"}, true, t.access, t.models, t.webSearchProviders), nil
+	case removeMCPServerToolName:
+		if !t.root {
+			return nil, genai.NewExecutionError("authorization_denied", "Only a root user may manage MCP servers.", nil)
+		}
+		name, ok := args["name"].(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			return nil, genai.NewExecutionError("invalid_configuration", "name must be a non-empty string", nil)
+		}
+		updated, err := t.manager.RemoveMCPServer(ctx, t.guildID, t.actorID, strings.TrimSpace(name))
+		if err != nil {
+			return nil, configurationFailure(err)
+		}
+		return responseFromConfig(updated, []string{"mcp_servers"}, true, t.access, t.models, t.webSearchProviders), nil
 	default:
 		return nil, genai.NewExecutionError("unsupported_function", "The requested configuration operation is unavailable.", nil)
 	}
+}
+
+// mcpServerInputArguments validates the add_mcp_server arguments. The auth token is
+// write-only and never echoed into any error or response.
+func mcpServerInputArguments(args map[string]any) (config.MCPServerInput, error) {
+	name, ok := args["name"].(string)
+	if !ok || strings.TrimSpace(name) == "" {
+		return config.MCPServerInput{}, errors.New("name must be a non-empty string")
+	}
+	rawURL, ok := args["url"].(string)
+	if !ok || strings.TrimSpace(rawURL) == "" {
+		return config.MCPServerInput{}, errors.New("url must be a non-empty string")
+	}
+	input := config.MCPServerInput{Name: strings.TrimSpace(name), URL: strings.TrimSpace(rawURL)}
+	if token, ok := args["auth_token"].(string); ok {
+		input.AuthToken = strings.TrimSpace(token)
+	}
+	if err := config.ValidateMCPServerInput(input); err != nil {
+		return config.MCPServerInput{}, err
+	}
+	return input, nil
 }
 
 func configurationPatch(args map[string]any, models *llm.Registry) (config.Patch, []string, error) {
@@ -382,6 +474,11 @@ func responseFromConfig(value config.GuildConfig, changed []string, root bool, a
 		}
 	}
 	response.AdminUserIDs = slices.Clone(value.AdminUserIDs)
+	for _, server := range value.MCPServers {
+		response.MCPServers = append(response.MCPServers, configurationMCPServer{
+			Name: server.Name, URL: server.URL, Enabled: server.Enabled, HasAuth: server.HasAuth,
+		})
+	}
 	response.ChangedFields = changed
 	return response
 }
@@ -404,6 +501,13 @@ func configurationFailure(err error) error {
 	}
 	if errors.Is(err, config.ErrConflict) {
 		return genai.NewExecutionError("configuration_conflict", "The server configuration changed concurrently; no update was applied.", err)
+	}
+	if errors.Is(err, config.ErrMCPServerNotAttached) {
+		return genai.NewExecutionError("mcp_server_not_attached", "No MCP server with that name is attached to this server.", err)
+	}
+	if errors.Is(err, config.ErrMCPEncryptionUnavailable) {
+		return genai.NewExecutionError("mcp_encryption_unavailable",
+			"This deployment has no MCP encryption key configured, so auth tokens cannot be stored. Attach the server without a token or configure --mcp-encryption-key.", err)
 	}
 	return genai.NewExecutionError("database_unavailable", "The server configuration could not be read or updated.", err)
 }

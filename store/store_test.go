@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"sync"
@@ -35,10 +36,16 @@ func memoryStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(context.Background(), Config{
 		Driver: DriverSQLite, SQLitePath: ":memory:", Defaults: storeDefaults(),
+		MCPEncryptionKey: testMCPKey(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+// testMCPKey is the deterministic 32-byte secret key the suite seals MCP tokens with.
+func testMCPKey() []byte {
+	return bytes.Repeat([]byte{42}, 32)
 }
 
 func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
@@ -50,7 +57,7 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 		require.NoError(t, err)
 		var version int64
 		require.NoError(t, s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version))
-		assert.Equal(t, int64(1), version)
+		assert.Equal(t, int64(2), version)
 		require.NoError(t, s.Close())
 	}
 }
@@ -201,6 +208,85 @@ func runStoreSuite(t *testing.T, openStore func(*testing.T) *Store) {
 		unlinked, err := s.Load(ctx, "43")
 		require.NoError(t, err)
 		assert.Empty(t, unlinked.Tier)
+	})
+
+	t.Run("MCPServersAreAttachedUpdatedAndRemoved", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		updated, err := s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "https://mcp.example.com/github"})
+		require.NoError(t, err)
+		require.Len(t, updated.MCPServers, 1)
+		assert.Equal(t, config.MCPServer{Name: "github", URL: "https://mcp.example.com/github", Enabled: true}, updated.MCPServers[0])
+
+		// Re-attaching updates in place; a token upgrades the credential.
+		updated, err = s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "https://mcp.example.com/v2", AuthToken: "bearer-secret"})
+		require.NoError(t, err)
+		require.Len(t, updated.MCPServers, 1)
+		assert.True(t, updated.MCPServers[0].HasAuth)
+		assert.Equal(t, "https://mcp.example.com/v2", updated.MCPServers[0].URL)
+
+		// An empty token on an update keeps the stored credential.
+		updated, err = s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "https://mcp.example.com/v3"})
+		require.NoError(t, err)
+		assert.True(t, updated.MCPServers[0].HasAuth)
+
+		got, err := s.Get(ctx, "42")
+		require.NoError(t, err)
+		require.Len(t, got.MCPServers, 1, "the request read path sees attached servers")
+
+		removed, err := s.RemoveMCPServer(ctx, "42", "7", "github")
+		require.NoError(t, err)
+		assert.Empty(t, removed.MCPServers)
+		_, err = s.RemoveMCPServer(ctx, "42", "7", "github")
+		assert.ErrorContains(t, err, "not attached")
+	})
+
+	t.Run("MCPServerRejectsBadNamesAndURLs", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		_, err := s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "Bad_Name", URL: "https://mcp.example.com"})
+		assert.ErrorContains(t, err, "lowercase")
+		_, err = s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "http://mcp.example.com"})
+		assert.ErrorContains(t, err, "https")
+		_, err = s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "https://user:pass@mcp.example.com"})
+		assert.ErrorContains(t, err, "credentials")
+		_, err = s.AddMCPServer(ctx, "42", "", config.MCPServerInput{Name: "github", URL: "https://mcp.example.com"})
+		assert.ErrorContains(t, err, "actor ID is required")
+	})
+
+	t.Run("MCPServerAuthRoundTripsEncryptedAtRest", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		_, err := s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "https://mcp.example.com", AuthToken: "the-secret-token"})
+		require.NoError(t, err)
+		token, err := s.MCPServerAuth(ctx, "42", "github")
+		require.NoError(t, err)
+		assert.Equal(t, "the-secret-token", token)
+
+		// Encrypted at rest: the raw column never carries the plaintext.
+		var stored string
+		require.NoError(t, s.db.QueryRowContext(ctx, s.q(
+			`SELECT auth_ciphertext FROM guild_mcp_servers WHERE guild_id = ? AND name = ?`), 42, "github").Scan(&stored))
+		assert.NotEmpty(t, stored)
+		assert.NotContains(t, stored, "the-secret-token")
+
+		_, err = s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "open", URL: "https://open.example.com"})
+		require.NoError(t, err)
+		token, err = s.MCPServerAuth(ctx, "42", "open")
+		require.NoError(t, err)
+		assert.Empty(t, token, "a tokenless server needs no authentication")
+		_, err = s.MCPServerAuth(ctx, "42", "missing")
+		assert.ErrorContains(t, err, "not attached")
+	})
+
+	t.Run("MCPServerTokenRequiresTheEncryptionKey", func(t *testing.T) {
+		s := openStore(t)
+		s.mcpKey = nil
+		ctx := context.Background()
+		_, err := s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "https://mcp.example.com", AuthToken: "secret"})
+		assert.ErrorContains(t, err, "encryption key")
+		_, err = s.AddMCPServer(ctx, "42", "7", config.MCPServerInput{Name: "github", URL: "https://mcp.example.com"})
+		require.NoError(t, err, "tokenless servers never need the key")
 	})
 
 	t.Run("RecordAndMessagesRoundTrip", func(t *testing.T) {
