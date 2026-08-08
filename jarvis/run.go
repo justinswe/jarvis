@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/justinswe/jarvis/mq"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
@@ -33,20 +34,28 @@ func runJarvis(parent context.Context, cfg supervisorConfig) error {
 
 // validate reports whether the supervisor can start every child.
 func (cfg supervisorConfig) validate() error {
-	for _, required := range []struct{ name, value string }{
+	required := []struct{ name, value string }{
 		{"port", cfg.port},
 		{"worker port", cfg.workerPort},
-		{"NATS port", cfg.natsPort},
-		{"NATS monitor port", cfg.natsMonitorPort},
-		{"NATS binary", cfg.natsBinary},
-		{"NATS config", cfg.natsConfig},
 		{"ingestor binary", cfg.ingestorBinary},
 		{"worker binary", cfg.workerBinary},
 		{"Valkey binary", cfg.valkeyBinary},
 		{"Valkey port", cfg.valkeyPort},
-	} {
-		if required.value == "" {
-			return errors.Errorf("%s is required", required.name)
+	}
+	if cfg.supervisesNATS() {
+		required = append(required,
+			struct{ name, value string }{"NATS port", cfg.natsPort},
+			struct{ name, value string }{"NATS monitor port", cfg.natsMonitorPort},
+			struct{ name, value string }{"NATS binary", cfg.natsBinary},
+			struct{ name, value string }{"NATS config", cfg.natsConfig},
+		)
+	}
+	if !mq.Driver(cfg.mqDriver).Valid() {
+		return errors.Errorf("unsupported message queue driver %q", cfg.mqDriver)
+	}
+	for _, entry := range required {
+		if entry.value == "" {
+			return errors.Errorf("%s is required", entry.name)
 		}
 	}
 	for _, required := range []struct {
@@ -92,14 +101,19 @@ func supervise(ctx context.Context, cfg supervisorConfig, start processStarter, 
 		return errors.Join(cause, errors.Wrap(stopErr, "stop running children"))
 	}
 
-	broker, err := start(cfg.natsBinary, cfg.natsArgs(), nil)
-	if err != nil {
-		return err
-	}
-	add("NATS", broker)
-	app.L().Info("Started combined NATS server", zap.String("port", cfg.natsPort))
-	if err := waitReady(ctx, broker, client, cfg.natsURL("healthz"), cfg.natsStartTimeout, "NATS"); err != nil {
-		return stopAfter(ctx, cfg.shutdownTimeout, err, processes(running)...)
+	if cfg.supervisesNATS() {
+		broker, err := start(cfg.natsBinary, cfg.natsArgs(), nil)
+		if err != nil {
+			return err
+		}
+		add("NATS", broker)
+		app.L().Info("Started combined NATS server", zap.String("port", cfg.natsPort))
+		if err := waitReady(ctx, broker, client, cfg.natsURL("healthz"), cfg.natsStartTimeout, "NATS"); err != nil {
+			return stopAfter(ctx, cfg.shutdownTimeout, err, processes(running)...)
+		}
+	} else {
+		app.L().Info("Using an external message queue; not starting a broker",
+			zap.String("mq_driver", cfg.mqDriver))
 	}
 
 	if cfg.valkeyEnabled && !cfg.supervisesValkey() {
@@ -306,9 +320,13 @@ func (cfg supervisorConfig) supervisedValkeyPort() string {
 // workerEnv is the environment the worker is started with.
 func (cfg supervisorConfig) workerEnv() []string {
 	env := map[string]string{
-		"HOST":     "127.0.0.1",
-		"PORT":     cfg.workerPort,
-		"NATS_URL": cfg.clientURL(),
+		"HOST": "127.0.0.1",
+		"PORT": cfg.workerPort,
+	}
+	// Only when the supervisor owns the broker. Under any other driver NATS_URL would
+	// point the worker at a server this process never started.
+	if cfg.supervisesNATS() {
+		env["NATS_URL"] = cfg.clientURL()
 	}
 	// Only when the supervisor owns the server. Otherwise VALKEY_* passes through
 	// untouched, so an operator pointing the worker at an external Valkey through the
@@ -322,10 +340,21 @@ func (cfg supervisorConfig) workerEnv() []string {
 
 // ingestorEnv is the environment the ingestor is started with.
 func (cfg supervisorConfig) ingestorEnv() []string {
-	return childEnv(os.Environ(), map[string]string{
-		"PORT":     cfg.port,
-		"NATS_URL": cfg.clientURL(),
-	})
+	env := map[string]string{"PORT": cfg.port}
+	if cfg.supervisesNATS() {
+		env["NATS_URL"] = cfg.clientURL()
+	}
+	return childEnv(os.Environ(), env)
+}
+
+// supervisesNATS reports whether this process should start a broker of its own.
+//
+// The bundled nats-server exists so the combined image is one self-contained container.
+// Pub/Sub is a hosted service reached over the network, so under that driver there is
+// nothing local to run: starting a broker nobody connects to would waste the memory its
+// JetStream store reserves and report a health check that means nothing.
+func (cfg supervisorConfig) supervisesNATS() bool {
+	return mq.Driver(cfg.mqDriver) != mq.DriverPubSub
 }
 
 // waitFor polls probe until it reports the child ready, the child exits, or the

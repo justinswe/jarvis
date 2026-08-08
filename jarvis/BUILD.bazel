@@ -12,6 +12,7 @@ go_library(
     importpath = "github.com/justinswe/jarvis/jarvis",
     visibility = ["//visibility:private"],
     deps = [
+        "//mq",
         "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",
         "@com_github_spf13_cobra//:cobra",
@@ -53,6 +54,7 @@ go_test(
     ],
     embed = [":jarvis_lib"],
     deps = [
+        "//mq",
         "@com_github_justinswe_std//errors",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

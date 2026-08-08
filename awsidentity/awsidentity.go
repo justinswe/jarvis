@@ -55,7 +55,9 @@ func Load(ctx context.Context, cfg Config) (aws.Config, error) {
 	if err != nil {
 		return aws.Config{}, errors.Wrap(err, "load AWS configuration for Google federation")
 	}
-	loaded.Credentials = newCredentialsProvider(tokens, sts.NewFromConfig(loaded), roleARN, identityTokenTimeout)
+	loaded.Credentials = newCredentialsProvider(
+		tokens, sts.NewFromConfig(loaded), roleARN, roleSessionName, identityTokenTimeout,
+	)
 	return loaded, nil
 }
 
@@ -77,10 +79,15 @@ func (r identityTokenRetriever) GetIdentityToken() ([]byte, error) {
 	return []byte(token.Value), nil
 }
 
+// newCredentialsProvider exchanges Google identity tokens for AWS credentials.
+//
+// sessionName is a parameter rather than the constant because it names the caller in
+// CloudTrail: every binary that federates should be distinguishable there.
 func newCredentialsProvider(
 	tokens auth.TokenProvider,
 	client stscreds.AssumeRoleWithWebIdentityAPIClient,
 	roleARN string,
+	sessionName string,
 	tokenTimeout time.Duration,
 ) aws.CredentialsProvider {
 	provider := stscreds.NewWebIdentityRoleProvider(
@@ -88,7 +95,7 @@ func newCredentialsProvider(
 		roleARN,
 		identityTokenRetriever{provider: tokens, timeout: tokenTimeout},
 		func(options *stscreds.WebIdentityRoleOptions) {
-			options.RoleSessionName = roleSessionName
+			options.RoleSessionName = sessionName
 		},
 	)
 	return aws.NewCredentialsCache(provider, func(options *aws.CredentialsCacheOptions) {

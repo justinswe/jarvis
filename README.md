@@ -74,7 +74,7 @@ The container exposes health and readiness checks at `http://localhost:8080/heal
 
 The combined image runs a small PID 1 supervisor over three processes. It starts a bundled NATS server on loopback port 4222, waits for its monitoring endpoint, starts the worker on loopback port 8081, waits for readiness, and then starts the Discord Gateway ingestor on port 8080. If any process exits, the supervisor stops the rest so the container platform can replace the instance cleanly. The supervisor passes no flags to the two Jarvis binaries: it hands each one an environment and lets the `app` package resolve the configuration from it. It does pass `--port` and `--http_port` to nats-server, which override `nats.conf`, so `--nats-port` and `--nats-monitor-port` move the bus and the supervisor together.
 
-On shutdown the worker stops taking new messages and gives the replies already in flight up to `--nats-drain-timeout` (20s) to finish before cancelling them; anything cancelled is left un-acknowledged and redelivered. The supervisor's `--shutdown-timeout` (30s) must stay above that, or it would kill the worker part-way through draining.
+On shutdown the worker stops taking new messages and gives the replies already in flight up to `--mq-drain-timeout` (20s) to finish before cancelling them; anything cancelled is left un-acknowledged and redelivered. The supervisor's `--shutdown-timeout` (30s) must stay above that, or it would kill the worker part-way through draining.
 
 The supervisor can also run a Valkey, which is off by default. With `--valkey-enabled` and no `--valkey-address`, or one naming loopback, it starts `valkey-server` after the bus and before the worker, waits for the server to answer `PING`, and passes `VALKEY_ENABLED` and `VALKEY_ADDRESS` down to the worker; it stops with everything else. Persistence is off, since rate-limit counters expire on their own and the guild-configuration cache is read-through.
 
@@ -190,7 +190,7 @@ bazel run //jarvis
 
 `//jarvis` is the same supervisor the container runs as PID 1, so a local run follows the identical sequence: NATS on port 4222, then the worker health server on port 8081 once NATS answers its monitoring endpoint, then the ingestor health server on port 8080 once the worker reports ready. Stopping it stops all three. Locally it finds NATS and its two siblings in the Bazel runfiles tree; in the image it finds them under `/app`.
 
-Run `bazel run //ingestor -- --help` or `bazel run //worker -- --help` to inspect or start either service on its own; each needs a reachable `NATS_URL`.
+Run `bazel run //ingestor -- --help` or `bazel run //worker -- --help` to inspect or start either service on its own; each needs a reachable broker: `NATS_URL` by default, or `PUBSUB_PROJECT_ID` under `MQ_DRIVER=pubsub`.
 
 ## Search and conversation recall
 
@@ -233,6 +233,8 @@ The primary configuration variables are:
 | `TAVILY_API_KEY`                 | When Tavily is selected    | Tavily credential; ignored when Tavily is unselected.                                                                                                                     |
 | `OPENROUTER_API_KEY`             | With OpenRouter            | API key used only for OpenRouter generation.                                                                                                                              |
 | `NVIDIA_API_KEY`                 | With NVIDIA NIM            | Bearer key for hosted `integrate.api.nvidia.com`; self-hosted NIM endpoints are not configured here.                                                                      |
+| `MQ_DRIVER`                      | No                         | Message queue broker: `nats` (default) or `pubsub`. See [docs/pubsub.md](docs/pubsub.md).                                                                                  |
+| `PUBSUB_PROJECT_ID`              | With Pub/Sub               | GCP project owning the topic and subscription; required when `MQ_DRIVER=pubsub`.                                                                                          |
 | `VALKEY_ENABLED`                 | No                         | Enables per-guild usage metering, subscription rate limits, and (with DynamoDB) the guild-configuration cache; defaults to `false`. See [docs/valkey.md](docs/valkey.md). |
 | `VALKEY_ADDRESS`                 | With Valkey                | Comma-separated `host:port` addresses.                                                                                                                                    |
 | `GUILD_TIER`                     | No                         | Subscription tier limits as `name=requests-per-second:burst:tokens-per-hour`. Declaring none records usage without enforcing limits.                                      |
@@ -279,7 +281,7 @@ Credentials remain provider-wide: configure `GOOGLE_AI_API_KEY`, `OPENROUTER_API
 Jarvis separates the stateful Discord connection from independently deployable message processing:
 
 ```text
-Discord Gateway -> ingestor -> NATS JetStream -> worker
+Discord Gateway -> ingestor -> NATS JetStream or GCP Pub/Sub -> worker
                               jarvis.discord.v1.messages
                                                        |-> Discord REST
                                                        |-> Google AI Gemini Developer API (generation and tools)
@@ -290,15 +292,15 @@ Discord Gateway -> ingestor -> NATS JetStream -> worker
                                                        `-> DynamoDB (optional)
 ```
 
-The two services follow Cloud Pub/Sub push semantics.
+Both services speak to the broker through the `mq` package rather than to a client directly, so the transport is an operator's choice. `MQ_DRIVER=nats` is the default and runs the combined image, local development, and any deployment that must keep working without the internet. `MQ_DRIVER=pubsub` uses GCP Pub/Sub, whose topics are global, and is what lets Jarvis run in two places at once — see [Pub/Sub](docs/pubsub.md) and [failover](docs/failover.md).
 
-The ingestor owns the Discord Gateway connection and normalizes each message into the versioned protobuf contract at `api/jarvis/discord/v1/worker.proto`. It publishes those bytes to the `jarvis.discord.v1.messages` subject on the configured `NATS_URL` and returns as soon as the broker has stored the message. It never waits for processing, so a slow or restarting worker cannot stall Discord event handling.
+The ingestor owns the Discord Gateway connection and normalizes each message into the versioned protobuf contract at `api/jarvis/discord/v1/worker.proto`. It publishes those bytes to the configured topic and returns as soon as the broker has stored the message. It never waits for processing, so a slow or restarting worker cannot stall Discord event handling.
 
-The worker consumes the `JARVIS_DISCORD` stream through the `jarvis-worker` durable consumer, and provisions both on startup. A message is held un-acknowledged for as long as the worker is working on it — the worker resets the redelivery timer every `NATS_ACK_WAIT`/2 while processing — and is acknowledged only once processing completes. A worker that crashes mid-message therefore has that message redelivered rather than losing it. Processing failures are negatively acknowledged and retried up to `NATS_MAX_DELIVER` times; messages that redelivery could never fix, such as an unparseable payload, are terminated instead of retried. Each worker holds at most `NATS_MAX_ACK_PENDING` messages at once and processes them concurrently.
+The worker consumes through the `jarvis-worker` durable subscription. A message is held un-acknowledged for as long as the worker is working on it — up to `MQ_MAX_PROCESSING_TIME`, beyond which a wedged message is released rather than held for the process lifetime — and is acknowledged only once processing completes. A worker that crashes mid-message therefore has that message redelivered rather than losing it. Processing failures are negatively acknowledged and retried up to `MQ_MAX_DELIVER` times; messages that redelivery could never fix, such as an unparseable payload, are terminated instead of retried. Each worker holds at most `MQ_MAX_IN_FLIGHT` messages at once and processes them concurrently.
 
 Because the consumer is durable and shared, running more than one worker replica load-balances the stream across them with no further coordination.
 
-The worker owns provisioning, so the stream must exist before the ingestor can publish. The combined image guarantees this by starting the ingestor only after the worker reports ready. In a split deployment where the ingestor starts first, its publishes are logged and dropped until a worker has provisioned the stream.
+Under the NATS driver both services provision the stream on startup, so whichever reaches the bus first creates it. Under Pub/Sub neither creates anything: the topic and subscription must exist beforehand, and a service that cannot find them fails at startup naming the `gcloud` command that fixes it.
 
 Build and load the combined or individual service images locally:
 
@@ -310,14 +312,14 @@ bazel run //:worker_image_load
 
 Only the combined `justinswe/jarvis` image is currently published. Publication of `justinswe/jarvis-ingestor` and `justinswe/jarvis-worker` is intentionally deferred.
 
-The combined image bakes in a pinned upstream `nats-server` binary as its own layer; the individual service images do not, and expect `NATS_URL` to point at an external cluster. The bundled broker keeps JetStream state under `/tmp/jetstream`, which is ephemeral: it gives redelivery when the worker crashes during processing, but does not survive a container restart. Durable delivery across restarts is a property of an external NATS cluster in the split deployment.
+The combined image bakes in a pinned upstream `nats-server` binary as its own layer; the individual service images do not, and expect `NATS_URL` to point at an external cluster. Under `MQ_DRIVER=pubsub` the supervisor starts no broker at all, because there is nothing local to run. The bundled broker keeps JetStream state under `/tmp/jetstream`, which is ephemeral: it gives redelivery when the worker crashes during processing, but does not survive a container restart. Durable delivery across restarts is a property of an external NATS cluster in the split deployment.
 
 No image bakes in `valkey-server`, including the combined one: every upstream Valkey build links `libsystemd`, which the distroless base does not carry. Every image therefore expects `VALKEY_ADDRESS` to point at a Valkey on another host, and because the supervisor shares `VALKEY_ENABLED` with the worker, enabling it without such an address fails at startup rather than silently metering nothing. The vendored binary under `third_party/valkey` exists for local runs, and upstream publishes it for Linux only — on macOS `brew install valkey` puts one on `PATH`, which is where the supervisor looks when Bazel has staged nothing.
 
 > [!WARNING]
 > The NATS bus has no application-level authentication. The combined image binds its bundled broker to loopback, so only that container can reach it. A split deployment must keep its NATS cluster behind an internal VPC or another trusted network boundary, must not expose it directly to the public internet, and should enable NATS authentication and TLS.
 
-Direct HTTP publishing makes one synchronous attempt because processing has Discord side effects. Durable retries and deduplication are deferred until Pub/Sub is introduced.
+Deduplication differs by broker and this is the one difference a deployment must account for. JetStream drops a republished message inside its duplicate window; Pub/Sub has no publisher-side deduplication and delivers it twice. Running more than one ingestor therefore requires `DYNAMODB_ENABLED=true`, which supplies the per-message reply claim that makes exactly one worker answer. [Failover](docs/failover.md) covers this in full.
 
 ## Development
 
@@ -332,6 +334,9 @@ Additional documentation:
 
 - [Web search providers, sources, and recovery](docs/web-search.md)
 - [DynamoDB storage, history, and multi-cloud authentication](docs/dynamodb.md)
+- [Valkey usage metering, limits, and caching](docs/valkey.md)
+- [GCP Pub/Sub transport and broker differences](docs/pubsub.md)
+- [Active-active multi-site deployment](docs/failover.md)
 
 ## License
 

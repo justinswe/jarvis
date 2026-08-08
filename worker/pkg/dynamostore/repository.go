@@ -53,6 +53,25 @@ type Repository struct {
 	// cache with the hot message-processing read path rather than paying its own
 	// DynamoDB round trip every message.
 	retentionLookup config.Provider
+	// replyOwner names this process in the claims it takes. It is recorded for the operator
+	// reading a claim item, never matched on: see replyClaimCondition.
+	replyOwner string
+	// replyClaimTTL bounds how long a claim survives. See SetReplyClaimTTL.
+	replyClaimTTL time.Duration
+}
+
+// SetReplyClaimTTL bounds how long a reply claim blocks other workers.
+//
+// It must not exceed the broker's redelivery delay. A claim is taken before generation,
+// so a worker that dies mid-generation leaves one behind; the redelivery that follows can
+// only answer once that claim has lapsed. Set longer than the redelivery delay, every
+// attempt is refused until the message is exhausted and the reply is lost. Callers pass
+// their acknowledgement wait.
+func (r *Repository) SetReplyClaimTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	r.replyClaimTTL = ttl
 }
 
 // SetRetentionLookup overrides how Record resolves message-retention configuration. Pass a
@@ -83,6 +102,7 @@ func New(client dynamoClient, table string, defaults config.GuildConfig) (*Repos
 	}
 	return &Repository{
 		client: client, table: table, defaults: cloneConfig(defaults), encoder: encoder, decoder: decoder, now: time.Now,
+		replyOwner: replyClaimOwner(), replyClaimTTL: defaultReplyClaimTTL,
 	}, nil
 }
 

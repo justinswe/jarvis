@@ -3,11 +3,13 @@ package main
 import (
 	"time"
 
+	"github.com/justinswe/jarvis/mq"
 	"github.com/spf13/cobra"
 )
 
 type supervisorConfig struct {
 	port, workerPort                    string
+	mqDriver                            string
 	natsPort, natsMonitorPort           string
 	natsBinary, natsConfig              string
 	ingestorBinary, workerBinary        string
@@ -23,6 +25,7 @@ type supervisorConfig struct {
 func defaultConfig() supervisorConfig {
 	return supervisorConfig{
 		port:               "8080",
+		mqDriver:           string(mq.DriverNATS),
 		workerPort:         "8081",
 		natsPort:           "4222",
 		natsMonitorPort:    "8222",
@@ -35,7 +38,7 @@ func defaultConfig() supervisorConfig {
 		natsStartTimeout:   15 * time.Second,
 		valkeyStartTimeout: 15 * time.Second,
 		workerStartTimeout: 30 * time.Second,
-		// Must exceed the worker's --nats-drain-timeout (20s), or the supervisor
+		// Must exceed the worker's --mq-drain-timeout (20s), or the supervisor
 		// SIGKILLs the worker part-way through draining the replies it is finishing.
 		shutdownTimeout: 30 * time.Second,
 	}
@@ -57,6 +60,10 @@ func newRootCommand() *cobra.Command {
 	flags.StringVar(&cfg.natsMonitorPort, "nats-monitor-port", cfg.natsMonitorPort, "Internal NATS monitoring port")
 	flags.StringVar(&cfg.natsBinary, "nats-binary", cfg.natsBinary, "Path to the nats-server binary")
 	flags.StringVar(&cfg.natsConfig, "nats-config", cfg.natsConfig, "Path to the nats-server configuration file")
+	// Bound so the supervisor can see the children's MQ_DRIVER without reading the
+	// environment behind the flag machinery, which AGENTS.md forbids. The supervisor never
+	// speaks to a broker itself; it only needs to know whether to start one.
+	flags.StringVar(&cfg.mqDriver, "mq-driver", cfg.mqDriver, "Message queue broker the children use: nats starts a supervised server, pubsub starts none")
 	flags.BoolVar(&cfg.valkeyEnabled, "valkey-enabled", cfg.valkeyEnabled, "Use Valkey; a supervised one is started unless --valkey-address names a host other than loopback")
 	flags.StringVar(&cfg.valkeyBinary, "valkey-binary", cfg.valkeyBinary, "Path to the valkey-server binary")
 	flags.StringVar(&cfg.valkeyPort, "valkey-port", cfg.valkeyPort, "Internal port for the supervised Valkey when --valkey-address names none")

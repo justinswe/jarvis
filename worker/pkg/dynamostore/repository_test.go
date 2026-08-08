@@ -2,6 +2,7 @@ package dynamostore
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -596,4 +597,256 @@ func TestConfigurationWithoutStoredTierLoadsEmptyAndKeepsModelProfiles(t *testin
 	assert.Empty(t, loaded.Tier)
 	assert.Equal(t, value.Settings.PrimaryModelProfile, loaded.Settings.PrimaryModelProfile,
 		"adding the tier attribute must not have bumped the schema version")
+}
+
+// claimTable is a DynamoDB stand-in that evaluates the reply claim's condition the way
+// the service does, so the tests exercise the expression rather than a paraphrase of it.
+type claimTable struct {
+	items map[string]map[string]dynamodbtypes.AttributeValue
+}
+
+func newClaimTable() *claimTable {
+	return &claimTable{items: map[string]map[string]dynamodbtypes.AttributeValue{}}
+}
+
+func (c *claimTable) put(_ context.Context, input *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+	key := attributeString(input.Item["pk"]) + "|" + attributeString(input.Item["sk"])
+	existing, held := c.items[key]
+	// An unconditional put overwrites whatever is there, which is what HoldReply relies on.
+	if input.ConditionExpression != nil && held && !c.wins(existing, input) {
+		return nil, &dynamodbtypes.ConditionalCheckFailedException{}
+	}
+	c.items[key] = input.Item
+	return &dynamodb.PutItemOutput{}, nil
+}
+
+// wins evaluates the one arm that can beat an existing claim: it has lapsed.
+// attribute_not_exists is the caller's `held` check.
+//
+// The comparison parses rather than comparing the two attribute strings, because DynamoDB
+// compares N attributes numerically and a lexicographic stand-in disagrees the moment the
+// two timestamps differ in width — which would make this fake pass a condition the service
+// rejects.
+func (c *claimTable) wins(existing map[string]dynamodbtypes.AttributeValue, input *dynamodb.PutItemInput) bool {
+	expires, err := strconv.ParseInt(attributeNumber(existing["expires_at"]), 10, 64)
+	if err != nil {
+		return false
+	}
+	now, err := strconv.ParseInt(attributeNumber(input.ExpressionAttributeValues[":now"]), 10, 64)
+	if err != nil {
+		return false
+	}
+	return expires <= now
+}
+
+func TestClaimReplyWinsOnceAndLosesToOtherWorkers(t *testing.T) {
+	table := newClaimTable()
+	client := &fakeDynamoClient{put: table.put}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	other, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	other.replyOwner = "other-site/1"
+
+	won, err := repository.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	assert.True(t, won)
+
+	// The other site's copy of the same Discord message must not produce a second reply.
+	won, err = other.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	assert.False(t, won)
+
+	// A different message in the same channel is unaffected.
+	won, err = other.ClaimReply(t.Context(), "channel", "123456789012345679")
+	require.NoError(t, err)
+	assert.True(t, won)
+}
+
+// TestClaimReplyRefusesASecondCopyDeliveredToTheSameWorker is the duplicate the claim
+// exists to stop, and the one an owner arm in the condition would let through.
+//
+// Every site's workers share one subscription, so the two copies of a Discord message are
+// load-balanced independently and land on the same process roughly one time in however
+// many workers are running. A claim keyed on the process rather than the message would
+// match itself and answer twice.
+func TestClaimReplyRefusesASecondCopyDeliveredToTheSameWorker(t *testing.T) {
+	table := newClaimTable()
+	repository, err := New(&fakeDynamoClient{put: table.put}, "table", repositoryDefaults())
+	require.NoError(t, err)
+
+	won, err := repository.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	require.True(t, won)
+
+	won, err = repository.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	assert.False(t, won, "one worker holding both copies must still answer once")
+}
+
+func TestClaimReplyRetakesALapsedClaim(t *testing.T) {
+	table := newClaimTable()
+	client := &fakeDynamoClient{put: table.put}
+	dead, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	claimed := time.Unix(1000, 0).UTC()
+	dead.now = func() time.Time { return claimed }
+	dead.SetReplyClaimTTL(30 * time.Second)
+
+	won, err := dead.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	require.True(t, won)
+
+	// That worker died mid-generation. Once its claim lapses the redelivery must be able
+	// to answer, or the reply is lost rather than merely delayed.
+	survivor, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	survivor.replyOwner = "survivor/1"
+	survivor.now = func() time.Time { return claimed.Add(31 * time.Second) }
+
+	won, err = survivor.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	assert.True(t, won)
+}
+
+func TestClaimReplyWritesAnExpiringClaimUnderTheMessageChannel(t *testing.T) {
+	var item map[string]dynamodbtypes.AttributeValue
+	var names map[string]string
+	var values map[string]dynamodbtypes.AttributeValue
+	client := &fakeDynamoClient{put: func(_ context.Context, input *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+		item, names, values = input.Item, input.ExpressionAttributeNames, input.ExpressionAttributeValues
+		return &dynamodb.PutItemOutput{}, nil
+	}}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	now := time.Unix(1000, 0).UTC()
+	repository.now = func() time.Time { return now }
+	repository.SetReplyClaimTTL(45 * time.Second)
+
+	won, err := repository.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	require.True(t, won)
+
+	assert.Equal(t, "CHANNEL#channel", attributeString(item["pk"]))
+	assert.Equal(t, "REPLY#123456789012345678", attributeString(item["sk"]))
+	assert.Equal(t, replyClaimEntityType, attributeString(item["entity_type"]))
+	assert.NotEmpty(t, attributeString(item["owner"]))
+	// The claim expires rather than accumulating forever, and does so in time for the
+	// redelivery a dead claimant would otherwise block.
+	assert.Equal(t, int64String(now.Add(45*time.Second).Unix()), attributeNumber(item["expires_at"]))
+	// The condition must turn on the message alone. Matching the owner would let the
+	// second copy of one message, delivered to this same process, beat its own claim.
+	assert.Empty(t, names, "the claim must not reference the owner attribute")
+	assert.NotContains(t, values, ":owner")
+}
+
+// TestHoldReplyOutlastsEveryDeliverableCopy is the other half of the claim. ClaimReply is
+// short so a crash releases the message; that same shortness lets a copy delayed past the
+// acknowledgement wait answer a message someone has already replied to. Extending once the
+// reply exists is what closes it, so the held claim must outlast the queue's retention.
+func TestHoldReplyOutlastsEveryDeliverableCopy(t *testing.T) {
+	var item map[string]dynamodbtypes.AttributeValue
+	var conditional bool
+	client := &fakeDynamoClient{put: func(_ context.Context, input *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+		item, conditional = input.Item, input.ConditionExpression != nil
+		return &dynamodb.PutItemOutput{}, nil
+	}}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	now := time.Unix(1000, 0).UTC()
+	repository.now = func() time.Time { return now }
+	repository.SetReplyClaimTTL(30 * time.Second)
+
+	require.NoError(t, repository.HoldReply(t.Context(), "channel", "123456789012345678"))
+
+	assert.Equal(t, "CHANNEL#channel", attributeString(item["pk"]))
+	assert.Equal(t, "REPLY#123456789012345678", attributeString(item["sk"]))
+	assert.Equal(t, int64String(now.Add(discordv1.MaxMessageAge).Unix()), attributeNumber(item["expires_at"]),
+		"a held claim must outlive the longest a copy can sit in the queue")
+	assert.False(t, conditional, "the reply is already posted; nothing may refuse to record it")
+}
+
+// TestHoldReplyRefusesToTakeAClaimItCannotAddress guards the same identifiers ClaimReply
+// does: a claim written under an empty key would suppress nothing and hide that it had.
+func TestHoldReplyRefusesToTakeAClaimItCannotAddress(t *testing.T) {
+	repository, err := New(&fakeDynamoClient{}, "table", repositoryDefaults())
+	require.NoError(t, err)
+
+	assert.Error(t, repository.HoldReply(t.Context(), "", "123456789012345678"))
+	assert.Error(t, repository.HoldReply(t.Context(), "channel", " "))
+}
+
+// TestClaimReplyRefusesAHeldMessage is the pair of properties in one place: the extension
+// really does lock out the late copy, and it does so for every worker.
+func TestClaimReplyRefusesAHeldMessage(t *testing.T) {
+	table := newClaimTable()
+	client := &fakeDynamoClient{put: table.put}
+	winner, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	claimed := time.Unix(1000, 0).UTC()
+	winner.now = func() time.Time { return claimed }
+
+	won, err := winner.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, winner.HoldReply(t.Context(), "channel", "123456789012345678"))
+
+	// The other site's copy, delivered long after the original claim would have lapsed.
+	late, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+	late.replyOwner = "late-site/1"
+	late.now = func() time.Time { return claimed.Add(5 * time.Minute) }
+
+	won, err = late.ClaimReply(t.Context(), "channel", "123456789012345678")
+	require.NoError(t, err)
+	assert.False(t, won, "a message that has been answered must stay answered")
+}
+
+func TestSetReplyClaimTTLIgnoresNonPositiveValues(t *testing.T) {
+	repository, err := New(&fakeDynamoClient{}, "table", repositoryDefaults())
+	require.NoError(t, err)
+
+	repository.SetReplyClaimTTL(0)
+	assert.Equal(t, defaultReplyClaimTTL, repository.replyClaimTTL,
+		"a claim that never expires would strand every redelivery")
+	repository.SetReplyClaimTTL(-time.Second)
+	assert.Equal(t, defaultReplyClaimTTL, repository.replyClaimTTL)
+}
+
+func TestClaimReplyRequiresBothIdentifiers(t *testing.T) {
+	repository, err := New(&fakeDynamoClient{}, "table", repositoryDefaults())
+	require.NoError(t, err)
+
+	_, err = repository.ClaimReply(t.Context(), "", "123456789012345678")
+	assert.Error(t, err)
+	_, err = repository.ClaimReply(t.Context(), "channel", " ")
+	assert.Error(t, err)
+}
+
+func TestClaimReplySurfacesUnexpectedErrors(t *testing.T) {
+	client := &fakeDynamoClient{put: func(context.Context, *dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error) {
+		return nil, errors.New("throttled")
+	}}
+	repository, err := New(client, "table", repositoryDefaults())
+	require.NoError(t, err)
+
+	won, err := repository.ClaimReply(t.Context(), "channel", "123456789012345678")
+	assert.Error(t, err, "the caller decides how to handle a claim it could not take")
+	assert.False(t, won)
+}
+
+func attributeString(value dynamodbtypes.AttributeValue) string {
+	member, ok := value.(*dynamodbtypes.AttributeValueMemberS)
+	if !ok {
+		return ""
+	}
+	return member.Value
+}
+
+func attributeNumber(value dynamodbtypes.AttributeValue) string {
+	member, ok := value.(*dynamodbtypes.AttributeValueMemberN)
+	if !ok {
+		return ""
+	}
+	return member.Value
 }

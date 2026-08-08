@@ -101,7 +101,7 @@ func stsOutput(accessKey string, expiration time.Time) *sts.AssumeRoleWithWebIde
 func TestCredentialsProviderExchangesAndCachesToken(t *testing.T) {
 	tokens := &fakeTokenProvider{token: &auth.Token{Value: "google-token"}}
 	client := &fakeSTSClient{outputs: []*sts.AssumeRoleWithWebIdentityOutput{stsOutput("access-key", time.Now().Add(time.Hour))}}
-	provider := newCredentialsProvider(tokens, client, "arn:aws:iam::123060663424:role/JarvisCloudRunDynamoDB", time.Second)
+	provider := newCredentialsProvider(tokens, client, "arn:aws:iam::123060663424:role/JarvisCloudRunDynamoDB", "jarvis-worker", time.Second)
 
 	first, err := provider.Retrieve(t.Context())
 	require.NoError(t, err)
@@ -123,7 +123,7 @@ func TestCredentialsProviderRefreshesExpiringCredentials(t *testing.T) {
 		stsOutput("expiring", time.Now().Add(time.Minute)),
 		stsOutput("refreshed", time.Now().Add(time.Hour)),
 	}}
-	provider := newCredentialsProvider(tokens, client, "role", time.Second)
+	provider := newCredentialsProvider(tokens, client, "role", "jarvis-worker", time.Second)
 
 	first, err := provider.Retrieve(t.Context())
 	require.NoError(t, err)
@@ -144,7 +144,7 @@ func TestCredentialsProviderCoalescesConcurrentRetrievals(t *testing.T) {
 		release: release,
 	}
 	provider := newCredentialsProvider(
-		&fakeTokenProvider{token: &auth.Token{Value: "google-token"}}, client, "role", time.Second,
+		&fakeTokenProvider{token: &auth.Token{Value: "google-token"}}, client, "role", "jarvis-worker", time.Second,
 	)
 
 	const callers = 10
@@ -165,7 +165,7 @@ func TestCredentialsProviderCoalescesConcurrentRetrievals(t *testing.T) {
 
 func TestCredentialsProviderRejectsEmptyToken(t *testing.T) {
 	client := &fakeSTSClient{outputs: []*sts.AssumeRoleWithWebIdentityOutput{stsOutput("unused", time.Now().Add(time.Hour))}}
-	provider := newCredentialsProvider(&fakeTokenProvider{token: &auth.Token{}}, client, "role", time.Second)
+	provider := newCredentialsProvider(&fakeTokenProvider{token: &auth.Token{}}, client, "role", "jarvis-worker", time.Second)
 
 	_, err := provider.Retrieve(t.Context())
 
@@ -175,7 +175,7 @@ func TestCredentialsProviderRejectsEmptyToken(t *testing.T) {
 }
 
 func TestCredentialsProviderBoundsTokenRetrieval(t *testing.T) {
-	provider := newCredentialsProvider(&fakeTokenProvider{wait: true}, &fakeSTSClient{}, "role", 10*time.Millisecond)
+	provider := newCredentialsProvider(&fakeTokenProvider{wait: true}, &fakeSTSClient{}, "role", "jarvis-worker", 10*time.Millisecond)
 
 	_, err := provider.Retrieve(t.Context())
 
@@ -185,7 +185,7 @@ func TestCredentialsProviderBoundsTokenRetrieval(t *testing.T) {
 
 func TestCredentialsProviderDoesNotExposeTokenInSTSError(t *testing.T) {
 	client := &fakeSTSClient{err: errors.New("STS rejected identity")}
-	provider := newCredentialsProvider(&fakeTokenProvider{token: &auth.Token{Value: "sensitive-google-token"}}, client, "role", time.Second)
+	provider := newCredentialsProvider(&fakeTokenProvider{token: &auth.Token{Value: "sensitive-google-token"}}, client, "role", "jarvis-worker", time.Second)
 
 	_, err := provider.Retrieve(t.Context())
 

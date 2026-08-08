@@ -41,6 +41,20 @@ type Limiter interface {
 	Allow(ctx context.Context, guildID, tier string) (Admission, error)
 }
 
+// ReplyClaimer reserves the right to answer one Discord message.
+//
+// Delivery is at-least-once, and an active-active deployment keeps a Gateway connection at
+// every site permanently, so the same message reaches more than one worker as a matter of
+// course rather than only during a handover. Only the caller that wins the claim answers.
+//
+// The two calls divide one guarantee. ClaimReply is short-lived so a worker that dies
+// mid-generation lets its redelivery through; HoldReply extends the winner's claim once
+// the reply exists, past any copy that could still arrive.
+type ReplyClaimer interface {
+	ClaimReply(ctx context.Context, channelID, messageID string) (bool, error)
+	HoldReply(ctx context.Context, channelID, messageID string) error
+}
+
 // Client contains the Discord REST operations used while processing a message.
 type Client interface {
 	Channel(context.Context, string) (*discordgo.Channel, error)
@@ -69,6 +83,9 @@ type Processor struct {
 	threadQueue        threadRequestQueue
 	limiter            Limiter
 	guildTiers         []string
+	// replies is nil when no shared store is configured. Nothing then deduplicates
+	// replies, which is why more than one Gateway connection requires DYNAMODB_ENABLED.
+	replies ReplyClaimer
 }
 
 // ProcessorConfig contains the worker-owned dependencies for Discord request processing.
@@ -85,6 +102,7 @@ type ProcessorConfig struct {
 	ImageHTTPClient    *http.Client
 	Limiter            Limiter
 	GuildTiers         []string
+	ReplyClaimer       ReplyClaimer
 }
 
 // NewProcessor creates a request processor backed only by Discord REST APIs.
@@ -129,6 +147,7 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 		history: cfg.History, manager: cfg.ConfigManager, models: cfg.ModelRegistry, webSearchProviders: append([]string(nil), cfg.WebSearchProviders...),
 		rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
 		limiter: cfg.Limiter, guildTiers: append([]string(nil), cfg.GuildTiers...),
+		replies: cfg.ReplyClaimer,
 	}, nil
 }
 

@@ -35,13 +35,27 @@ func (p *Processor) Process(ctx context.Context, m *discordgo.MessageCreate) err
 	if !p.isTargeted(ctx, m, channel) {
 		return nil
 	}
+	if !p.claimReply(ctx, channel, m) {
+		return nil
+	}
+	if err := p.answer(ctx, channel, m); err != nil {
+		// The claim is left to lapse so that whichever worker the redelivery reaches —
+		// including this one — can take it and try again.
+		return err
+	}
+	p.holdReply(ctx, channel, m)
+	return nil
+}
+
+// answer handles one message the worker has won the right to reply to.
+func (p *Processor) answer(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate) error {
 	if handled := p.handleAddAdminCommand(ctx, m); handled {
 		return nil
 	}
 	if !isThreadChannel(channel) {
 		return p.processTargetedMessage(ctx, channel, m)
 	}
-	err = p.threadQueue.Run(ctx, m.ChannelID, func(threadCtx context.Context) error {
+	err := p.threadQueue.Run(ctx, m.ChannelID, func(threadCtx context.Context) error {
 		return p.processTargetedMessage(threadCtx, channel, m)
 	})
 	if errors.Is(err, errThreadRequestSuperseded) {

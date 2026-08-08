@@ -11,8 +11,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
-	"github.com/justinswe/jarvis/worker/pkg/awsidentity"
+	"github.com/justinswe/jarvis/awsidentity"
+	"github.com/justinswe/jarvis/mq"
 	"github.com/justinswe/jarvis/worker/pkg/cache"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/consumer"
@@ -26,7 +26,6 @@ import (
 	"github.com/justinswe/jarvis/worker/pkg/version"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/valkey-io/valkey-go"
 	"go.uber.org/zap"
 )
@@ -54,6 +53,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 	var history discord.History
 	var manager config.Manager
 	var recorder consumer.Recorder
+	var claimer discord.ReplyClaimer
 	var repository *dynamostore.Repository
 	if cfg.dynamodbEnabled {
 		repo, repositoryErr := cfg.newRepository(ctx)
@@ -62,6 +62,10 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		}
 		defer repo.Close()
 		provider, history, manager, recorder = repo, repo, repo, repo
+		// A claim must lapse before the broker redelivers, or a worker that dies
+		// mid-generation strands every retry of the message it was holding.
+		repo.SetReplyClaimTTL(cfg.mqAckWait)
+		claimer = repo
 		repository = repo
 	}
 	var limiter discord.Limiter
@@ -120,37 +124,26 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		RootUserIDs:        cfg.rootUserIDs,
 		Version:            version.Value,
 		Limiter:            limiter,
+		ReplyClaimer:       claimer,
 		GuildTiers:         guildTierNames(guildTiers),
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize Discord processor")
 	}
 
-	connection, err := discordv1.Connect(cfg.natsURL, "jarvis-worker")
-	if err != nil {
-		return err
-	}
-	defer discordv1.Drain(connection)
-	stream, err := jetstream.New(connection)
-	if err != nil {
-		return errors.Wrap(err, "initialize JetStream")
-	}
-	subscription, err := consumer.Start(ctx, stream, consumer.Config{
-		Stream:        cfg.natsStream,
-		Subject:       cfg.natsSubject,
-		Durable:       cfg.natsDurable,
-		AckWait:       cfg.natsAckWait,
-		MaxDeliver:    cfg.natsMaxDeliver,
-		MaxAckPending: cfg.natsMaxAckPending,
-		DrainTimeout:  cfg.natsDrainTimeout,
-	}, processor, recorder)
+	queue := cfg.queueConfig()
+	subscription, err := consumer.Start(ctx, queue, processor, recorder)
 	if err != nil {
 		return errors.Wrap(err, "start message consumer")
 	}
 	defer subscription.Stop()
 
 	address := cfg.address()
-	app.L().Info("Starting worker", zap.String("address", address), zap.String("nats_url", cfg.natsURL))
+	app.L().Info("Starting worker",
+		zap.String("address", address),
+		zap.String("mq_driver", cfg.mqDriver),
+		zap.String("topic", queue.Topic),
+	)
 	return server.Serve(ctx, address)
 }
 
@@ -261,6 +254,14 @@ func (cfg workerConfig) validate() error {
 	}
 	if cfg.dynamodbEnabled && strings.TrimSpace(cfg.dynamodbTable) == "" {
 		return errors.New("DynamoDB table is required when DynamoDB is enabled")
+	}
+	if !mq.Driver(cfg.mqDriver).Valid() {
+		return errors.Errorf("unsupported message queue driver %q", cfg.mqDriver)
+	}
+	// A message may not be released before its first keepalive is even due, or every
+	// message would be redelivered once while the first delivery was still working.
+	if cfg.mqMaxProcessingTime < cfg.mqAckWait {
+		return errors.New("max processing time must be at least the acknowledgement wait")
 	}
 	for _, userID := range cfg.rootUserIDs {
 		if !validRootUserID(userID) {

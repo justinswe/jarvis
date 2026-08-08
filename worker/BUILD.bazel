@@ -11,7 +11,8 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//api/jarvis/discord/v1:discord",
-        "//worker/pkg/awsidentity",
+        "//awsidentity",
+        "//mq",
         "//worker/pkg/cache",
         "//worker/pkg/config",
         "//worker/pkg/consumer",
@@ -29,7 +30,6 @@ go_library(
         "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",
         "@com_github_nats_io_nats_go//:nats_go",
-        "@com_github_nats_io_nats_go//jetstream",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_valkey_io_valkey_go//:valkey-go",
         "@org_uber_go_zap//:zap",

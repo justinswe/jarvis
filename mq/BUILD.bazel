@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "mq",
+    srcs = [
+        "mq.go",
+        "nats.go",
+        "open.go",
+        "pubsub.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/mq",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@com_github_nats_io_nats_go//:nats_go",
+        "@com_github_nats_io_nats_go//jetstream",
+        "@com_google_cloud_go_pubsub_v2//:pubsub",
+        "@com_google_cloud_go_pubsub_v2//apiv1/pubsubpb",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "mq_test",
+    srcs = [
+        "mq_test.go",
+        "nats_test.go",
+    ],
+    embed = [":mq"],
+    deps = [
+        "//api/jarvis/discord/v1:discord",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

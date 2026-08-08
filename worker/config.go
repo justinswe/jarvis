@@ -7,6 +7,7 @@ import (
 	"time"
 
 	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
+	"github.com/justinswe/jarvis/mq"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
@@ -19,9 +20,11 @@ import (
 
 type workerConfig struct {
 	host, port, projectID, location, defaultPrompt, discordBotToken string
+	mqDriver                                                        string
 	natsURL, natsStream, natsSubject, natsDurable                   string
-	natsAckWait, natsDrainTimeout                                   time.Duration
-	natsMaxDeliver, natsMaxAckPending                               int
+	pubsubProjectID, pubsubTopic, pubsubSubscription                string
+	mqAckWait, mqDrainTimeout, mqMaxProcessingTime                  time.Duration
+	mqMaxDeliver, mqMaxInFlight                                     int
 	openRouterAPIKey, googleAIAPIKey, nvidiaAPIKey                  string
 	primaryModelProfile, fallbackModelProfile                       string
 	serperAPIKey, firecrawlAPIKey, tavilyAPIKey                     string
@@ -60,14 +63,18 @@ func newWorkerConfig() workerConfig {
 		messageTimeout:       time.Minute,
 		dynamodbTable:        "jarvis",
 
-		natsURL:           nats.DefaultURL,
-		natsStream:        discordv1.StreamName,
-		natsSubject:       discordv1.Subject,
-		natsDurable:       discordv1.DurableName,
-		natsAckWait:       30 * time.Second,
-		natsDrainTimeout:  20 * time.Second,
-		natsMaxDeliver:    3,
-		natsMaxAckPending: 4,
+		mqDriver:            string(mq.DriverNATS),
+		natsURL:             nats.DefaultURL,
+		natsStream:          discordv1.StreamName,
+		natsSubject:         discordv1.Subject,
+		natsDurable:         discordv1.DurableName,
+		pubsubTopic:         discordv1.TopicName,
+		pubsubSubscription:  discordv1.SubscriptionName,
+		mqAckWait:           30 * time.Second,
+		mqDrainTimeout:      20 * time.Second,
+		mqMaxProcessingTime: 10 * time.Minute,
+		mqMaxDeliver:        5,
+		mqMaxInFlight:       4,
 
 		valkeyKeyPrefix:        "jarvis",
 		valkeyTimeout:          50 * time.Millisecond,
@@ -95,14 +102,19 @@ func newRootCommand() *cobra.Command {
 	// is the supervisor in the same container.
 	flags.StringVar(&cfg.host, "host", cfg.host, "Health server bind host; empty binds every interface")
 	flags.StringVar(&cfg.port, "port", cfg.port, "Health server port")
+	flags.StringVar(&cfg.mqDriver, "mq-driver", cfg.mqDriver, "Message queue broker: nats or pubsub")
 	flags.StringVar(&cfg.natsURL, "nats-url", cfg.natsURL, "NATS server URL")
 	flags.StringVar(&cfg.natsStream, "nats-stream", cfg.natsStream, "JetStream stream holding normalized Discord events")
 	flags.StringVar(&cfg.natsSubject, "nats-subject", cfg.natsSubject, "Subject normalized Discord events are published to")
 	flags.StringVar(&cfg.natsDurable, "nats-durable", cfg.natsDurable, "Durable consumer name shared by every worker replica")
-	flags.DurationVar(&cfg.natsAckWait, "nats-ack-wait", cfg.natsAckWait, "How long a held message may go without progress before redelivery")
-	flags.DurationVar(&cfg.natsDrainTimeout, "nats-drain-timeout", cfg.natsDrainTimeout, "How long shutdown lets in-flight messages finish before cancelling them; must fit the platform's grace period")
-	flags.IntVar(&cfg.natsMaxDeliver, "nats-max-deliver", cfg.natsMaxDeliver, "Maximum delivery attempts per message")
-	flags.IntVar(&cfg.natsMaxAckPending, "nats-max-ack-pending", cfg.natsMaxAckPending, "Maximum messages held un-acknowledged at once")
+	flags.StringVar(&cfg.pubsubProjectID, "pubsub-project-id", cfg.pubsubProjectID, "GCP project owning the Pub/Sub topic and subscription")
+	flags.StringVar(&cfg.pubsubTopic, "pubsub-topic", cfg.pubsubTopic, "Pub/Sub topic normalized Discord events are published to")
+	flags.StringVar(&cfg.pubsubSubscription, "pubsub-subscription", cfg.pubsubSubscription, "Pub/Sub subscription shared by every worker replica")
+	flags.DurationVar(&cfg.mqAckWait, "mq-ack-wait", cfg.mqAckWait, "How long a held message may go without progress before redelivery, and how long a failed one waits before its retry")
+	flags.DurationVar(&cfg.mqMaxProcessingTime, "mq-max-processing-time", cfg.mqMaxProcessingTime, "How long one message may be held in total; set above the largest configured message timeout")
+	flags.DurationVar(&cfg.mqDrainTimeout, "mq-drain-timeout", cfg.mqDrainTimeout, "How long shutdown lets in-flight messages finish before cancelling them; must fit the platform's grace period")
+	flags.IntVar(&cfg.mqMaxDeliver, "mq-max-deliver", cfg.mqMaxDeliver, "Maximum delivery attempts per message")
+	flags.IntVar(&cfg.mqMaxInFlight, "mq-max-in-flight", cfg.mqMaxInFlight, "Maximum messages held un-acknowledged at once")
 	flags.StringVar(&cfg.projectID, "project-id", cfg.projectID, "GCP project ID")
 	flags.StringVar(&cfg.location, "location", cfg.location, "Vertex AI location")
 	flags.StringVar(&cfg.defaultPrompt, "default-prompt", cfg.defaultPrompt, "Root-controlled assistant customization prompt; may define the assistant name and personality")
@@ -147,6 +159,26 @@ func newRootCommand() *cobra.Command {
 	flags.StringSliceVar(&cfg.guildTierLimits, "guild-tier", cfg.guildTierLimits, "Subscription tier limits: name=requests-per-second:burst:tokens-per-hour (comma-capable and repeatable)")
 	flags.StringVar(&cfg.defaultGuildTier, "default-guild-tier", cfg.defaultGuildTier, "Tier applied to servers with no assigned or a no longer defined tier")
 	return command
+}
+
+// queueConfig maps the operator's flags onto the broker the driver selects.
+func (cfg workerConfig) queueConfig() mq.Config {
+	queue := mq.Config{
+		Driver:            mq.Driver(cfg.mqDriver),
+		ClientName:        "jarvis-worker",
+		AckWait:           cfg.mqAckWait,
+		MaxProcessingTime: cfg.mqMaxProcessingTime,
+		DrainTimeout:      cfg.mqDrainTimeout,
+		MaxDeliver:        cfg.mqMaxDeliver,
+		MaxInFlight:       cfg.mqMaxInFlight,
+	}
+	if queue.Driver == mq.DriverPubSub {
+		queue.ProjectID, queue.Topic, queue.Consumer = cfg.pubsubProjectID, cfg.pubsubTopic, cfg.pubsubSubscription
+		return queue
+	}
+	queue.URL, queue.Stream = cfg.natsURL, cfg.natsStream
+	queue.Topic, queue.Consumer = cfg.natsSubject, cfg.natsDurable
+	return queue
 }
 
 // guildTiers parses and validates the deployment subscription tier table.
