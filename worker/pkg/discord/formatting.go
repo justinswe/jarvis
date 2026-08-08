@@ -215,16 +215,21 @@ func safeThreadName(username, globalName string) string {
 	return name
 }
 
-func (p *Processor) sendMessageChunks(ctx context.Context, channelID, content string) error {
+// sendMessageChunks posts content in Discord-sized chunks and returns the messages it
+// posted, so a caller recording the conversation has their IDs.
+func (p *Processor) sendMessageChunks(ctx context.Context, channelID, content string) ([]*discordgo.Message, error) {
 	if strings.TrimSpace(content) == "" {
-		return errors.New("cannot send empty message content")
+		return nil, errors.New("cannot send empty message content")
 	}
+	var sent []*discordgo.Message
 	for i, chunk := range splitMessageForDiscord(content, discordMessageMaxLength) {
-		if _, err := p.client.SendMessage(ctx, channelID, chunk); err != nil {
-			return errors.Wrapf(err, "send chunk %d", i+1)
+		message, err := p.client.SendMessage(ctx, channelID, chunk)
+		if err != nil {
+			return sent, errors.Wrapf(err, "send chunk %d", i+1)
 		}
+		sent = append(sent, message)
 	}
-	return nil
+	return sent, nil
 }
 
 func splitMessageForDiscord(content string, max int) []string {

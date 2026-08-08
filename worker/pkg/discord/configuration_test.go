@@ -37,18 +37,6 @@ func (m *fakeConfigManager) Update(_ context.Context, _ string, actor string, pa
 	return updated, nil
 }
 
-func (m *fakeConfigManager) SetTier(_ context.Context, _ string, actor, tier string) (config.GuildConfig, error) {
-	if err := config.ValidateTier(tier); err != nil {
-		return config.GuildConfig{}, err
-	}
-	m.lastActor = actor
-	if m.value.Tier != tier {
-		m.value.Tier = tier
-		m.value.Version++
-	}
-	return m.value, nil
-}
-
 func (m *fakeConfigManager) AddAdmin(_ context.Context, _ string, actor, userID string) (config.GuildConfig, error) {
 	if m.addErr != nil {
 		return config.GuildConfig{}, m.addErr

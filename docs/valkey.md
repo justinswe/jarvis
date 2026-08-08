@@ -2,7 +2,7 @@
 
 Jarvis can record per-guild request rates and per-model token consumption in Valkey, enforce
 per-guild limits derived from a subscription tier, and cache guild configuration to avoid a
-DynamoDB read on every Discord message. The integration belongs only to the worker; the
+store read on every Discord message. The integration belongs only to the worker; the
 ingestor, the protobuf transport, and the supervisor are unchanged.
 
 The usage-metering keys are written for a **separate external service** to consume, so that key
@@ -96,7 +96,7 @@ server on another host — it has none to start, and would fail before the bus.
 
 ### Failure behavior
 
-Startup **fails closed**, request time **fails open** — the same contract DynamoDB uses. When
+Startup **fails closed**, request time **fails open** — the same contract the SQL store uses. When
 `--valkey-enabled` is set, connecting and pinging Valkey must succeed before the worker starts,
 so a misconfiguration is loud instead of silently metering nothing. After a successful start,
 every limiter error, timeout, or malformed reply admits the request. Metering failures drop the
@@ -117,8 +117,9 @@ requests-per-second or tokens-per-hour means that dimension is **recorded but no
 Declaring no tiers at all is a valid meter-only deployment: everything is recorded and nothing
 is ever denied.
 
-A guild's tier is stored in DynamoDB on its configuration item and is changed only through the
-root-only `set_server_tier` tool. A tier that is no longer declared by the deployment falls back
+A guild's tier belongs to its owning account in the SQL store and is written only by the
+external accounts API — Jarvis resolves it read-only through the guild's account link (see
+[store.md](store.md)). A tier that is no longer declared by the deployment falls back
 to `--default-guild-tier` rather than failing the request, so removing a tier from the flag
 never breaks a server. The tier recorded in Valkey is always the **effective** tier after that
 fallback, so a reader never sees a tier the deployment does not define.
@@ -168,7 +169,7 @@ not catch.
 A read-through cache in front of `config.Provider`/`config.Manager`, built on the generic
 `worker/pkg/cache` package (see that package for the reusable `Get`/`Set`/`Delete`/`GetOrLoad`
 primitives; `worker/pkg/config`'s `CachedProvider`/`CachedManager` are the guild-configuration-
-specific wiring around them). It removes what would otherwise be up to two DynamoDB `GetItem`
+specific wiring around them). It removes what would otherwise be up to two store reads
 calls per Discord message — one to resolve behavior settings, one for `Repository.Record`'s
 message-retention lookup — and, once populated, serves every worker replica on every subsequent
 message for the same guild until the entry expires or is invalidated.
@@ -181,7 +182,7 @@ message for the same guild until the entry expires or is invalidated.
 a guild's keys in one cluster slot.
 
 **Invalidation.** `Update`, `AddAdmin`, `RemoveAdmin`, and `SetTier` each delete the guild's cache
-entry immediately after their DynamoDB write commits, so every worker replica observes the change
+entry immediately after their store write commits, so every worker replica observes the change
 on its next read — Valkey is the shared cache every replica already reads from, so no separate
 invalidation broadcast is needed. `--valkey-config-cache-ttl` is a backstop for the rare case a
 delete itself fails (for example, a transient Valkey error): worst case, a replica serves a stale
@@ -189,9 +190,9 @@ configuration for up to that long.
 
 The strict, admin-facing read used by the `get_server_configuration` tool (and any read
 immediately following a mutation in the same tool round) bypasses this cache entirely and always
-reads DynamoDB directly, so an administrator never sees a stale result from their own change.
+reads the store directly, so an administrator never sees a stale result from their own change.
 
-Cache misses and write/delete failures are silent and fail open: they cost a DynamoDB read (or a
+Cache misses and write/delete failures are silent and fail open: they cost a store read (or a
 future re-read), never a failed request — the same philosophy as [Failure
 behavior](#failure-behavior) above.
 
@@ -221,4 +222,4 @@ destroy the per-second resolution that is the whole point of recording them.
 
 The guild-configuration cache adds up to one more round trip: a `GET` on a cache hit, or a `GET`
 followed by a `SET` on a miss (once per guild per `--valkey-config-cache-ttl` window, absent a
-write invalidation). Either is still cheaper than the DynamoDB `GetItem` it replaces.
+write invalidation). Either is still cheaper than the store read it replaces.

@@ -29,6 +29,13 @@ type History interface {
 	Messages(context.Context, string, string, int, string) ([]*discordgo.Message, error)
 }
 
+// Recorder persists one Discord message for history and search, expiring it after the
+// guild's retention. Only bot-involved conversation is recorded — the targeted messages
+// the processor answers and the replies it posts — never the surrounding channel traffic.
+type Recorder interface {
+	Record(ctx context.Context, message *discordgo.Message, retentionDays int) error
+}
+
 // Admission is the outcome of one guild rate-limit check.
 type Admission struct {
 	Allowed    bool
@@ -82,9 +89,10 @@ type Processor struct {
 	imageClient        *http.Client
 	threadQueue        threadRequestQueue
 	limiter            Limiter
-	guildTiers         []string
+	// recorder is nil when no store is configured; messages then simply are not kept.
+	recorder Recorder
 	// replies is nil when no shared store is configured. Nothing then deduplicates
-	// replies, which is why more than one Gateway connection requires DYNAMODB_ENABLED.
+	// replies, which is why more than one Gateway connection requires a store driver.
 	replies ReplyClaimer
 }
 
@@ -101,7 +109,7 @@ type ProcessorConfig struct {
 	Version            string
 	ImageHTTPClient    *http.Client
 	Limiter            Limiter
-	GuildTiers         []string
+	Recorder           Recorder
 	ReplyClaimer       ReplyClaimer
 }
 
@@ -146,8 +154,7 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 		client: restClient{session: session}, botID: user.ID, generator: cfg.Generator, configs: cfg.Configs,
 		history: cfg.History, manager: cfg.ConfigManager, models: cfg.ModelRegistry, webSearchProviders: append([]string(nil), cfg.WebSearchProviders...),
 		rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
-		limiter: cfg.Limiter, guildTiers: append([]string(nil), cfg.GuildTiers...),
-		replies: cfg.ReplyClaimer,
+		limiter: cfg.Limiter, recorder: cfg.Recorder, replies: cfg.ReplyClaimer,
 	}, nil
 }
 

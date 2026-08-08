@@ -226,12 +226,14 @@ type Provider interface {
 }
 
 // Manager reads and changes persisted Discord server configuration.
+//
+// There is deliberately no tier mutation: a guild's subscription tier belongs to its
+// owning account and is written by the external accounts API, never by Jarvis.
 type Manager interface {
 	Load(context.Context, string) (GuildConfig, error)
 	Update(context.Context, string, string, Patch) (GuildConfig, error)
 	AddAdmin(context.Context, string, string, string) (GuildConfig, error)
 	RemoveAdmin(context.Context, string, string, string) (GuildConfig, error)
-	SetTier(context.Context, string, string, string) (GuildConfig, error)
 }
 
 // StaticProvider returns one immutable configuration for every server.

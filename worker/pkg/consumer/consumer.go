@@ -18,27 +18,26 @@ import (
 )
 
 // Processor handles a normalized Discord message request.
+//
+// Recording messages for history is the processor's concern, not this package's: only the
+// processor knows whether a message is targeted at the bot, and only targeted
+// conversation is stored.
 type Processor interface {
 	Process(context.Context, *discordgo.MessageCreate) error
 }
 
-// Recorder persists one validated normalized Discord message before processing.
-type Recorder interface {
-	Record(context.Context, *discordv1.DiscordMessageCreateEvent) error
-}
-
 // Start subscribes to the configured broker and processes messages until Stop is called.
-func Start(ctx context.Context, cfg mq.Config, processor Processor, recorder Recorder) (mq.Subscription, error) {
+func Start(ctx context.Context, cfg mq.Config, processor Processor) (mq.Subscription, error) {
 	if processor == nil {
 		return nil, errors.New("message processor is required")
 	}
 	return mq.Subscribe(ctx, cfg, func(msgCtx context.Context, msg mq.Message) {
-		handle(msgCtx, msg, processor, recorder)
+		handle(msgCtx, msg, processor)
 	})
 }
 
 // handle processes one message, holding it un-acknowledged until it completes.
-func handle(ctx context.Context, msg mq.Message, processor Processor, recorder Recorder) {
+func handle(ctx context.Context, msg mq.Message, processor Processor) {
 	request := &discordv1.IngestMessageRequest{}
 	if err := proto.Unmarshal(msg.Data(), request); err != nil {
 		terminate(msg, "invalid protobuf message", err)
@@ -54,11 +53,6 @@ func handle(ctx context.Context, msg mq.Message, processor Processor, recorder R
 		zap.String("guild_id", discordMsg.GuildID),
 		zap.String("channel_id", discordMsg.ChannelID),
 		zap.String("message_id", discordMsg.ID),
-	}
-	if recorder != nil {
-		if err := recorder.Record(ctx, request.Event); err != nil {
-			app.L().Warn("Discord message recording failed", append(fields, zap.Error(err))...)
-		}
 	}
 	if processErr := processor.Process(ctx, discordMsg); processErr != nil {
 		app.L().Warn("Discord message processing failed", append(fields, zap.Error(processErr))...)

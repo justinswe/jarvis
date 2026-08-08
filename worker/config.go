@@ -8,6 +8,7 @@ import (
 
 	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
 	"github.com/justinswe/jarvis/mq"
+	"github.com/justinswe/jarvis/store"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
@@ -30,9 +31,9 @@ type workerConfig struct {
 	serperAPIKey, firecrawlAPIKey, tavilyAPIKey                     string
 	modelProfiles, webSearchProviders                               []string
 	reasoningEffort                                                 string
-	dynamodbTable, awsRoleARN, awsWebIdentityAudience               string
+	storeDriver, postgresDSN, sqlitePath                            string
+	storeSweepInterval                                              time.Duration
 	rootUserIDs                                                     []string
-	dynamodbEnabled                                                 bool
 	valkeyEnabled, valkeyTLSEnabled                                 bool
 	valkeyAddresses, guildTierLimits                                []string
 	valkeyUsername, valkeyPassword, valkeyKeyPrefix                 string
@@ -61,7 +62,8 @@ func newWorkerConfig() workerConfig {
 		reasoningEffort:      string(llm.ReasoningLow),
 		messageRetentionDays: config.DefaultMessageRetentionDays,
 		messageTimeout:       time.Minute,
-		dynamodbTable:        "jarvis",
+		storeDriver:          string(store.DriverNone),
+		storeSweepInterval:   time.Hour,
 
 		mqDriver:            string(mq.DriverNATS),
 		natsURL:             nats.DefaultURL,
@@ -137,10 +139,10 @@ func newRootCommand() *cobra.Command {
 	flags.StringVar(&cfg.discordBotToken, "discord-bot-token", cfg.discordBotToken, "Discord bot token")
 	flags.DurationVar(&cfg.messageTimeout, "message-timeout", cfg.messageTimeout, "Overall message processing timeout")
 	flags.IntVar(&cfg.messageRetentionDays, "message-retention-days", cfg.messageRetentionDays, "Default message retention in days")
-	flags.BoolVar(&cfg.dynamodbEnabled, "dynamodb-enabled", cfg.dynamodbEnabled, "Enable DynamoDB message history and server configuration")
-	flags.StringVar(&cfg.dynamodbTable, "dynamodb-table", cfg.dynamodbTable, "DynamoDB table name")
-	flags.StringVar(&cfg.awsRoleARN, "aws-role-arn", cfg.awsRoleARN, "AWS IAM role assumed through Google workload identity")
-	flags.StringVar(&cfg.awsWebIdentityAudience, "aws-web-identity-audience", cfg.awsWebIdentityAudience, "Audience for the Google identity token exchanged with AWS")
+	flags.StringVar(&cfg.storeDriver, "store-driver", cfg.storeDriver, "Storage backend for history, configuration, and reply claims: none, postgres, or sqlite")
+	flags.StringVar(&cfg.postgresDSN, "postgres-dsn", cfg.postgresDSN, "PostgreSQL connection string (required when the store driver is postgres)")
+	flags.StringVar(&cfg.sqlitePath, "sqlite-path", cfg.sqlitePath, "SQLite database file path (required when the store driver is sqlite)")
+	flags.DurationVar(&cfg.storeSweepInterval, "store-sweep-interval", cfg.storeSweepInterval, "How often expired messages and lapsed reply claims are deleted")
 	flags.StringSliceVar(&cfg.rootUserIDs, "root-user-ids", cfg.rootUserIDs, "Discord user IDs with cross-server root access")
 	flags.BoolVar(&cfg.valkeyEnabled, "valkey-enabled", cfg.valkeyEnabled, "Enable Valkey per-guild usage metering and subscription limits")
 	flags.StringSliceVar(&cfg.valkeyAddresses, "valkey-address", cfg.valkeyAddresses, "Valkey host:port addresses (comma-capable and repeatable)")
@@ -179,6 +181,23 @@ func (cfg workerConfig) queueConfig() mq.Config {
 	queue.URL, queue.Stream = cfg.natsURL, cfg.natsStream
 	queue.Topic, queue.Consumer = cfg.natsSubject, cfg.natsDurable
 	return queue
+}
+
+// storeEnabled reports whether a persistent store backs history, configuration, and
+// reply claims.
+func (cfg workerConfig) storeEnabled() bool {
+	return store.Driver(cfg.storeDriver) != store.DriverNone
+}
+
+// storeConfig maps the operator's flags onto the store package.
+func (cfg workerConfig) storeConfig() store.Config {
+	return store.Config{
+		Driver:        store.Driver(cfg.storeDriver),
+		PostgresDSN:   cfg.postgresDSN,
+		SQLitePath:    cfg.sqlitePath,
+		Defaults:      config.GuildConfig{Settings: cfg.serverSettings()},
+		SweepInterval: cfg.storeSweepInterval,
+	}
 }
 
 // guildTiers parses and validates the deployment subscription tier table.

@@ -77,16 +77,6 @@ func (m *CachedManager) RemoveAdmin(ctx context.Context, guildID, actorID, userI
 	return updated, nil
 }
 
-// SetTier delegates tier, then invalidates the cached configuration for guildID.
-func (m *CachedManager) SetTier(ctx context.Context, guildID, actorID, tier string) (GuildConfig, error) {
-	updated, err := m.next.SetTier(ctx, guildID, actorID, tier)
-	if err != nil {
-		return GuildConfig{}, err
-	}
-	m.invalidate(ctx, guildID)
-	return updated, nil
-}
-
 // invalidate deletes the cached configuration for guildID, outliving ctx so a caller's
 // deadline can't skip invalidation after a mutation has already committed.
 func (m *CachedManager) invalidate(ctx context.Context, guildID string) {

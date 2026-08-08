@@ -29,18 +29,6 @@ func (p *fakeProcessor) Process(ctx context.Context, message *discordgo.MessageC
 	return p.err
 }
 
-type fakeRecorder struct {
-	event  *discordv1.DiscordMessageCreateEvent
-	err    error
-	called bool
-}
-
-func (r *fakeRecorder) Record(_ context.Context, event *discordv1.DiscordMessageCreateEvent) error {
-	r.called = true
-	r.event = event
-	return r.err
-}
-
 // fakeMessage is an mq.Message. How a broker holds a message while it is being worked on
 // belongs to the driver; this package only decides which of the three settlements to use.
 type fakeMessage struct {
@@ -104,7 +92,7 @@ func TestHandleAcknowledgesAfterProcessing(t *testing.T) {
 	msg := encode(t, validRequest())
 	processor := &fakeProcessor{}
 
-	handle(t.Context(), msg, processor, nil)
+	handle(t.Context(), msg, processor)
 
 	require.NotNil(t, processor.message)
 	assert.Equal(t, "message", processor.message.ID)
@@ -127,37 +115,9 @@ func TestHandleAcknowledgesOnlyAfterProcessingCompletes(t *testing.T) {
 		return nil
 	}}
 
-	handle(t.Context(), msg, processor, nil)
+	handle(t.Context(), msg, processor)
 
 	assert.Zero(t, ackedDuringProcessing, "message must stay un-acked while processing")
-	ack, _, _ := msg.counts()
-	assert.Equal(t, 1, ack)
-}
-
-func TestHandleRecordsBeforeProcessing(t *testing.T) {
-	msg := encode(t, validRequest())
-	recorder := &fakeRecorder{}
-	var recordedFirst bool
-	processor := &fakeProcessor{process: func(context.Context, *discordgo.MessageCreate) error {
-		recordedFirst = recorder.called
-		return nil
-	}}
-
-	handle(t.Context(), msg, processor, recorder)
-
-	assert.True(t, recordedFirst)
-	require.NotNil(t, recorder.event)
-	assert.Equal(t, "message", recorder.event.MessageId)
-}
-
-func TestHandleProcessesWhenRecordingFails(t *testing.T) {
-	msg := encode(t, validRequest())
-	recorder := &fakeRecorder{err: errors.New("dynamo unavailable")}
-	processor := &fakeProcessor{}
-
-	handle(t.Context(), msg, processor, recorder)
-
-	assert.NotNil(t, processor.message, "recording failure must not block processing")
 	ack, _, _ := msg.counts()
 	assert.Equal(t, 1, ack)
 }
@@ -166,7 +126,7 @@ func TestHandleNaksAfterProcessingError(t *testing.T) {
 	msg := encode(t, validRequest())
 	processor := &fakeProcessor{err: errors.New("model unavailable")}
 
-	handle(t.Context(), msg, processor, nil)
+	handle(t.Context(), msg, processor)
 
 	ack, nak, term := msg.counts()
 	assert.Zero(t, ack)
@@ -190,7 +150,7 @@ func TestHandleTerminatesUnprocessableMessages(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			processor := &fakeProcessor{}
-			handle(t.Context(), test.msg, processor, nil)
+			handle(t.Context(), test.msg, processor)
 
 			assert.Nil(t, processor.message, "unprocessable messages must not reach the processor")
 			ack, nak, term := test.msg.counts()
@@ -215,7 +175,7 @@ func TestHandleSettlesEveryMessageExactlyOnce(t *testing.T) {
 		{"unprocessable", &fakeMessage{data: []byte("not protobuf at all")}, &fakeProcessor{}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			handle(t.Context(), test.msg, test.processor, nil)
+			handle(t.Context(), test.msg, test.processor)
 
 			assert.Len(t, test.msg.ordered(), 1)
 		})
@@ -223,7 +183,7 @@ func TestHandleSettlesEveryMessageExactlyOnce(t *testing.T) {
 }
 
 func TestStartRequiresAProcessor(t *testing.T) {
-	_, err := Start(t.Context(), mq.Config{}, nil, nil)
+	_, err := Start(t.Context(), mq.Config{}, nil)
 
 	assert.Error(t, err)
 }

@@ -72,14 +72,6 @@ func (m *stubManager) RemoveAdmin(context.Context, string, string, string) (Guil
 	return m.updateCfg, nil
 }
 
-func (m *stubManager) SetTier(context.Context, string, string, string) (GuildConfig, error) {
-	m.updateCalls++
-	if m.updateErr != nil {
-		return GuildConfig{}, m.updateErr
-	}
-	return m.updateCfg, nil
-}
-
 func TestCachedProviderCachesAcrossCalls(t *testing.T) {
 	provider := &stubProvider{cfg: GuildConfig{Tier: "gold"}}
 	cachedProvider := NewCachedProvider(provider, cache.NewMemory(time.Second), time.Minute)
@@ -107,7 +99,7 @@ func TestCachedProviderKeysAreScopedPerGuild(t *testing.T) {
 }
 
 func TestCachedProviderPropagatesTheUnderlyingError(t *testing.T) {
-	wantErr := errors.New("dynamodb unavailable")
+	wantErr := errors.New("store unavailable")
 	provider := &stubProvider{err: wantErr}
 	cachedProvider := NewCachedProvider(provider, cache.NewMemory(time.Second), time.Minute)
 
@@ -178,10 +170,6 @@ func TestCachedManagerInvalidatesOnAdminChanges(t *testing.T) {
 		}},
 		{name: "RemoveAdmin", mutate: func(m *CachedManager) error {
 			_, err := m.RemoveAdmin(context.Background(), "g1", "actor", "u1")
-			return err
-		}},
-		{name: "SetTier", mutate: func(m *CachedManager) error {
-			_, err := m.SetTier(context.Background(), "g1", "actor", "gold")
 			return err
 		}},
 	}

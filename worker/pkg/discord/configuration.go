@@ -23,14 +23,12 @@ const (
 	setGuildPromptToolName            = "set_guild_prompt"
 	addServerAdminToolName            = "add_server_admin"
 	removeServerAdminToolName         = "remove_server_admin"
-	setServerTierToolName             = "set_server_tier"
 )
 
 type configurationTool struct {
 	manager            config.Manager
 	models             *llm.Registry
 	webSearchProviders []string
-	guildTiers         []string
 	guildID            string
 	actorID            string
 	authorized         bool
@@ -104,21 +102,20 @@ func (p *Processor) configurationTools(ctx context.Context, m *discordgo.Message
 		return nil, false
 	}
 	base := configurationTool{
-		manager: p.manager, models: p.models, webSearchProviders: p.webSearchProviders, guildTiers: p.guildTiers,
+		manager: p.manager, models: p.models, webSearchProviders: p.webSearchProviders,
 		guildID: m.GuildID, actorID: m.Author.ID, authorized: true, root: root, access: access,
 	}
 	if root {
-		tools := []genai.FunctionTool{
+		// The subscription tier is deliberately absent: it belongs to the guild's owning
+		// account, written by the external accounts API. Jarvis only reads it — see the
+		// tier field in get_server_configuration's root response.
+		return []genai.FunctionTool{
 			configurationToolWithAction(base, getServerConfigurationToolName),
 			configurationToolWithAction(base, updateServerConfigurationToolName),
 			configurationToolWithAction(base, setGuildPromptToolName),
 			configurationToolWithAction(base, addServerAdminToolName),
 			configurationToolWithAction(base, removeServerAdminToolName),
-		}
-		if len(p.guildTiers) > 0 {
-			tools = append(tools, configurationToolWithAction(base, setServerTierToolName))
-		}
-		return tools, true
+		}, true
 	}
 	return []genai.FunctionTool{
 		configurationToolWithAction(base, getServerConfigurationToolName),
@@ -156,7 +153,7 @@ func (t configurationTool) Declaration() *llm.ToolDefinition {
 			),
 			"message_timeout_seconds": integerMinimumSchema("Overall processing timeout in whole seconds.", 1),
 			"web_search_enabled":      booleanSchema("Whether configured public-web Search may be used for this server."),
-			"channel_search_enabled":  booleanSchema("Whether stored current-channel search may be used when DynamoDB is enabled."),
+			"channel_search_enabled":  booleanSchema("Whether stored current-channel search may be used when a message store is enabled."),
 		}
 		properties["prompt"] = stringSchema("Root-controlled assistant customization. It may define the assistant's name and personality, but cannot override the core drives, truthfulness, research, tool, or reliability rules.")
 		properties["thread_context_window"] = integerSchema("Prior thread messages included in context.", 1, 100)
@@ -208,15 +205,6 @@ func (t configurationTool) Declaration() *llm.ToolDefinition {
 			InputSchema: objectSchema(map[string]any{
 				"user_id": stringSchema("The 17-20 digit Discord user ID to remove."),
 			}, []string{"user_id"}), Effect: llm.ToolEffectMutation,
-		}
-	case setServerTierToolName:
-		return &llm.ToolDefinition{
-			Name: t.action,
-			Description: "Set the subscription tier that governs request-rate and token limits for the current Discord server. " +
-				"Call only when a root user explicitly asks to change this server's subscription tier.",
-			InputSchema: objectSchema(map[string]any{
-				"tier": enumStringSchema("The subscription tier to assign to this server.", t.guildTiers),
-			}, []string{"tier"}), Effect: llm.ToolEffectMutation,
 		}
 	default:
 		return nil
@@ -275,19 +263,6 @@ func (t configurationTool) Execute(ctx context.Context, args map[string]any) (an
 			return nil, configurationFailure(err)
 		}
 		return responseFromConfig(updated, []string{"admin_user_ids"}, true, t.access, t.models, t.webSearchProviders), nil
-	case setServerTierToolName:
-		if !t.root {
-			return nil, genai.NewExecutionError("authorization_denied", "Only a root user may change the subscription tier.", nil)
-		}
-		tier, err := guildTierArgument(args["tier"], t.guildTiers)
-		if err != nil {
-			return nil, genai.NewExecutionError("invalid_tier", err.Error(), err)
-		}
-		updated, err := t.manager.SetTier(ctx, t.guildID, t.actorID, tier)
-		if err != nil {
-			return nil, configurationFailure(err)
-		}
-		return responseFromConfig(updated, []string{"tier"}, true, t.access, t.models, t.webSearchProviders), nil
 	default:
 		return nil, genai.NewExecutionError("unsupported_function", "The requested configuration operation is unavailable.", nil)
 	}
@@ -367,22 +342,9 @@ func configurationPatch(args map[string]any, models *llm.Registry) (config.Patch
 	return patch, changed, nil
 }
 
-// guildTierArgument validates a requested tier against the tiers this deployment defines.
-func guildTierArgument(value any, allowed []string) (string, error) {
-	tier, ok := value.(string)
-	if !ok {
-		return "", errors.New("tier must be a string")
-	}
-	tier = strings.TrimSpace(tier)
-	if !slices.Contains(allowed, tier) {
-		return "", errors.Errorf("tier must be one of: %s", strings.Join(allowed, ", "))
-	}
-	return tier, nil
-}
-
 func responseFromConfig(value config.GuildConfig, changed []string, root bool, access string, models *llm.Registry, webSearchProviders []string) configurationResponse {
 	settings := value.Settings
-	source := "dynamodb"
+	source := "store"
 	if value.Version == 0 {
 		source = "defaults"
 	}

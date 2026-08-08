@@ -236,7 +236,7 @@
     "//third_party/images:images.bzl%images": {
       "general": {
         "bzlTransitiveDigest": "QarGnYuOv+e0zcegzLgXf72+SC9lguSGRn25sdbavE0=",
-        "usagesDigest": "Nmlnd2xRerpndhu6ewd5b17Dl/xsL0dUGqmPmpWI5g0=",
+        "usagesDigest": "Xf2+vhRef/u2rvFw3kHgeIt58Sd1frwKr6fZLiu36Pc=",
         "recordedInputs": [
           "REPO_MAPPING:,rules_img rules_img+",
           "REPO_MAPPING:rules_img+,bazel_skylib bazel_skylib+",
@@ -259,7 +259,7 @@
     "//third_party/nats:nats.bzl%nats": {
       "general": {
         "bzlTransitiveDigest": "FCQwHpYEdYBCah9QTphHenlpqThRavB7mrA+991kqn0=",
-        "usagesDigest": "Uyx+U0qd8mEL+NGsoDctt1LWG1zRp14vPuHhVu6sncg=",
+        "usagesDigest": "UxQVqFhFHXS6vfpT/iMF//MN9plWBvptNhGZvFaoajg=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools"
         ],
@@ -310,7 +310,7 @@
     "//third_party/valkey:valkey.bzl%valkey": {
       "general": {
         "bzlTransitiveDigest": "qwm2QnFj2Tvh+w0wYU84FCl8GaoJFhVl/qrw/eEaG4o=",
-        "usagesDigest": "8TN6O3WpUFxCOtvlwvTkOwML8M+foajBIYPdi/aM/Do=",
+        "usagesDigest": "mh5xSWa/uvwa0L1Jd8XshCV+gZQCntpWGtxsClOqSyE=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools"
         ],
@@ -363,7 +363,7 @@
     "@@rules_buf+//buf:extensions.bzl%buf": {
       "general": {
         "bzlTransitiveDigest": "IjW2he5lp+L/zEfsBKIilXijyHH6PC4Lf3y19MA6G4c=",
-        "usagesDigest": "MqB83Rpx/BGnOWiyIzSaP/qExqtE3pmDLQqwTvOUjMU=",
+        "usagesDigest": "+d7ZRh3pjsRnLu1bBZLHYsRLGyWMTgNwodzes35sWjM=",
         "recordedInputs": [
           "REPO_MAPPING:rules_buf+,bazel_tools bazel_tools"
         ],
@@ -636,7 +636,7 @@
     "@@toolchains_buildbuddy+//:extensions.bzl%buildbuddy": {
       "general": {
         "bzlTransitiveDigest": "YThiSErJv+jiCHJzZIEyk0yegQRS/x+T/ce309eGTvA=",
-        "usagesDigest": "Cp+V50tFLKcm552ZG/4gx8xoyIuMmHd57EeB50i7qaY=",
+        "usagesDigest": "RG5p3ky+B1lm0MhP9tnTDSDZGoNy2c1c+u2ioUvLaMQ=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "buildbuddy_toolchain": {

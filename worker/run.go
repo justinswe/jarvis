@@ -9,15 +9,12 @@ import (
 	"syscall"
 	"unicode"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/justinswe/jarvis/awsidentity"
 	"github.com/justinswe/jarvis/mq"
+	"github.com/justinswe/jarvis/store"
 	"github.com/justinswe/jarvis/worker/pkg/cache"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/consumer"
 	"github.com/justinswe/jarvis/worker/pkg/discord"
-	"github.com/justinswe/jarvis/worker/pkg/dynamostore"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
 	"github.com/justinswe/jarvis/worker/pkg/server"
@@ -52,21 +49,20 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 	var provider config.Provider = staticProvider
 	var history discord.History
 	var manager config.Manager
-	var recorder consumer.Recorder
+	var recorder discord.Recorder
 	var claimer discord.ReplyClaimer
-	var repository *dynamostore.Repository
-	if cfg.dynamodbEnabled {
-		repo, repositoryErr := cfg.newRepository(ctx)
-		if repositoryErr != nil {
-			return repositoryErr
+	if cfg.storeEnabled() {
+		persistent, storeErr := store.Open(ctx, cfg.storeConfig())
+		if storeErr != nil {
+			return errors.Wrap(storeErr, "open message store")
 		}
-		defer repo.Close()
-		provider, history, manager, recorder = repo, repo, repo, repo
+		defer func() { _ = persistent.Close() }()
+		provider, history, manager, recorder = persistent, persistent, persistent, persistent
 		// A claim must lapse before the broker redelivers, or a worker that dies
 		// mid-generation strands every retry of the message it was holding.
-		repo.SetReplyClaimTTL(cfg.mqAckWait)
-		claimer = repo
-		repository = repo
+		persistent.SetReplyClaimTTL(cfg.mqAckWait)
+		claimer = persistent
+		app.L().Info("Message store initialized", zap.String("driver", cfg.storeDriver))
 	}
 	var limiter discord.Limiter
 	var usageRecorder genai.UsageRecorder
@@ -78,14 +74,12 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		defer stack.close()
 		limiter, usageRecorder = stack.usage, stack.usage
 
-		// Only worth a cache when there is a slow source of truth behind it: with
-		// DynamoDB off, configuration comes from a static in-process provider.
-		if repository != nil {
+		// Only worth a cache when there is a slow source of truth behind it: with the
+		// store off, configuration comes from a static in-process provider.
+		if cfg.storeEnabled() {
 			cacheClient := cache.New(stack.client, cfg.valkeyKeyPrefix, cfg.valkeyTimeout)
-			cachedProvider := config.NewCachedProvider(provider, cacheClient, cfg.valkeyConfigCacheTTL)
-			provider = cachedProvider
+			provider = config.NewCachedProvider(provider, cacheClient, cfg.valkeyConfigCacheTTL)
 			manager = config.NewCachedManager(manager, cacheClient)
-			repository.SetRetentionLookup(cachedProvider)
 			app.L().Info("Valkey guild-configuration cache initialized",
 				zap.Duration("ttl", cfg.valkeyConfigCacheTTL))
 		}
@@ -102,7 +96,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		PrimaryModelProfile:  cfg.primaryModelProfile,
 		FallbackModelProfile: cfg.fallbackModelProfile,
 		WebSearchClients:     webSearchClients,
-		MutableConfiguration: cfg.dynamodbEnabled,
+		MutableConfiguration: cfg.storeEnabled(),
 		UsageRecorder:        usageRecorder,
 	})
 	if err != nil {
@@ -124,15 +118,15 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		RootUserIDs:        cfg.rootUserIDs,
 		Version:            version.Value,
 		Limiter:            limiter,
+		Recorder:           recorder,
 		ReplyClaimer:       claimer,
-		GuildTiers:         guildTierNames(guildTiers),
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize Discord processor")
 	}
 
 	queue := cfg.queueConfig()
-	subscription, err := consumer.Start(ctx, queue, processor, recorder)
+	subscription, err := consumer.Start(ctx, queue, processor)
 	if err != nil {
 		return errors.Wrap(err, "start message consumer")
 	}
@@ -145,51 +139,6 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		zap.String("topic", queue.Topic),
 	)
 	return server.Serve(ctx, address)
-}
-
-// newRepository authenticates to AWS and opens the DynamoDB-backed repository.
-func (cfg workerConfig) newRepository(ctx context.Context) (*dynamostore.Repository, error) {
-	awsCfg, err := awsidentity.Load(ctx, awsidentity.Config{
-		RoleARN:  cfg.awsRoleARN,
-		Audience: cfg.awsWebIdentityAudience,
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "initialize DynamoDB AWS configuration")
-	}
-	credentials, err := awsCfg.Credentials.Retrieve(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "authenticate to AWS for DynamoDB")
-	}
-	app.L().Info("DynamoDB AWS authentication initialized", cfg.awsAuthenticationFields(credentials)...)
-
-	repository, err := dynamostore.New(
-		dynamodb.NewFromConfig(awsCfg), cfg.dynamodbTable, config.GuildConfig{Settings: cfg.serverSettings()},
-	)
-	if err != nil {
-		return nil, errors.Wrap(err, "initialize DynamoDB repository")
-	}
-	return repository, nil
-}
-
-// awsAuthenticationFields describes how the worker authenticated to AWS, so an operator
-// can tell workload identity from the ambient credential chain in one log line.
-func (cfg workerConfig) awsAuthenticationFields(credentials aws.Credentials) []zap.Field {
-	fields := []zap.Field{
-		zap.String("credential_source", credentials.Source),
-		zap.String("aws_account_id", credentials.AccountID),
-	}
-	if roleARN := strings.TrimSpace(cfg.awsRoleARN); roleARN != "" {
-		fields = append(fields,
-			zap.String("authentication_mode", "gcp_web_identity"),
-			zap.String("role_arn", roleARN),
-		)
-	} else {
-		fields = append(fields, zap.String("authentication_mode", "default_aws_chain"))
-	}
-	if credentials.CanExpire {
-		fields = append(fields, zap.Time("credential_expiration", credentials.Expires))
-	}
-	return fields
 }
 
 // valkeyStack is the Valkey-backed layer: one connection shared by usage metering and,
@@ -252,8 +201,21 @@ func (cfg workerConfig) validate() error {
 	if cfg.discordBotToken == "" {
 		return errors.New("discord bot token is required")
 	}
-	if cfg.dynamodbEnabled && strings.TrimSpace(cfg.dynamodbTable) == "" {
-		return errors.New("DynamoDB table is required when DynamoDB is enabled")
+	switch store.Driver(cfg.storeDriver) {
+	case store.DriverNone:
+	case store.DriverPostgres:
+		if strings.TrimSpace(cfg.postgresDSN) == "" {
+			return errors.New("PostgreSQL DSN is required when the store driver is postgres")
+		}
+	case store.DriverSQLite:
+		if strings.TrimSpace(cfg.sqlitePath) == "" {
+			return errors.New("SQLite path is required when the store driver is sqlite")
+		}
+	default:
+		return errors.Errorf("unsupported store driver %q", cfg.storeDriver)
+	}
+	if cfg.storeEnabled() && cfg.storeSweepInterval <= 0 {
+		return errors.New("store sweep interval must be positive")
 	}
 	if !mq.Driver(cfg.mqDriver).Valid() {
 		return errors.Errorf("unsupported message queue driver %q", cfg.mqDriver)

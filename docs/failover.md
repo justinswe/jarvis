@@ -16,8 +16,8 @@ no leader to elect, and nothing to switch. This document is what makes that safe
               ┌─────────────┴─────────────┐
         on-premises workers          cloud workers
               └──────────┬────────────────┘
-                         │ DynamoDB conditional write
-                         │ CHANNEL#<channel> / REPLY#<message>
+                         │ PostgreSQL conditional upsert
+                         │ reply_claims (channel_id, message_id)
                          └──> exactly one worker answers
 ```
 
@@ -30,25 +30,26 @@ token both identify as the unsharded bot, both are accepted, and both receive a 
 That is usually described as a hazard. Here it is the failover mechanism: because both sites are
 already connected, a site can disappear without anything having to notice or react. The cost is that
 every Discord message is published twice, which is one extra Pub/Sub message and one extra
-conditional write — both inside free tiers at this volume.
+conditional write — negligible at this volume.
 
 What it requires is that only one worker answers.
 
 ## The reply claim
 
-Before a worker generates anything, it takes a claim on the message with a conditional write:
+Before a worker generates anything, it takes a claim on the message with a conditional upsert
+against the shared PostgreSQL store:
 
-```text
-pk         CHANNEL#<channel_id>
-sk         REPLY#<message_id>
-owner      <hostname>/<pid>
-expires_at <now + MQ_ACK_WAIT>
-
-condition  attribute_not_exists(pk) OR expires_at <= :now
+```sql
+INSERT INTO reply_claims (channel_id, message_id, owner, expires_at)
+VALUES ($channel, $message, $owner, now + MQ_ACK_WAIT)
+ON CONFLICT (channel_id, message_id) DO UPDATE
+  SET owner = excluded.owner, expires_at = excluded.expires_at
+  WHERE reply_claims.expires_at <= now;   -- zero rows affected = lost
 ```
 
-The loser returns immediately and acknowledges. It never calls a model, so a duplicate costs one
-DynamoDB write rather than a whole generation.
+`now` is the database server's own clock, so workers at different sites race one clock instead of
+each other's. The loser returns immediately and acknowledges. It never calls a model, so a
+duplicate costs one write rather than a whole generation.
 
 Once the reply has actually been posted the winner rewrites the same item unconditionally with
 `expires_at = now + 1h`, matching the queue's own message retention. That second write is what makes
@@ -71,26 +72,29 @@ Three details carry the design:
   extension.
 - **The condition turns on the message alone, never on the owner.** One subscription is shared by
   the workers at every site, so the two copies of a message are load-balanced independently and can
-  both land on the same process. An `owner = :owner` arm would let the second copy match the claim
-  the first one just took, and answer twice. A process does not need one to retake a message
-  redelivered to itself: that redelivery arrives at least one `MQ_ACK_WAIT` after the claim, which
-  `expires_at` already admits.
+  both land on the same process. An owner arm would let the second copy match the claim the first
+  one just took, and answer twice. A process does not need one to retake a message redelivered to
+  itself: that redelivery arrives at least one `MQ_ACK_WAIT` after the claim, which `expires_at`
+  already admits.
 
-Claims share the channel partition with that channel's stored messages, so they expire under the
-table's existing TTL and need no new table, index, or cleanup.
+Lapsed claims are garbage-collected by the store's retention sweep (`--store-sweep-interval`); the
+claim condition already treats a lapsed row as absent, so the sweep is hygiene, not correctness.
 
-### DynamoDB is mandatory for multi-site
+### PostgreSQL is mandatory for multi-site
 
-With `DYNAMODB_ENABLED=false` there is no shared store, so there is no claim. Two ingestors then
-produce two replies to every message. A single-site deployment is unaffected — one Gateway
-connection means nothing to deduplicate.
+The claim needs a store both sites reach with equal standing, so multi-site means
+`STORE_DRIVER=postgres` with a DSN both sites can dial. `STORE_DRIVER=sqlite` is a file inside one
+site and cannot coordinate two — it is the deliberately non-HA option for a single-site deployment.
+With `STORE_DRIVER=none` there is no claim at all, and two ingestors produce two replies to every
+message. A single-site deployment is unaffected — one Gateway connection means nothing to
+deduplicate.
 
 ### The claim fails open
 
-If DynamoDB is unreachable the claim is treated as won and the reply is sent, matching how every
-other shared dependency on this path degrades. The consequence is that an outage of the DynamoDB
-region can produce duplicate replies while both sites are up. That is the deliberate trade: a
-duplicate reply beats no reply.
+If the store is unreachable the claim is treated as won and the reply is sent, matching how every
+other shared dependency on this path degrades. The consequence is that a store outage can produce
+duplicate replies while both sites are up. That is the deliberate trade: a duplicate reply beats no
+reply.
 
 ## Why Pub/Sub
 
@@ -112,7 +116,7 @@ See [pubsub.md](pubsub.md) for provisioning, IAM, and the full driver comparison
 | One site lost entirely | The other is already connected and publishing. Messages its workers held un-acknowledged are redelivered by Pub/Sub. No interruption. |
 | One worker crashes mid-message | The message is redelivered; its claim lapses after `MQ_ACK_WAIT`, so the redelivery can answer. The crash happened before the claim was extended, which is what makes that possible. |
 | Both sites healthy | Every message is published twice, both copies reach a worker, and the conditional write picks one. The loser acks without generating. |
-| DynamoDB region lost | Claims fail open. Replies continue, possibly duplicated, until it returns. |
+| The PostgreSQL store lost | Claims fail open. Replies continue, possibly duplicated, until it returns. |
 | A message can never succeed | Terminated after `MQ_MAX_DELIVER` attempts. On Pub/Sub it lands in the dead-letter topic; an unparseable payload is acknowledged and only logged. |
 
 ## Known ceilings
@@ -122,7 +126,9 @@ See [pubsub.md](pubsub.md) for provisioning, IAM, and the full driver comparison
    This was already true of multiple replicas; active-active makes it the normal case rather than an
    edge case. Upgrade path: Pub/Sub ordering keys on `channel_id`, noting that ordering guarantees
    weaken with publishers in two locations.
-2. **DynamoDB is single-region.** Losing it fails claims open, as above. Upgrade path: Global Tables.
+2. **PostgreSQL's own availability is a deployment concern.** Losing it fails claims open, as
+   above. A managed HA service, or Patroni on-premises, removes the single instance; Jarvis needs
+   only a DSN.
 3. **Pub/Sub has no publisher deduplication.** The reply claim is the only thing preventing duplicate
    answers; a defect there produces duplicates, not losses.
 4. **`Term` on Pub/Sub is an acknowledgement.** Unparseable messages are dropped with a warning and
@@ -130,30 +136,26 @@ See [pubsub.md](pubsub.md) for provisioning, IAM, and the full driver comparison
 5. **Valkey metering is per-site** unless both sites reach one instance. A site running with
    `VALKEY_ENABLED=false` serves unmetered requests, which is already the fail-open behaviour when
    Valkey is unreachable.
-6. **On-premises AWS federation needs a metadata server.** `awsidentity` mints its Google identity
-   token through the compute metadata server, which exists on GCE and Cloud Run but not in an
-   on-premises cluster. Until that path supports service-account impersonation, the on-premises site
-   reaches DynamoDB through the AWS SDK's ordinary credential chain instead.
 
 ## Verifying
 
 Run two containers against one topic and one table, then mention the bot once:
 
 ```sh
-docker run --env-file .env.site-a -e MQ_DRIVER=pubsub -e DYNAMODB_ENABLED=true justinswe/jarvis:0.9.0
-docker run --env-file .env.site-b -e MQ_DRIVER=pubsub -e DYNAMODB_ENABLED=true justinswe/jarvis:0.9.0
+docker run --env-file .env.site-a -e MQ_DRIVER=pubsub -e STORE_DRIVER=postgres -e POSTGRES_DSN=$DSN justinswe/jarvis:0.9.0
+docker run --env-file .env.site-b -e MQ_DRIVER=pubsub -e STORE_DRIVER=postgres -e POSTGRES_DSN=$DSN justinswe/jarvis:0.9.0
 ```
 
 - Exactly one reply appears — the claim worked.
 - Both containers log the `MessageCreate` — both Gateway connections really are live.
 - One logs `Another worker claimed this reply`.
-- The claim item is readable, with the winner's owner and — because the reply has been posted and
+- The claim row is readable, with the winner's owner and — because the reply has been posted and
   the claim extended — an `expires_at` about an hour out rather than `MQ_ACK_WAIT`. Reading it
   mid-generation instead shows the short one:
 
 ```sh
-aws dynamodb get-item --table-name jarvis \
-  --key '{"pk":{"S":"CHANNEL#<channel>"},"sk":{"S":"REPLY#<message>"}}'
+psql "$DSN" -c "SELECT owner, to_timestamp(expires_at) FROM reply_claims \
+  WHERE channel_id = <channel> AND message_id = <message>"
 ```
 
 Then kill whichever container won and mention the bot again. The survivor answers with no gap, which

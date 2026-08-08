@@ -171,7 +171,7 @@ func start(t *testing.T, cfg mq.Config, processor Processor) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	subscription, err := Start(ctx, cfg, processor, nil)
+	subscription, err := Start(ctx, cfg, processor)
 	require.NoError(t, err)
 	t.Cleanup(subscription.Stop)
 }
@@ -364,7 +364,7 @@ func TestLiveConsumerDrainsInFlightWorkOnStop(t *testing.T) {
 				observed <- msgCtx.Err()
 				return nil
 			},
-		}, nil)
+		})
 		require.NoError(t, err)
 
 		publish(t, cfg, validRequest())

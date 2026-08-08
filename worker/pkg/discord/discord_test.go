@@ -514,7 +514,7 @@ func TestProcessExposesRuntimeAndReactionToolsWhenChannelSearchIsDisabled(t *tes
 	assert.Equal(t, messageReactionToolName, generator.request.Tools[1].Name())
 }
 
-func TestProcessDoesNotExposeChannelSearchWithoutDynamoDBHistory(t *testing.T) {
+func TestProcessDoesNotExposeChannelSearchWithoutStoredHistory(t *testing.T) {
 	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "ok"}}
 	p := &Processor{botID: "bot", generator: generator, client: &fakeClient{}, configs: testProvider(t)}
 	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "question")))

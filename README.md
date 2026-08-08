@@ -25,7 +25,7 @@ Jarvis brings sourced current answers, conversation recall, and server-specific 
 | Capability                       | What it does                                                                                                                                                                                                   |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Provider-agnostic web search** | Uses Serper, Firecrawl, or Tavily and supplies only normalized results to the presentation model.                                                                                                              |
-| **Conversation recall**          | Includes recent Discord context by default. Optional DynamoDB storage adds persistent history and model-directed search across the current channel or thread.                                                  |
+| **Conversation recall**          | Includes recent Discord context by default. An optional PostgreSQL or SQLite store keeps the bot-involved conversation and adds model-directed search across the current channel or thread.                    |
 | **Fast by design**               | Go services, compact raw-protobuf transport, bounded context windows, and a direct request path keep the runtime small and responsive.                                                                         |
 | **Provider-neutral models**      | Hosts generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM with named profiles, confirmed capabilities, and retryable failover.                                                                |
 | **Server customization**         | Authorized administrators can manage prompts, response settings, search, history, retention, and delegated access from Discord.                                                                                |
@@ -198,20 +198,13 @@ Jarvis searches through Serper, Firecrawl, or Tavily when web search is enabled 
 
 The provider receives only the sanitized current request plus bounded previous-request context for an elliptical follow-up. It never receives guild prompts, Discord channel results, runtime evidence, credentials, conversation history, or tool output. The presentation model receives versioned JSON containing only status and validated result records. Every displayed link is labeled `Sources consulted`. When no usable URL is available, confident current claims are rejected and repaired into explicitly qualified prose. See [Web search](docs/web-search.md) for request limits, source semantics, recovery rules, diagnostics, migration, and key rotation.
 
-Recent conversation context is loaded from Discord by default. When DynamoDB is enabled, Jarvis records incoming messages, uses the stored conversation as model context, and can search the current channel or thread by text, author, or time range. Search results include direct links back to Discord. See [DynamoDB storage](docs/dynamodb.md) for retention, access, and search behavior.
+Recent conversation context is loaded from Discord by default. When a store driver is configured, Jarvis records the conversation addressed to it — targeted messages and its own replies, never surrounding channel traffic — uses it as model context, and can search the current channel or thread by text, author, or time range. Search results include direct links back to Discord. See [Storage](docs/store.md) for the schema, retention, and search behavior.
 
 Within one worker instance, overlapping requests in the same Discord thread use latest-message-wins processing. A newer request cancels the active request, replaces any older pending request, and waits for cancellation to finish before generating one response from the latest available thread history. Existing context-window and rune-budget settings still apply. Separate threads remain concurrent; deployments with multiple worker replicas need external request affinity or distributed coordination to provide the same guarantee across replicas.
 
 ## Configuration
 
-Explicit model profiles may host generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM. Web-search providers are configured independently from model profiles. DynamoDB can optionally provide persistent Discord history and per-server profile selection:
-
-```text
-Google Cloud                                      AWS
-Vertex AI <-> Jarvis worker -- identity token --> STS --> DynamoDB
-```
-
-For a keyless deployment, Jarvis retrieves a short-lived identity token from its attached Google Cloud service account and exchanges it through AWS STS `AssumeRoleWithWebIdentity`. It does not require a mounted Google service-account key or static AWS access keys. Local, ECS, and EC2 deployments can instead use the AWS SDK's normal credential chain.
+Explicit model profiles may host generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM. Web-search providers are configured independently from model profiles. An optional SQL store provides persistent Discord history, per-server configuration, and the reply claim multi-site deployments require. PostgreSQL 16 is the shared, HA-capable backend; SQLite is the zero-infrastructure single-site backend — one file next to the container, no server to run. Both sit behind one implementation, selected by `STORE_DRIVER`. See [Storage](docs/store.md).
 
 The primary configuration variables are:
 
@@ -235,15 +228,14 @@ The primary configuration variables are:
 | `NVIDIA_API_KEY`                 | With NVIDIA NIM            | Bearer key for hosted `integrate.api.nvidia.com`; self-hosted NIM endpoints are not configured here.                                                                      |
 | `MQ_DRIVER`                      | No                         | Message queue broker: `nats` (default) or `pubsub`. See [docs/pubsub.md](docs/pubsub.md).                                                                                  |
 | `PUBSUB_PROJECT_ID`              | With Pub/Sub               | GCP project owning the topic and subscription; required when `MQ_DRIVER=pubsub`.                                                                                          |
-| `VALKEY_ENABLED`                 | No                         | Enables per-guild usage metering, subscription rate limits, and (with DynamoDB) the guild-configuration cache; defaults to `false`. See [docs/valkey.md](docs/valkey.md). |
+| `VALKEY_ENABLED`                 | No                         | Enables per-guild usage metering, subscription rate limits, and (with a store) the guild-configuration cache; defaults to `false`. See [docs/valkey.md](docs/valkey.md).  |
 | `VALKEY_ADDRESS`                 | With Valkey                | Comma-separated `host:port` addresses.                                                                                                                                    |
 | `GUILD_TIER`                     | No                         | Subscription tier limits as `name=requests-per-second:burst:tokens-per-hour`. Declaring none records usage without enforcing limits.                                      |
 | `DEFAULT_GUILD_TIER`             | No                         | Tier applied to servers with no assigned tier; defaults to `free`.                                                                                                        |
-| `DYNAMODB_ENABLED`               | No                         | Enables persistent history and server configuration; defaults to `false`.                                                                                                 |
-| `DYNAMODB_TABLE`                 | With DynamoDB              | Existing DynamoDB table name; defaults to `jarvis`.                                                                                                                       |
-| `AWS_REGION`                     | With DynamoDB              | DynamoDB region resolved by the AWS SDK.                                                                                                                                  |
-| `AWS_ROLE_ARN`                   | For federation             | AWS role assumed with a Google identity token.                                                                                                                            |
-| `AWS_WEB_IDENTITY_AUDIENCE`      | For federation             | Audience placed in the Google identity token.                                                                                                                             |
+| `STORE_DRIVER`                   | No                         | Storage backend for history, configuration, and reply claims: `none` (default), `postgres`, or `sqlite`. See [docs/store.md](docs/store.md).                              |
+| `POSTGRES_DSN`                   | With postgres              | PostgreSQL connection string.                                                                                                                                             |
+| `SQLITE_PATH`                    | With sqlite                | SQLite database file path; put it on a volume to survive container restarts.                                                                                              |
+| `STORE_SWEEP_INTERVAL`           | No                         | How often expired messages and lapsed reply claims are deleted; defaults to `1h`.                                                                                         |
 
 Every non-repeatable command flag is also available as an uppercase environment variable with hyphens replaced by underscores. For example, `--message-retention-days` maps to `MESSAGE_RETENTION_DAYS`. Use `--help` to see all options.
 
@@ -289,7 +281,7 @@ Discord Gateway -> ingestor -> NATS JetStream or GCP Pub/Sub -> worker
                                                        |-> OpenRouter (generation and tools)
                                                        |-> NVIDIA hosted NIM (generation and confirmed tools)
                                                        |-> Serper / Firecrawl / Tavily (Search)
-                                                       `-> DynamoDB (optional)
+                                                       `-> PostgreSQL or SQLite (optional)
 ```
 
 Both services speak to the broker through the `mq` package rather than to a client directly, so the transport is an operator's choice. `MQ_DRIVER=nats` is the default and runs the combined image, local development, and any deployment that must keep working without the internet. `MQ_DRIVER=pubsub` uses GCP Pub/Sub, whose topics are global, and is what lets Jarvis run in two places at once — see [Pub/Sub](docs/pubsub.md) and [failover](docs/failover.md).
@@ -319,7 +311,7 @@ No image bakes in `valkey-server`, including the combined one: every upstream Va
 > [!WARNING]
 > The NATS bus has no application-level authentication. The combined image binds its bundled broker to loopback, so only that container can reach it. A split deployment must keep its NATS cluster behind an internal VPC or another trusted network boundary, must not expose it directly to the public internet, and should enable NATS authentication and TLS.
 
-Deduplication differs by broker and this is the one difference a deployment must account for. JetStream drops a republished message inside its duplicate window; Pub/Sub has no publisher-side deduplication and delivers it twice. Running more than one ingestor therefore requires `DYNAMODB_ENABLED=true`, which supplies the per-message reply claim that makes exactly one worker answer. [Failover](docs/failover.md) covers this in full.
+Deduplication differs by broker and this is the one difference a deployment must account for. JetStream drops a republished message inside its duplicate window; Pub/Sub has no publisher-side deduplication and delivers it twice. Running more than one ingestor therefore requires a shared store (`STORE_DRIVER=postgres`), which supplies the per-message reply claim that makes exactly one worker answer. [Failover](docs/failover.md) covers this in full.
 
 ## Development
 
@@ -333,7 +325,7 @@ bazel test //...
 Additional documentation:
 
 - [Web search providers, sources, and recovery](docs/web-search.md)
-- [DynamoDB storage, history, and multi-cloud authentication](docs/dynamodb.md)
+- [Storage: PostgreSQL and SQLite schema, history, and retention](docs/store.md)
 - [Valkey usage metering, limits, and caching](docs/valkey.md)
 - [GCP Pub/Sub transport and broker differences](docs/pubsub.md)
 - [Active-active multi-site deployment](docs/failover.md)
