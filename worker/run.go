@@ -9,24 +9,21 @@ import (
 	"syscall"
 	"unicode"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
-	"github.com/justinswe/jarvis/worker/pkg/awsidentity"
+	"github.com/justinswe/jarvis/mq"
+	"github.com/justinswe/jarvis/store"
 	"github.com/justinswe/jarvis/worker/pkg/cache"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/consumer"
 	"github.com/justinswe/jarvis/worker/pkg/discord"
-	"github.com/justinswe/jarvis/worker/pkg/dynamostore"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
+	"github.com/justinswe/jarvis/worker/pkg/mcpx"
 	"github.com/justinswe/jarvis/worker/pkg/server"
 	"github.com/justinswe/jarvis/worker/pkg/usage"
 	"github.com/justinswe/jarvis/worker/pkg/valkeyconn"
 	"github.com/justinswe/jarvis/worker/pkg/version"
 	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/valkey-io/valkey-go"
 	"go.uber.org/zap"
 )
@@ -53,16 +50,26 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 	var provider config.Provider = staticProvider
 	var history discord.History
 	var manager config.Manager
-	var recorder consumer.Recorder
-	var repository *dynamostore.Repository
-	if cfg.dynamodbEnabled {
-		repo, repositoryErr := cfg.newRepository(ctx)
-		if repositoryErr != nil {
-			return repositoryErr
+	var recorder discord.Recorder
+	var claimer discord.ReplyClaimer
+	var mcpAuth mcpx.AuthSource
+	if cfg.storeEnabled() {
+		persistent, storeErr := store.Open(ctx, cfg.storeConfig())
+		if storeErr != nil {
+			return errors.Wrap(storeErr, "open message store")
 		}
-		defer repo.Close()
-		provider, history, manager, recorder = repo, repo, repo, repo
-		repository = repo
+		defer func() { _ = persistent.Close() }()
+		provider, history, manager, recorder = persistent, persistent, persistent, persistent
+		// A claim must lapse before the broker redelivers, or a worker that dies
+		// mid-generation strands every retry of the message it was holding.
+		persistent.SetReplyClaimTTL(cfg.mqAckWait)
+		claimer = persistent
+		mcpAuth = persistent
+		app.L().Info("Message store initialized", zap.String("driver", cfg.storeDriver))
+	}
+	defaultMCPServers, err := cfg.defaultMCPServers()
+	if err != nil {
+		return errors.Wrap(err, "initialize default MCP servers")
 	}
 	var limiter discord.Limiter
 	var usageRecorder genai.UsageRecorder
@@ -74,14 +81,12 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		defer stack.close()
 		limiter, usageRecorder = stack.usage, stack.usage
 
-		// Only worth a cache when there is a slow source of truth behind it: with
-		// DynamoDB off, configuration comes from a static in-process provider.
-		if repository != nil {
+		// Only worth a cache when there is a slow source of truth behind it: with the
+		// store off, configuration comes from a static in-process provider.
+		if cfg.storeEnabled() {
 			cacheClient := cache.New(stack.client, cfg.valkeyKeyPrefix, cfg.valkeyTimeout)
-			cachedProvider := config.NewCachedProvider(provider, cacheClient, cfg.valkeyConfigCacheTTL)
-			provider = cachedProvider
+			provider = config.NewCachedProvider(provider, cacheClient, cfg.valkeyConfigCacheTTL)
 			manager = config.NewCachedManager(manager, cacheClient)
-			repository.SetRetentionLookup(cachedProvider)
 			app.L().Info("Valkey guild-configuration cache initialized",
 				zap.Duration("ttl", cfg.valkeyConfigCacheTTL))
 		}
@@ -91,6 +96,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		Location:             cfg.location,
 		DefaultPrompt:        cfg.defaultPrompt,
 		MaxOutputTokens:      cfg.maxOutputTokens,
+		MaxToolRounds:        cfg.agentMaxToolRounds,
 		OpenRouterAPIKey:     cfg.openRouterAPIKey,
 		GoogleAIAPIKey:       cfg.googleAIAPIKey,
 		NVIDIAAPIKey:         cfg.nvidiaAPIKey,
@@ -98,7 +104,7 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		PrimaryModelProfile:  cfg.primaryModelProfile,
 		FallbackModelProfile: cfg.fallbackModelProfile,
 		WebSearchClients:     webSearchClients,
-		MutableConfiguration: cfg.dynamodbEnabled,
+		MutableConfiguration: cfg.storeEnabled(),
 		UsageRecorder:        usageRecorder,
 	})
 	if err != nil {
@@ -120,83 +126,29 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		RootUserIDs:        cfg.rootUserIDs,
 		Version:            version.Value,
 		Limiter:            limiter,
-		GuildTiers:         guildTierNames(guildTiers),
+		Recorder:           recorder,
+		ReplyClaimer:       claimer,
+		MCP:                mcpx.New(cfg.mcpConfig(), mcpAuth),
+		DefaultMCPServers:  defaultMCPServers,
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize Discord processor")
 	}
 
-	connection, err := discordv1.Connect(cfg.natsURL, "jarvis-worker")
-	if err != nil {
-		return err
-	}
-	defer discordv1.Drain(connection)
-	stream, err := jetstream.New(connection)
-	if err != nil {
-		return errors.Wrap(err, "initialize JetStream")
-	}
-	subscription, err := consumer.Start(ctx, stream, consumer.Config{
-		Stream:        cfg.natsStream,
-		Subject:       cfg.natsSubject,
-		Durable:       cfg.natsDurable,
-		AckWait:       cfg.natsAckWait,
-		MaxDeliver:    cfg.natsMaxDeliver,
-		MaxAckPending: cfg.natsMaxAckPending,
-		DrainTimeout:  cfg.natsDrainTimeout,
-	}, processor, recorder)
+	queue := cfg.queueConfig()
+	subscription, err := consumer.Start(ctx, queue, processor)
 	if err != nil {
 		return errors.Wrap(err, "start message consumer")
 	}
 	defer subscription.Stop()
 
 	address := cfg.address()
-	app.L().Info("Starting worker", zap.String("address", address), zap.String("nats_url", cfg.natsURL))
-	return server.Serve(ctx, address)
-}
-
-// newRepository authenticates to AWS and opens the DynamoDB-backed repository.
-func (cfg workerConfig) newRepository(ctx context.Context) (*dynamostore.Repository, error) {
-	awsCfg, err := awsidentity.Load(ctx, awsidentity.Config{
-		RoleARN:  cfg.awsRoleARN,
-		Audience: cfg.awsWebIdentityAudience,
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "initialize DynamoDB AWS configuration")
-	}
-	credentials, err := awsCfg.Credentials.Retrieve(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "authenticate to AWS for DynamoDB")
-	}
-	app.L().Info("DynamoDB AWS authentication initialized", cfg.awsAuthenticationFields(credentials)...)
-
-	repository, err := dynamostore.New(
-		dynamodb.NewFromConfig(awsCfg), cfg.dynamodbTable, config.GuildConfig{Settings: cfg.serverSettings()},
+	app.L().Info("Starting worker",
+		zap.String("address", address),
+		zap.String("mq_driver", cfg.mqDriver),
+		zap.String("topic", queue.Topic),
 	)
-	if err != nil {
-		return nil, errors.Wrap(err, "initialize DynamoDB repository")
-	}
-	return repository, nil
-}
-
-// awsAuthenticationFields describes how the worker authenticated to AWS, so an operator
-// can tell workload identity from the ambient credential chain in one log line.
-func (cfg workerConfig) awsAuthenticationFields(credentials aws.Credentials) []zap.Field {
-	fields := []zap.Field{
-		zap.String("credential_source", credentials.Source),
-		zap.String("aws_account_id", credentials.AccountID),
-	}
-	if roleARN := strings.TrimSpace(cfg.awsRoleARN); roleARN != "" {
-		fields = append(fields,
-			zap.String("authentication_mode", "gcp_web_identity"),
-			zap.String("role_arn", roleARN),
-		)
-	} else {
-		fields = append(fields, zap.String("authentication_mode", "default_aws_chain"))
-	}
-	if credentials.CanExpire {
-		fields = append(fields, zap.Time("credential_expiration", credentials.Expires))
-	}
-	return fields
+	return server.Serve(ctx, address)
 }
 
 // valkeyStack is the Valkey-backed layer: one connection shared by usage metering and,
@@ -259,8 +211,35 @@ func (cfg workerConfig) validate() error {
 	if cfg.discordBotToken == "" {
 		return errors.New("discord bot token is required")
 	}
-	if cfg.dynamodbEnabled && strings.TrimSpace(cfg.dynamodbTable) == "" {
-		return errors.New("DynamoDB table is required when DynamoDB is enabled")
+	switch store.Driver(cfg.storeDriver) {
+	case store.DriverNone:
+	case store.DriverPostgres:
+		if strings.TrimSpace(cfg.postgresDSN) == "" {
+			return errors.New("PostgreSQL DSN is required when the store driver is postgres")
+		}
+	case store.DriverSQLite:
+		if strings.TrimSpace(cfg.sqlitePath) == "" {
+			return errors.New("SQLite path is required when the store driver is sqlite")
+		}
+	default:
+		return errors.Errorf("unsupported store driver %q", cfg.storeDriver)
+	}
+	if cfg.storeEnabled() && cfg.storeSweepInterval <= 0 {
+		return errors.New("store sweep interval must be positive")
+	}
+	if !mq.Driver(cfg.mqDriver).Valid() {
+		return errors.Errorf("unsupported message queue driver %q", cfg.mqDriver)
+	}
+	if cfg.agentMaxToolRounds < 1 {
+		return errors.New("agent max tool rounds must be at least 1")
+	}
+	if _, err := cfg.mcpKey(); err != nil {
+		return err
+	}
+	// A message may not be released before its first keepalive is even due, or every
+	// message would be redelivered once while the first delivery was still working.
+	if cfg.mqMaxProcessingTime < cfg.mqAckWait {
+		return errors.New("max processing time must be at least the acknowledgement wait")
 	}
 	for _, userID := range cfg.rootUserIDs {
 		if !validRootUserID(userID) {

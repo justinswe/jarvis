@@ -1,0 +1,77 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# The live suite belongs to the hand-written postgres_live target below, never to
+# store_test: it needs a real PostgreSQL and would otherwise run on every
+# `bazel test //...`. One directive per file — gazelle reads only the first path on a line.
+# gazelle:exclude live_test.go
+# gazelle:exclude manual_test_main_test.go
+
+go_library(
+    name = "store",
+    srcs = [
+        "config.go",
+        "crypto.go",
+        "dialect.go",
+        "messages.go",
+        "migrate.go",
+        "reply.go",
+        "store.go",
+    ],
+    embedsrcs = [
+        "migrations/0001_init.sql",
+        "migrations/0002_mcp_servers.sql",
+    ],
+    importpath = "github.com/justinswe/jarvis/store",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//worker/pkg/config",
+        "//worker/pkg/llm",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_jackc_pgx_v5//stdlib",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@org_modernc_sqlite//:sqlite",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "store_test",
+    srcs = [
+        "crypto_test.go",
+        "store_test.go",
+    ],
+    embed = [":store"],
+    deps = [
+        "//worker/pkg/config",
+        "//worker/pkg/llm",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# The live suite is hand-written: its sources are excluded above, so gazelle would drop
+# the target rather than maintain it. `keep` preserves this rule only — the two targets
+# above stay managed.
+# keep
+go_test(
+    name = "postgres_live",
+    size = "large",
+    srcs = [
+        "live_test.go",
+        "manual_test_main_test.go",
+        "store_test.go",
+    ],
+    embed = [":store"],
+    tags = ["manual"],
+    deps = [
+        "//worker/pkg/config",
+        "//worker/pkg/llm",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

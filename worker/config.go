@@ -1,15 +1,20 @@
 package main
 
 import (
+	"encoding/hex"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
+	"github.com/justinswe/jarvis/mq"
+	"github.com/justinswe/jarvis/store"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
+	"github.com/justinswe/jarvis/worker/pkg/mcpx"
 	"github.com/justinswe/jarvis/worker/pkg/usage"
 	"github.com/justinswe/jarvis/worker/pkg/websearch"
 	"github.com/justinswe/std/errors"
@@ -19,17 +24,23 @@ import (
 
 type workerConfig struct {
 	host, port, projectID, location, defaultPrompt, discordBotToken string
+	mqDriver                                                        string
 	natsURL, natsStream, natsSubject, natsDurable                   string
-	natsAckWait, natsDrainTimeout                                   time.Duration
-	natsMaxDeliver, natsMaxAckPending                               int
+	pubsubProjectID, pubsubTopic, pubsubSubscription                string
+	mqAckWait, mqDrainTimeout, mqMaxProcessingTime                  time.Duration
+	mqMaxDeliver, mqMaxInFlight                                     int
 	openRouterAPIKey, googleAIAPIKey, nvidiaAPIKey                  string
 	primaryModelProfile, fallbackModelProfile                       string
 	serperAPIKey, firecrawlAPIKey, tavilyAPIKey                     string
 	modelProfiles, webSearchProviders                               []string
 	reasoningEffort                                                 string
-	dynamodbTable, awsRoleARN, awsWebIdentityAudience               string
+	storeDriver, postgresDSN, sqlitePath                            string
+	mcpEncryptionKey                                                string
+	mcpServers                                                      []string
+	mcpCallTimeout                                                  time.Duration
+	mcpAllowPrivateNetworks                                         bool
+	storeSweepInterval                                              time.Duration
 	rootUserIDs                                                     []string
-	dynamodbEnabled                                                 bool
 	valkeyEnabled, valkeyTLSEnabled                                 bool
 	valkeyAddresses, guildTierLimits                                []string
 	valkeyUsername, valkeyPassword, valkeyKeyPrefix                 string
@@ -40,6 +51,7 @@ type workerConfig struct {
 	valkeyConfigCacheTTL                                            time.Duration
 	threadMessages, parentMessages, channelMessages, historyRunes   int
 	maxOutputTokens                                                 int
+	agentMaxToolRounds                                              int
 	messageRetentionDays                                            int
 	messageTimeout                                                  time.Duration
 }
@@ -55,19 +67,26 @@ func newWorkerConfig() workerConfig {
 		channelMessages:      4,
 		historyRunes:         4000,
 		maxOutputTokens:      genai.DefaultMaxOutputTokens,
+		agentMaxToolRounds:   genai.DefaultMaxToolRounds,
 		reasoningEffort:      string(llm.ReasoningLow),
 		messageRetentionDays: config.DefaultMessageRetentionDays,
 		messageTimeout:       time.Minute,
-		dynamodbTable:        "jarvis",
+		mcpCallTimeout:       15 * time.Second,
+		storeDriver:          string(store.DriverNone),
+		storeSweepInterval:   time.Hour,
 
-		natsURL:           nats.DefaultURL,
-		natsStream:        discordv1.StreamName,
-		natsSubject:       discordv1.Subject,
-		natsDurable:       discordv1.DurableName,
-		natsAckWait:       30 * time.Second,
-		natsDrainTimeout:  20 * time.Second,
-		natsMaxDeliver:    3,
-		natsMaxAckPending: 4,
+		mqDriver:            string(mq.DriverNATS),
+		natsURL:             nats.DefaultURL,
+		natsStream:          discordv1.StreamName,
+		natsSubject:         discordv1.Subject,
+		natsDurable:         discordv1.DurableName,
+		pubsubTopic:         discordv1.TopicName,
+		pubsubSubscription:  discordv1.SubscriptionName,
+		mqAckWait:           30 * time.Second,
+		mqDrainTimeout:      20 * time.Second,
+		mqMaxProcessingTime: 10 * time.Minute,
+		mqMaxDeliver:        5,
+		mqMaxInFlight:       4,
 
 		valkeyKeyPrefix:        "jarvis",
 		valkeyTimeout:          50 * time.Millisecond,
@@ -95,14 +114,19 @@ func newRootCommand() *cobra.Command {
 	// is the supervisor in the same container.
 	flags.StringVar(&cfg.host, "host", cfg.host, "Health server bind host; empty binds every interface")
 	flags.StringVar(&cfg.port, "port", cfg.port, "Health server port")
+	flags.StringVar(&cfg.mqDriver, "mq-driver", cfg.mqDriver, "Message queue broker: nats or pubsub")
 	flags.StringVar(&cfg.natsURL, "nats-url", cfg.natsURL, "NATS server URL")
 	flags.StringVar(&cfg.natsStream, "nats-stream", cfg.natsStream, "JetStream stream holding normalized Discord events")
 	flags.StringVar(&cfg.natsSubject, "nats-subject", cfg.natsSubject, "Subject normalized Discord events are published to")
 	flags.StringVar(&cfg.natsDurable, "nats-durable", cfg.natsDurable, "Durable consumer name shared by every worker replica")
-	flags.DurationVar(&cfg.natsAckWait, "nats-ack-wait", cfg.natsAckWait, "How long a held message may go without progress before redelivery")
-	flags.DurationVar(&cfg.natsDrainTimeout, "nats-drain-timeout", cfg.natsDrainTimeout, "How long shutdown lets in-flight messages finish before cancelling them; must fit the platform's grace period")
-	flags.IntVar(&cfg.natsMaxDeliver, "nats-max-deliver", cfg.natsMaxDeliver, "Maximum delivery attempts per message")
-	flags.IntVar(&cfg.natsMaxAckPending, "nats-max-ack-pending", cfg.natsMaxAckPending, "Maximum messages held un-acknowledged at once")
+	flags.StringVar(&cfg.pubsubProjectID, "pubsub-project-id", cfg.pubsubProjectID, "GCP project owning the Pub/Sub topic and subscription")
+	flags.StringVar(&cfg.pubsubTopic, "pubsub-topic", cfg.pubsubTopic, "Pub/Sub topic normalized Discord events are published to")
+	flags.StringVar(&cfg.pubsubSubscription, "pubsub-subscription", cfg.pubsubSubscription, "Pub/Sub subscription shared by every worker replica")
+	flags.DurationVar(&cfg.mqAckWait, "mq-ack-wait", cfg.mqAckWait, "How long a held message may go without progress before redelivery, and how long a failed one waits before its retry")
+	flags.DurationVar(&cfg.mqMaxProcessingTime, "mq-max-processing-time", cfg.mqMaxProcessingTime, "How long one message may be held in total; set above the largest configured message timeout")
+	flags.DurationVar(&cfg.mqDrainTimeout, "mq-drain-timeout", cfg.mqDrainTimeout, "How long shutdown lets in-flight messages finish before cancelling them; must fit the platform's grace period")
+	flags.IntVar(&cfg.mqMaxDeliver, "mq-max-deliver", cfg.mqMaxDeliver, "Maximum delivery attempts per message")
+	flags.IntVar(&cfg.mqMaxInFlight, "mq-max-in-flight", cfg.mqMaxInFlight, "Maximum messages held un-acknowledged at once")
 	flags.StringVar(&cfg.projectID, "project-id", cfg.projectID, "GCP project ID")
 	flags.StringVar(&cfg.location, "location", cfg.location, "Vertex AI location")
 	flags.StringVar(&cfg.defaultPrompt, "default-prompt", cfg.defaultPrompt, "Root-controlled assistant customization prompt; may define the assistant name and personality")
@@ -121,14 +145,19 @@ func newRootCommand() *cobra.Command {
 	flags.IntVar(&cfg.channelMessages, "channel-context-window", cfg.channelMessages, "Prior ordinary channel messages")
 	flags.IntVar(&cfg.historyRunes, "history-runes", cfg.historyRunes, "Combined context history rune budget")
 	flags.IntVar(&cfg.maxOutputTokens, "max-output-tokens", cfg.maxOutputTokens, "Maximum total generated tokens, including thinking and visible text (maximum 8192)")
+	flags.IntVar(&cfg.agentMaxToolRounds, "agent-max-tool-rounds", cfg.agentMaxToolRounds, "Maximum model rounds with tools per message; the final round always forces a text answer")
 	flags.StringVar(&cfg.reasoningEffort, "reasoning-effort", cfg.reasoningEffort, "Default model thinking level: low, medium, or high")
 	flags.StringVar(&cfg.discordBotToken, "discord-bot-token", cfg.discordBotToken, "Discord bot token")
 	flags.DurationVar(&cfg.messageTimeout, "message-timeout", cfg.messageTimeout, "Overall message processing timeout")
 	flags.IntVar(&cfg.messageRetentionDays, "message-retention-days", cfg.messageRetentionDays, "Default message retention in days")
-	flags.BoolVar(&cfg.dynamodbEnabled, "dynamodb-enabled", cfg.dynamodbEnabled, "Enable DynamoDB message history and server configuration")
-	flags.StringVar(&cfg.dynamodbTable, "dynamodb-table", cfg.dynamodbTable, "DynamoDB table name")
-	flags.StringVar(&cfg.awsRoleARN, "aws-role-arn", cfg.awsRoleARN, "AWS IAM role assumed through Google workload identity")
-	flags.StringVar(&cfg.awsWebIdentityAudience, "aws-web-identity-audience", cfg.awsWebIdentityAudience, "Audience for the Google identity token exchanged with AWS")
+	flags.StringVar(&cfg.storeDriver, "store-driver", cfg.storeDriver, "Storage backend for history, configuration, and reply claims: none, postgres, or sqlite")
+	flags.StringVar(&cfg.postgresDSN, "postgres-dsn", cfg.postgresDSN, "PostgreSQL connection string (required when the store driver is postgres)")
+	flags.StringVar(&cfg.sqlitePath, "sqlite-path", cfg.sqlitePath, "SQLite database file path (required when the store driver is sqlite)")
+	flags.DurationVar(&cfg.storeSweepInterval, "store-sweep-interval", cfg.storeSweepInterval, "How often expired messages and lapsed reply claims are deleted")
+	flags.StringVar(&cfg.mcpEncryptionKey, "mcp-encryption-key", cfg.mcpEncryptionKey, "64-hex-char AES-256 key encrypting guild MCP auth tokens at rest; required to attach an MCP server with a token")
+	flags.StringSliceVar(&cfg.mcpServers, "mcp-server", cfg.mcpServers, "Deployment-default remote MCP servers offered to every guild, as name=url (comma-capable and repeatable)")
+	flags.DurationVar(&cfg.mcpCallTimeout, "mcp-call-timeout", cfg.mcpCallTimeout, "Deadline for each MCP connect, tool listing, and tool call")
+	flags.BoolVar(&cfg.mcpAllowPrivateNetworks, "mcp-allow-private-networks", cfg.mcpAllowPrivateNetworks, "Permit MCP URLs on loopback, private, or link-local networks, and plain http (self-hosted escape hatch)")
 	flags.StringSliceVar(&cfg.rootUserIDs, "root-user-ids", cfg.rootUserIDs, "Discord user IDs with cross-server root access")
 	flags.BoolVar(&cfg.valkeyEnabled, "valkey-enabled", cfg.valkeyEnabled, "Enable Valkey per-guild usage metering and subscription limits")
 	flags.StringSliceVar(&cfg.valkeyAddresses, "valkey-address", cfg.valkeyAddresses, "Valkey host:port addresses (comma-capable and repeatable)")
@@ -147,6 +176,94 @@ func newRootCommand() *cobra.Command {
 	flags.StringSliceVar(&cfg.guildTierLimits, "guild-tier", cfg.guildTierLimits, "Subscription tier limits: name=requests-per-second:burst:tokens-per-hour (comma-capable and repeatable)")
 	flags.StringVar(&cfg.defaultGuildTier, "default-guild-tier", cfg.defaultGuildTier, "Tier applied to servers with no assigned or a no longer defined tier")
 	return command
+}
+
+// queueConfig maps the operator's flags onto the broker the driver selects.
+func (cfg workerConfig) queueConfig() mq.Config {
+	queue := mq.Config{
+		Driver:            mq.Driver(cfg.mqDriver),
+		ClientName:        "jarvis-worker",
+		AckWait:           cfg.mqAckWait,
+		MaxProcessingTime: cfg.mqMaxProcessingTime,
+		DrainTimeout:      cfg.mqDrainTimeout,
+		MaxDeliver:        cfg.mqMaxDeliver,
+		MaxInFlight:       cfg.mqMaxInFlight,
+	}
+	if queue.Driver == mq.DriverPubSub {
+		queue.ProjectID, queue.Topic, queue.Consumer = cfg.pubsubProjectID, cfg.pubsubTopic, cfg.pubsubSubscription
+		return queue
+	}
+	queue.URL, queue.Stream = cfg.natsURL, cfg.natsStream
+	queue.Topic, queue.Consumer = cfg.natsSubject, cfg.natsDurable
+	return queue
+}
+
+// storeEnabled reports whether a persistent store backs history, configuration, and
+// reply claims.
+func (cfg workerConfig) storeEnabled() bool {
+	return store.Driver(cfg.storeDriver) != store.DriverNone
+}
+
+// storeConfig maps the operator's flags onto the store package.
+func (cfg workerConfig) storeConfig() store.Config {
+	key, _ := cfg.mcpKey() // validate() already rejected an undecodable key
+	return store.Config{
+		Driver:           store.Driver(cfg.storeDriver),
+		PostgresDSN:      cfg.postgresDSN,
+		SQLitePath:       cfg.sqlitePath,
+		Defaults:         config.GuildConfig{Settings: cfg.serverSettings()},
+		SweepInterval:    cfg.storeSweepInterval,
+		MCPEncryptionKey: key,
+	}
+}
+
+// mcpConfig maps the operator's flags onto the MCP connector.
+func (cfg workerConfig) mcpConfig() mcpx.Config {
+	return mcpx.Config{CallTimeout: cfg.mcpCallTimeout, AllowPrivateNetworks: cfg.mcpAllowPrivateNetworks}
+}
+
+// defaultMCPServers parses the deployment-wide MCP server list. Scheme policy beyond
+// the parse (https unless --mcp-allow-private-networks) is enforced at dial time.
+func (cfg workerConfig) defaultMCPServers() ([]config.MCPServer, error) {
+	entries := cfg.mcpServers
+	if len(entries) == 1 && strings.TrimSpace(entries[0]) == "" {
+		entries = nil
+	}
+	servers := make([]config.MCPServer, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		name, rawURL, ok := strings.Cut(strings.TrimSpace(entry), "=")
+		if !ok {
+			return nil, errors.Errorf("mcp-server %q must be name=url", entry)
+		}
+		server := config.MCPServer{Name: strings.TrimSpace(name), URL: strings.TrimSpace(rawURL), Enabled: true}
+		value, err := url.Parse(server.URL)
+		if err != nil || value.Host == "" || (value.Scheme != "https" && value.Scheme != "http") || value.User != nil {
+			return nil, errors.Errorf("mcp-server %q must carry an http(s) URL without credentials", entry)
+		}
+		if server.Name == "" {
+			return nil, errors.Errorf("mcp-server %q needs a name", entry)
+		}
+		if _, duplicate := seen[server.Name]; duplicate {
+			return nil, errors.Errorf("duplicate mcp-server name %q", server.Name)
+		}
+		seen[server.Name] = struct{}{}
+		servers = append(servers, server)
+	}
+	return servers, nil
+}
+
+// mcpKey decodes the optional MCP secret encryption key.
+func (cfg workerConfig) mcpKey() ([]byte, error) {
+	value := strings.TrimSpace(cfg.mcpEncryptionKey)
+	if value == "" {
+		return nil, nil
+	}
+	key, err := hex.DecodeString(value)
+	if err != nil || len(key) != 32 {
+		return nil, errors.New("the MCP encryption key must be 64 hexadecimal characters (32 bytes)")
+	}
+	return key, nil
 }
 
 // guildTiers parses and validates the deployment subscription tier table.

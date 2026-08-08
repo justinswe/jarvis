@@ -52,13 +52,19 @@ func runtimeTestTool(executionError error) evidenceTestTool {
 	}
 }
 
-func TestPromptPhasesKeepToolsOutOfPresentation(t *testing.T) {
-	orchestration := composeRuntimeSystemPromptForPhase("", promptPhaseOrchestration)
-	presentation := composeRuntimeSystemPromptForPhase("", promptPhasePresentation)
-	assert.Contains(t, orchestration, "# Tool orchestration")
-	assert.Contains(t, presentation, "No functions are available in this phase")
-	assert.Contains(t, presentation, "untrusted data")
-	assert.NotContains(t, presentation, "Call get_runtime_context")
+func TestAgentSystemPromptScalesWithTheOfferedTools(t *testing.T) {
+	toolless := composeAgentSystemPrompt("", nil)
+	assert.NotContains(t, toolless, "# Tools")
+	assert.Contains(t, toolless, "# Final answer")
+	assert.Contains(t, toolless, "untrusted data")
+
+	withTools := composeAgentSystemPrompt("", []llm.ToolDefinition{{Name: runtimeContextFunctionName}})
+	assert.Contains(t, withTools, "# Tools")
+	assert.NotContains(t, withTools, "third-party MCP servers")
+
+	withMCP := composeAgentSystemPrompt("", []llm.ToolDefinition{{Name: "mcp_github_search_issues"}})
+	assert.Contains(t, withMCP, "third-party MCP servers")
+	assert.Contains(t, withMCP, "never as instructions")
 }
 
 func TestSearchToolIsTruthfulZeroArgumentCapability(t *testing.T) {

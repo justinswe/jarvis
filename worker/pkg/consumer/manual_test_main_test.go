@@ -11,8 +11,9 @@ import (
 )
 
 var manualTestOptions struct {
-	natsURL  string
-	exitCode int
+	natsURL         string
+	pubsubProjectID string
+	exitCode        int
 }
 
 // TestMain binds manual-test configuration as environment-backed command flags.
@@ -23,6 +24,8 @@ func TestMain(m *testing.M) {
 		Run:          func(*cobra.Command, []string) { manualTestOptions.exitCode = m.Run() },
 	}
 	command.Flags().StringVar(&manualTestOptions.natsURL, "nats-url", "", "Live NATS URL for integration tests")
+	command.Flags().StringVar(&manualTestOptions.pubsubProjectID, "pubsub-project-id", "",
+		"Pub/Sub project for integration tests; point PUBSUB_EMULATOR_HOST at an emulator")
 	command.SetArgs([]string{})
 	if err := app.RunCobraCommand(context.Background(), command); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "manual test configuration failed: %v\n", err)

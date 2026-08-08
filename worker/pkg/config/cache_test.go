@@ -72,7 +72,15 @@ func (m *stubManager) RemoveAdmin(context.Context, string, string, string) (Guil
 	return m.updateCfg, nil
 }
 
-func (m *stubManager) SetTier(context.Context, string, string, string) (GuildConfig, error) {
+func (m *stubManager) AddMCPServer(context.Context, string, string, MCPServerInput) (GuildConfig, error) {
+	m.updateCalls++
+	if m.updateErr != nil {
+		return GuildConfig{}, m.updateErr
+	}
+	return m.updateCfg, nil
+}
+
+func (m *stubManager) RemoveMCPServer(context.Context, string, string, string) (GuildConfig, error) {
 	m.updateCalls++
 	if m.updateErr != nil {
 		return GuildConfig{}, m.updateErr
@@ -107,7 +115,7 @@ func TestCachedProviderKeysAreScopedPerGuild(t *testing.T) {
 }
 
 func TestCachedProviderPropagatesTheUnderlyingError(t *testing.T) {
-	wantErr := errors.New("dynamodb unavailable")
+	wantErr := errors.New("store unavailable")
 	provider := &stubProvider{err: wantErr}
 	cachedProvider := NewCachedProvider(provider, cache.NewMemory(time.Second), time.Minute)
 
@@ -180,8 +188,12 @@ func TestCachedManagerInvalidatesOnAdminChanges(t *testing.T) {
 			_, err := m.RemoveAdmin(context.Background(), "g1", "actor", "u1")
 			return err
 		}},
-		{name: "SetTier", mutate: func(m *CachedManager) error {
-			_, err := m.SetTier(context.Background(), "g1", "actor", "gold")
+		{name: "AddMCPServer", mutate: func(m *CachedManager) error {
+			_, err := m.AddMCPServer(context.Background(), "g1", "actor", MCPServerInput{Name: "github", URL: "https://mcp.example.com"})
+			return err
+		}},
+		{name: "RemoveMCPServer", mutate: func(m *CachedManager) error {
+			_, err := m.RemoveMCPServer(context.Background(), "g1", "actor", "github")
 			return err
 		}},
 	}

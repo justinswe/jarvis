@@ -9,6 +9,13 @@ import (
 
 var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
+// ValidateToolDefinitions checks declarations against the subset every configured
+// provider accepts — the same validation hosts run on each request. External tool
+// sources (MCP schema sanitization) use it to prove their output is representable.
+func ValidateToolDefinitions(tools []ToolDefinition) error {
+	return validateTools(tools)
+}
+
 // validateTools rejects malformed declarations before they reach a provider.
 func validateTools(tools []ToolDefinition) error {
 	seen := make(map[string]struct{}, len(tools))

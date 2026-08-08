@@ -35,13 +35,27 @@ func (p *Processor) Process(ctx context.Context, m *discordgo.MessageCreate) err
 	if !p.isTargeted(ctx, m, channel) {
 		return nil
 	}
+	if !p.claimReply(ctx, channel, m) {
+		return nil
+	}
+	if err := p.answer(ctx, channel, m); err != nil {
+		// The claim is left to lapse so that whichever worker the redelivery reaches —
+		// including this one — can take it and try again.
+		return err
+	}
+	p.holdReply(ctx, channel, m)
+	return nil
+}
+
+// answer handles one message the worker has won the right to reply to.
+func (p *Processor) answer(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate) error {
 	if handled := p.handleAddAdminCommand(ctx, m); handled {
 		return nil
 	}
 	if !isThreadChannel(channel) {
 		return p.processTargetedMessage(ctx, channel, m)
 	}
-	err = p.threadQueue.Run(ctx, m.ChannelID, func(threadCtx context.Context) error {
+	err := p.threadQueue.Run(ctx, m.ChannelID, func(threadCtx context.Context) error {
 		return p.processTargetedMessage(threadCtx, channel, m)
 	})
 	if errors.Is(err, errThreadRequestSuperseded) {
@@ -61,6 +75,10 @@ func (p *Processor) processTargetedMessage(ctx context.Context, channel *discord
 		return errors.Wrap(err, "validate server configuration")
 	}
 	settings := guildConfig.Settings
+
+	// Recorded here — after targeting, before admission — so stored history is exactly
+	// the conversation addressed to the bot, including requests the limiter turned away.
+	p.record(ctx, settings.MessageRetentionDays, m.Message)
 
 	started := time.Now()
 	fields := discordRequestFields(channel, m)
@@ -117,7 +135,7 @@ func (p *Processor) handleAddAdminCommand(ctx context.Context, m *discordgo.Mess
 		return false
 	}
 	if _, root := p.rootUsers[m.Author.ID]; !root {
-		_ = p.sendMessageChunks(ctx, m.ChannelID, "Only a Jarvis root user can add administrators.")
+		_, _ = p.sendMessageChunks(ctx, m.ChannelID, "Only a Jarvis root user can add administrators.")
 		return true
 	}
 	var targets []string
@@ -127,19 +145,19 @@ func (p *Processor) handleAddAdminCommand(ctx context.Context, m *discordgo.Mess
 		}
 	}
 	if len(targets) != 1 || targets[0] != match[1] {
-		_ = p.sendMessageChunks(ctx, m.ChannelID, "Please mention exactly one Discord user to add as a Jarvis administrator.")
+		_, _ = p.sendMessageChunks(ctx, m.ChannelID, "Please mention exactly one Discord user to add as a Jarvis administrator.")
 		return true
 	}
 	if p.manager == nil {
-		_ = p.sendMessageChunks(ctx, m.ChannelID, "Administrator persistence is disabled, so no change was made.")
+		_, _ = p.sendMessageChunks(ctx, m.ChannelID, "Administrator persistence is disabled, so no change was made.")
 		return true
 	}
 	updated, err := p.manager.AddAdmin(ctx, m.GuildID, m.Author.ID, targets[0])
 	if err != nil || !slices.Contains(updated.AdminUserIDs, targets[0]) {
-		_ = p.sendMessageChunks(ctx, m.ChannelID, "I could not persist that administrator change, so no success is being reported.")
+		_, _ = p.sendMessageChunks(ctx, m.ChannelID, "I could not persist that administrator change, so no success is being reported.")
 		return true
 	}
-	_ = p.sendMessageChunks(ctx, m.ChannelID, fmt.Sprintf("<@%s> is now a Jarvis administrator.", targets[0]))
+	_, _ = p.sendMessageChunks(ctx, m.ChannelID, fmt.Sprintf("<@%s> is now a Jarvis administrator.", targets[0]))
 	return true
 }
 
@@ -178,14 +196,16 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			FallbackModelProfile: settings.FallbackModelProfile,
 		},
 	}
-	request.Tools = append(request.Tools, p.runtimeContext())
-	request.Tools = append(request.Tools, p.reactToMessage(m.ChannelID, m.ID))
+	native := []genai.FunctionTool{p.runtimeContext(), p.reactToMessage(m.ChannelID, m.ID)}
 	if settings.ChannelSearchEnabled && p.history != nil {
-		request.Tools = append(request.Tools, p.searchCurrentChannel(m.GuildID, m.ChannelID, m.ID))
+		native = append(native, p.searchCurrentChannel(m.GuildID, m.ChannelID, m.ID))
 	}
 	if tools, authorized := p.configurationTools(ctx, m, guildConfig); authorized {
-		request.Tools = append(request.Tools, tools...)
+		native = append(native, tools...)
 	}
+	tools, releaseMCP := p.mcpTools(ctx, m, guildConfig, native)
+	defer releaseMCP()
+	request.Tools = tools
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
 	}
@@ -225,7 +245,8 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
 	}
-	if err := p.sendReply(replyCtx, channel, m, reply); err != nil {
+	sent, err := p.sendReply(replyCtx, channel, m, reply)
+	if err != nil {
 		if threadRequestSuperseded(replyCtx) {
 			return errThreadRequestSuperseded
 		}
@@ -237,6 +258,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		)...)
 		return err
 	}
+	p.record(replyCtx, settings.MessageRetentionDays, sent...)
 	if threadRequestSuperseded(replyCtx) {
 		return errThreadRequestSuperseded
 	}
@@ -300,7 +322,9 @@ func (p *Processor) isTargeted(ctx context.Context, m *discordgo.MessageCreate, 
 	return false
 }
 
-func (p *Processor) sendReply(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, reply string) error {
+// sendReply posts the reply — into the thread it belongs to, or a new one — and returns
+// the messages actually posted so they can be recorded as conversation.
+func (p *Processor) sendReply(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate, reply string) ([]*discordgo.Message, error) {
 	if isThreadChannel(channel) {
 		return p.sendMessageChunks(ctx, m.ChannelID, reply)
 	}
@@ -308,16 +332,16 @@ func (p *Processor) sendReply(ctx context.Context, channel *discordgo.Channel, m
 	if err != nil {
 		return p.sendMessageChunks(ctx, m.ChannelID, reply)
 	}
-	if err := p.sendMessageChunks(ctx, thread.ID, reply); err != nil {
-		return p.sendMessageChunks(ctx, m.ChannelID, reply)
+	if sent, err := p.sendMessageChunks(ctx, thread.ID, reply); err == nil {
+		return sent, nil
 	}
-	return nil
+	return p.sendMessageChunks(ctx, m.ChannelID, reply)
 }
 
 func (p *Processor) sendErrorReply(ctx context.Context, channelID string) {
-	_ = p.sendMessageChunks(ctx, channelID, "Sorry, I ran into an error while generating a response.")
+	_, _ = p.sendMessageChunks(ctx, channelID, "Sorry, I ran into an error while generating a response.")
 }
 
 func (p *Processor) sendEmptyMentionReply(ctx context.Context, channelID string) {
-	_ = p.sendMessageChunks(ctx, channelID, "Please include a question with your mention.")
+	_, _ = p.sendMessageChunks(ctx, channelID, "Please include a question with your mention.")
 }

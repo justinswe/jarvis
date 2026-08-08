@@ -25,10 +25,11 @@ Jarvis brings sourced current answers, conversation recall, and server-specific 
 | Capability                       | What it does                                                                                                                                                                                                   |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Provider-agnostic web search** | Uses Serper, Firecrawl, or Tavily and supplies only normalized results to the presentation model.                                                                                                              |
-| **Conversation recall**          | Includes recent Discord context by default. Optional DynamoDB storage adds persistent history and model-directed search across the current channel or thread.                                                  |
+| **Conversation recall**          | Includes recent Discord context by default. An optional PostgreSQL or SQLite store keeps the bot-involved conversation and adds model-directed search across the current channel or thread.                    |
 | **Fast by design**               | Go services, compact raw-protobuf transport, bounded context windows, and a direct request path keep the runtime small and responsive.                                                                         |
 | **Provider-neutral models**      | Hosts generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM with named profiles, confirmed capabilities, and retryable failover.                                                                |
 | **Server customization**         | Authorized administrators can manage prompts, response settings, search, history, retention, and delegated access from Discord.                                                                                |
+| **Agent-first tool loop**        | Every tool is offered on every message and the model decides when to stop, except Jarvis's own configuration tools, which need the requesting user's message to ask for a configuration change — so a web-search snippet or a third-party tool result cannot talk the bot into reconfiguring itself. Live current-channel reads are served over an in-process MCP server, and each guild can attach remote MCP tool servers (root-managed, tokens encrypted at rest, strict per-guild isolation). |
 | **Accuracy and resilience**      | Tracks source availability, permits one bounded recovery call for Search, exposes health checks, and qualifies source-less current answers.                                                                    |
 | **Usage metering and limits**    | Optional Valkey integration records per-guild request rates and per-model token use for an external reader, and enforces per-server subscription tiers. One round trip on the request path, and it fails open. |
 
@@ -74,7 +75,7 @@ The container exposes health and readiness checks at `http://localhost:8080/heal
 
 The combined image runs a small PID 1 supervisor over three processes. It starts a bundled NATS server on loopback port 4222, waits for its monitoring endpoint, starts the worker on loopback port 8081, waits for readiness, and then starts the Discord Gateway ingestor on port 8080. If any process exits, the supervisor stops the rest so the container platform can replace the instance cleanly. The supervisor passes no flags to the two Jarvis binaries: it hands each one an environment and lets the `app` package resolve the configuration from it. It does pass `--port` and `--http_port` to nats-server, which override `nats.conf`, so `--nats-port` and `--nats-monitor-port` move the bus and the supervisor together.
 
-On shutdown the worker stops taking new messages and gives the replies already in flight up to `--nats-drain-timeout` (20s) to finish before cancelling them; anything cancelled is left un-acknowledged and redelivered. The supervisor's `--shutdown-timeout` (30s) must stay above that, or it would kill the worker part-way through draining.
+On shutdown the worker stops taking new messages and gives the replies already in flight up to `--mq-drain-timeout` (20s) to finish before cancelling them; anything cancelled is left un-acknowledged and redelivered. The supervisor's `--shutdown-timeout` (30s) must stay above that, or it would kill the worker part-way through draining.
 
 The supervisor can also run a Valkey, which is off by default. With `--valkey-enabled` and no `--valkey-address`, or one naming loopback, it starts `valkey-server` after the bus and before the worker, waits for the server to answer `PING`, and passes `VALKEY_ENABLED` and `VALKEY_ADDRESS` down to the worker; it stops with everything else. Persistence is off, since rate-limit counters expire on their own and the guild-configuration cache is read-through.
 
@@ -190,7 +191,7 @@ bazel run //jarvis
 
 `//jarvis` is the same supervisor the container runs as PID 1, so a local run follows the identical sequence: NATS on port 4222, then the worker health server on port 8081 once NATS answers its monitoring endpoint, then the ingestor health server on port 8080 once the worker reports ready. Stopping it stops all three. Locally it finds NATS and its two siblings in the Bazel runfiles tree; in the image it finds them under `/app`.
 
-Run `bazel run //ingestor -- --help` or `bazel run //worker -- --help` to inspect or start either service on its own; each needs a reachable `NATS_URL`.
+Run `bazel run //ingestor -- --help` or `bazel run //worker -- --help` to inspect or start either service on its own; each needs a reachable broker: `NATS_URL` by default, or `PUBSUB_PROJECT_ID` under `MQ_DRIVER=pubsub`.
 
 ## Search and conversation recall
 
@@ -198,20 +199,17 @@ Jarvis searches through Serper, Firecrawl, or Tavily when web search is enabled 
 
 The provider receives only the sanitized current request plus bounded previous-request context for an elliptical follow-up. It never receives guild prompts, Discord channel results, runtime evidence, credentials, conversation history, or tool output. The presentation model receives versioned JSON containing only status and validated result records. Every displayed link is labeled `Sources consulted`. When no usable URL is available, confident current claims are rejected and repaired into explicitly qualified prose. See [Web search](docs/web-search.md) for request limits, source semantics, recovery rules, diagnostics, migration, and key rotation.
 
-Recent conversation context is loaded from Discord by default. When DynamoDB is enabled, Jarvis records incoming messages, uses the stored conversation as model context, and can search the current channel or thread by text, author, or time range. Search results include direct links back to Discord. See [DynamoDB storage](docs/dynamodb.md) for retention, access, and search behavior.
+Recent conversation context is loaded from Discord by default. When a store driver is configured, Jarvis records the conversation addressed to it — targeted messages and its own replies, never surrounding channel traffic — uses it as model context, and can search the current channel or thread by text, author, or time range. Search results include direct links back to Discord. See [Storage](docs/store.md) for the schema, retention, and search behavior.
 
 Within one worker instance, overlapping requests in the same Discord thread use latest-message-wins processing. A newer request cancels the active request, replaces any older pending request, and waits for cancellation to finish before generating one response from the latest available thread history. Existing context-window and rune-budget settings still apply. Separate threads remain concurrent; deployments with multiple worker replicas need external request affinity or distributed coordination to provide the same guarantee across replicas.
 
 ## Configuration
 
-Explicit model profiles may host generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM. Web-search providers are configured independently from model profiles. DynamoDB can optionally provide persistent Discord history and per-server profile selection:
+Explicit model profiles may host generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM. Web-search providers are configured independently from model profiles. An optional SQL store provides persistent Discord history, per-server configuration, and the reply claim multi-site deployments require. PostgreSQL 16 is the shared, HA-capable backend; SQLite is the zero-infrastructure single-site backend — one file next to the container, no server to run. Both sit behind one implementation, selected by `STORE_DRIVER`. See [Storage](docs/store.md).
 
-```text
-Google Cloud                                      AWS
-Vertex AI <-> Jarvis worker -- identity token --> STS --> DynamoDB
-```
+Remote MCP tool servers extend what the assistant can do: deployment-wide defaults come from `MCP_SERVER`, and root users attach per-guild servers from Discord with `add_mcp_server` (bearer tokens are encrypted at rest under `MCP_ENCRYPTION_KEY`). Their tools appear to the model as `mcp_<name>_<tool>`, results are treated as untrusted data, each interaction is pinned to its own guild, URLs resolving to private networks are refused at dial time, and a server that redirects across hosts is refused rather than handed the guild's credential.
 
-For a keyless deployment, Jarvis retrieves a short-lived identity token from its attached Google Cloud service account and exchanges it through AWS STS `AssumeRoleWithWebIdentity`. It does not require a mounted Google service-account key or static AWS access keys. Local, ECS, and EC2 deployments can instead use the AWS SDK's normal credential chain.
+Jarvis also serves its own Discord reads over an in-process MCP server: `read_messages` and `get_message`, scoped to the current channel and gated by the guild's `channel_search_enabled` setting. Guild-wide listing and search are deliberately not offered, because they follow the bot's permissions rather than the requesting user's.
 
 The primary configuration variables are:
 
@@ -233,15 +231,21 @@ The primary configuration variables are:
 | `TAVILY_API_KEY`                 | When Tavily is selected    | Tavily credential; ignored when Tavily is unselected.                                                                                                                     |
 | `OPENROUTER_API_KEY`             | With OpenRouter            | API key used only for OpenRouter generation.                                                                                                                              |
 | `NVIDIA_API_KEY`                 | With NVIDIA NIM            | Bearer key for hosted `integrate.api.nvidia.com`; self-hosted NIM endpoints are not configured here.                                                                      |
-| `VALKEY_ENABLED`                 | No                         | Enables per-guild usage metering, subscription rate limits, and (with DynamoDB) the guild-configuration cache; defaults to `false`. See [docs/valkey.md](docs/valkey.md). |
+| `MQ_DRIVER`                      | No                         | Message queue broker: `nats` (default) or `pubsub`. See [docs/pubsub.md](docs/pubsub.md).                                                                                  |
+| `PUBSUB_PROJECT_ID`              | With Pub/Sub               | GCP project owning the topic and subscription; required when `MQ_DRIVER=pubsub`.                                                                                          |
+| `VALKEY_ENABLED`                 | No                         | Enables per-guild usage metering, subscription rate limits, and (with a store) the guild-configuration cache; defaults to `false`. See [docs/valkey.md](docs/valkey.md).  |
 | `VALKEY_ADDRESS`                 | With Valkey                | Comma-separated `host:port` addresses.                                                                                                                                    |
 | `GUILD_TIER`                     | No                         | Subscription tier limits as `name=requests-per-second:burst:tokens-per-hour`. Declaring none records usage without enforcing limits.                                      |
 | `DEFAULT_GUILD_TIER`             | No                         | Tier applied to servers with no assigned tier; defaults to `free`.                                                                                                        |
-| `DYNAMODB_ENABLED`               | No                         | Enables persistent history and server configuration; defaults to `false`.                                                                                                 |
-| `DYNAMODB_TABLE`                 | With DynamoDB              | Existing DynamoDB table name; defaults to `jarvis`.                                                                                                                       |
-| `AWS_REGION`                     | With DynamoDB              | DynamoDB region resolved by the AWS SDK.                                                                                                                                  |
-| `AWS_ROLE_ARN`                   | For federation             | AWS role assumed with a Google identity token.                                                                                                                            |
-| `AWS_WEB_IDENTITY_AUDIENCE`      | For federation             | Audience placed in the Google identity token.                                                                                                                             |
+| `STORE_DRIVER`                   | No                         | Storage backend for history, configuration, and reply claims: `none` (default), `postgres`, or `sqlite`. See [docs/store.md](docs/store.md).                              |
+| `POSTGRES_DSN`                   | With postgres              | PostgreSQL connection string.                                                                                                                                             |
+| `SQLITE_PATH`                    | With sqlite                | SQLite database file path; put it on a volume to survive container restarts.                                                                                              |
+| `STORE_SWEEP_INTERVAL`           | No                         | How often expired messages and lapsed reply claims are deleted; defaults to `1h`.                                                                                         |
+| `AGENT_MAX_TOOL_ROUNDS`          | No                         | Maximum model rounds with tools per message; the final round always forces a text answer. Defaults to `8`.                                                                |
+| `MCP_SERVER`                     | No                         | Deployment-default remote MCP servers offered to every guild, as `name=url` (repeatable).                                                                                 |
+| `MCP_ENCRYPTION_KEY`             | To store MCP tokens        | 64-hex-char AES-256 key sealing per-guild MCP auth tokens at rest. See [docs/store.md](docs/store.md).                                                                    |
+| `MCP_CALL_TIMEOUT`               | No                         | Deadline for each MCP connect, tool listing, and tool call; defaults to `15s`.                                                                                            |
+| `MCP_ALLOW_PRIVATE_NETWORKS`     | No                         | Permits MCP URLs on loopback/private networks and plain `http` — for self-hosted servers only; defaults to `false`.                                                       |
 
 Every non-repeatable command flag is also available as an uppercase environment variable with hyphens replaced by underscores. For example, `--message-retention-days` maps to `MESSAGE_RETENTION_DAYS`. Use `--help` to see all options.
 
@@ -279,7 +283,7 @@ Credentials remain provider-wide: configure `GOOGLE_AI_API_KEY`, `OPENROUTER_API
 Jarvis separates the stateful Discord connection from independently deployable message processing:
 
 ```text
-Discord Gateway -> ingestor -> NATS JetStream -> worker
+Discord Gateway -> ingestor -> NATS JetStream or GCP Pub/Sub -> worker
                               jarvis.discord.v1.messages
                                                        |-> Discord REST
                                                        |-> Google AI Gemini Developer API (generation and tools)
@@ -287,18 +291,18 @@ Discord Gateway -> ingestor -> NATS JetStream -> worker
                                                        |-> OpenRouter (generation and tools)
                                                        |-> NVIDIA hosted NIM (generation and confirmed tools)
                                                        |-> Serper / Firecrawl / Tavily (Search)
-                                                       `-> DynamoDB (optional)
+                                                       `-> PostgreSQL or SQLite (optional)
 ```
 
-The two services follow Cloud Pub/Sub push semantics.
+Both services speak to the broker through the `mq` package rather than to a client directly, so the transport is an operator's choice. `MQ_DRIVER=nats` is the default and runs the combined image, local development, and any deployment that must keep working without the internet. `MQ_DRIVER=pubsub` uses GCP Pub/Sub, whose topics are global, and is what lets Jarvis run in two places at once — see [Pub/Sub](docs/pubsub.md) and [failover](docs/failover.md).
 
-The ingestor owns the Discord Gateway connection and normalizes each message into the versioned protobuf contract at `api/jarvis/discord/v1/worker.proto`. It publishes those bytes to the `jarvis.discord.v1.messages` subject on the configured `NATS_URL` and returns as soon as the broker has stored the message. It never waits for processing, so a slow or restarting worker cannot stall Discord event handling.
+The ingestor owns the Discord Gateway connection and normalizes each message into the versioned protobuf contract at `api/jarvis/discord/v1/worker.proto`. It publishes those bytes to the configured topic and returns as soon as the broker has stored the message. It never waits for processing, so a slow or restarting worker cannot stall Discord event handling.
 
-The worker consumes the `JARVIS_DISCORD` stream through the `jarvis-worker` durable consumer, and provisions both on startup. A message is held un-acknowledged for as long as the worker is working on it — the worker resets the redelivery timer every `NATS_ACK_WAIT`/2 while processing — and is acknowledged only once processing completes. A worker that crashes mid-message therefore has that message redelivered rather than losing it. Processing failures are negatively acknowledged and retried up to `NATS_MAX_DELIVER` times; messages that redelivery could never fix, such as an unparseable payload, are terminated instead of retried. Each worker holds at most `NATS_MAX_ACK_PENDING` messages at once and processes them concurrently.
+The worker consumes through the `jarvis-worker` durable subscription. A message is held un-acknowledged for as long as the worker is working on it — up to `MQ_MAX_PROCESSING_TIME`, beyond which a wedged message is released rather than held for the process lifetime — and is acknowledged only once processing completes. A worker that crashes mid-message therefore has that message redelivered rather than losing it. Processing failures are negatively acknowledged and retried up to `MQ_MAX_DELIVER` times; messages that redelivery could never fix, such as an unparseable payload, are terminated instead of retried. Each worker holds at most `MQ_MAX_IN_FLIGHT` messages at once and processes them concurrently.
 
 Because the consumer is durable and shared, running more than one worker replica load-balances the stream across them with no further coordination.
 
-The worker owns provisioning, so the stream must exist before the ingestor can publish. The combined image guarantees this by starting the ingestor only after the worker reports ready. In a split deployment where the ingestor starts first, its publishes are logged and dropped until a worker has provisioned the stream.
+Under the NATS driver both services provision the stream on startup, so whichever reaches the bus first creates it. Under Pub/Sub neither creates anything: the topic and subscription must exist beforehand, and a service that cannot find them fails at startup naming the `gcloud` command that fixes it.
 
 Build and load the combined or individual service images locally:
 
@@ -310,14 +314,14 @@ bazel run //:worker_image_load
 
 Only the combined `justinswe/jarvis` image is currently published. Publication of `justinswe/jarvis-ingestor` and `justinswe/jarvis-worker` is intentionally deferred.
 
-The combined image bakes in a pinned upstream `nats-server` binary as its own layer; the individual service images do not, and expect `NATS_URL` to point at an external cluster. The bundled broker keeps JetStream state under `/tmp/jetstream`, which is ephemeral: it gives redelivery when the worker crashes during processing, but does not survive a container restart. Durable delivery across restarts is a property of an external NATS cluster in the split deployment.
+The combined image bakes in a pinned upstream `nats-server` binary as its own layer; the individual service images do not, and expect `NATS_URL` to point at an external cluster. Under `MQ_DRIVER=pubsub` the supervisor starts no broker at all, because there is nothing local to run. The bundled broker keeps JetStream state under `/tmp/jetstream`, which is ephemeral: it gives redelivery when the worker crashes during processing, but does not survive a container restart. Durable delivery across restarts is a property of an external NATS cluster in the split deployment.
 
 No image bakes in `valkey-server`, including the combined one: every upstream Valkey build links `libsystemd`, which the distroless base does not carry. Every image therefore expects `VALKEY_ADDRESS` to point at a Valkey on another host, and because the supervisor shares `VALKEY_ENABLED` with the worker, enabling it without such an address fails at startup rather than silently metering nothing. The vendored binary under `third_party/valkey` exists for local runs, and upstream publishes it for Linux only — on macOS `brew install valkey` puts one on `PATH`, which is where the supervisor looks when Bazel has staged nothing.
 
 > [!WARNING]
 > The NATS bus has no application-level authentication. The combined image binds its bundled broker to loopback, so only that container can reach it. A split deployment must keep its NATS cluster behind an internal VPC or another trusted network boundary, must not expose it directly to the public internet, and should enable NATS authentication and TLS.
 
-Direct HTTP publishing makes one synchronous attempt because processing has Discord side effects. Durable retries and deduplication are deferred until Pub/Sub is introduced.
+Deduplication differs by broker and this is the one difference a deployment must account for. JetStream drops a republished message inside its duplicate window; Pub/Sub has no publisher-side deduplication and delivers it twice. Running more than one ingestor therefore requires a shared store (`STORE_DRIVER=postgres`), which supplies the per-message reply claim that makes exactly one worker answer. [Failover](docs/failover.md) covers this in full.
 
 ## Development
 
@@ -331,7 +335,10 @@ bazel test //...
 Additional documentation:
 
 - [Web search providers, sources, and recovery](docs/web-search.md)
-- [DynamoDB storage, history, and multi-cloud authentication](docs/dynamodb.md)
+- [Storage: PostgreSQL and SQLite schema, history, and retention](docs/store.md)
+- [Valkey usage metering, limits, and caching](docs/valkey.md)
+- [GCP Pub/Sub transport and broker differences](docs/pubsub.md)
+- [Active-active multi-site deployment](docs/failover.md)
 
 ## License
 

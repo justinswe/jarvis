@@ -6,6 +6,8 @@ It provides built-in search and uses Google Vertex AI to generate responses.
 
 # Bazel
 
+Always utilize bazel, and not language tools when in Bazel repositories.
+
 bazel build //package:target
 bazel build //package/...
 bazel test //package/...

@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	discordmcp "github.com/justinswe/discord-mcp"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
+	"github.com/justinswe/jarvis/worker/pkg/mcpx"
 	"github.com/justinswe/jarvis/worker/pkg/version"
 	"github.com/justinswe/std/errors"
 )
@@ -29,6 +31,13 @@ type History interface {
 	Messages(context.Context, string, string, int, string) ([]*discordgo.Message, error)
 }
 
+// Recorder persists one Discord message for history and search, expiring it after the
+// guild's retention. Only bot-involved conversation is recorded — the targeted messages
+// the processor answers and the replies it posts — never the surrounding channel traffic.
+type Recorder interface {
+	Record(ctx context.Context, message *discordgo.Message, retentionDays int) error
+}
+
 // Admission is the outcome of one guild rate-limit check.
 type Admission struct {
 	Allowed    bool
@@ -39,6 +48,20 @@ type Admission struct {
 // Limiter reports whether one guild may start a new generation.
 type Limiter interface {
 	Allow(ctx context.Context, guildID, tier string) (Admission, error)
+}
+
+// ReplyClaimer reserves the right to answer one Discord message.
+//
+// Delivery is at-least-once, and an active-active deployment keeps a Gateway connection at
+// every site permanently, so the same message reaches more than one worker as a matter of
+// course rather than only during a handover. Only the caller that wins the claim answers.
+//
+// The two calls divide one guarantee. ClaimReply is short-lived so a worker that dies
+// mid-generation lets its redelivery through; HoldReply extends the winner's claim once
+// the reply exists, past any copy that could still arrive.
+type ReplyClaimer interface {
+	ClaimReply(ctx context.Context, channelID, messageID string) (bool, error)
+	HoldReply(ctx context.Context, channelID, messageID string) error
 }
 
 // Client contains the Discord REST operations used while processing a message.
@@ -68,7 +91,17 @@ type Processor struct {
 	imageClient        *http.Client
 	threadQueue        threadRequestQueue
 	limiter            Limiter
-	guildTiers         []string
+	// recorder is nil when no store is configured; messages then simply are not kept.
+	recorder Recorder
+	// replies is nil when no shared store is configured. Nothing then deduplicates
+	// replies, which is why more than one Gateway connection requires a store driver.
+	replies ReplyClaimer
+	// mcp is nil when MCP is not wired; tools then stay native, exactly as before.
+	mcp               *mcpx.Connector
+	defaultMCPServers []config.MCPServer
+	// dm shares the processor's discordgo session (one REST rate-limit bucket) and is
+	// pinned per message to the requesting guild via its Guild view.
+	dm *discordmcp.Client
 }
 
 // ProcessorConfig contains the worker-owned dependencies for Discord request processing.
@@ -84,7 +117,14 @@ type ProcessorConfig struct {
 	Version            string
 	ImageHTTPClient    *http.Client
 	Limiter            Limiter
-	GuildTiers         []string
+	Recorder           Recorder
+	ReplyClaimer       ReplyClaimer
+	// MCP enables the MCP tool path: built-ins served in-process plus the guild's
+	// remote servers. Nil keeps native tools only.
+	MCP *mcpx.Connector
+	// DefaultMCPServers are deployment-wide remote servers offered to every guild; a
+	// guild's own attachment overrides a default of the same name.
+	DefaultMCPServers []config.MCPServer
 }
 
 // NewProcessor creates a request processor backed only by Discord REST APIs.
@@ -124,12 +164,20 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 	if imageClient == nil {
 		imageClient = newImageHTTPClient()
 	}
-	return &Processor{
+	processor := &Processor{
 		client: restClient{session: session}, botID: user.ID, generator: cfg.Generator, configs: cfg.Configs,
 		history: cfg.History, manager: cfg.ConfigManager, models: cfg.ModelRegistry, webSearchProviders: append([]string(nil), cfg.WebSearchProviders...),
 		rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
-		limiter: cfg.Limiter, guildTiers: append([]string(nil), cfg.GuildTiers...),
-	}, nil
+		limiter: cfg.Limiter, recorder: cfg.Recorder, replies: cfg.ReplyClaimer,
+		mcp: cfg.MCP, defaultMCPServers: append([]config.MCPServer(nil), cfg.DefaultMCPServers...),
+	}
+	if cfg.MCP != nil {
+		processor.dm, err = discordmcp.New(discordmcp.Options{Session: session})
+		if err != nil {
+			return nil, errors.Wrap(err, "create Discord MCP client")
+		}
+	}
+	return processor, nil
 }
 
 type restClient struct {

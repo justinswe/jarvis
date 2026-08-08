@@ -37,18 +37,6 @@ func (m *fakeConfigManager) Update(_ context.Context, _ string, actor string, pa
 	return updated, nil
 }
 
-func (m *fakeConfigManager) SetTier(_ context.Context, _ string, actor, tier string) (config.GuildConfig, error) {
-	if err := config.ValidateTier(tier); err != nil {
-		return config.GuildConfig{}, err
-	}
-	m.lastActor = actor
-	if m.value.Tier != tier {
-		m.value.Tier = tier
-		m.value.Version++
-	}
-	return m.value, nil
-}
-
 func (m *fakeConfigManager) AddAdmin(_ context.Context, _ string, actor, userID string) (config.GuildConfig, error) {
 	if m.addErr != nil {
 		return config.GuildConfig{}, m.addErr
@@ -58,6 +46,43 @@ func (m *fakeConfigManager) AddAdmin(_ context.Context, _ string, actor, userID 
 		m.value.AdminUserIDs = append(m.value.AdminUserIDs, userID)
 		m.value.Version++
 	}
+	return m.value, nil
+}
+
+func (m *fakeConfigManager) AddMCPServer(_ context.Context, _ string, actor string, server config.MCPServerInput) (config.GuildConfig, error) {
+	if m.addErr != nil {
+		return config.GuildConfig{}, m.addErr
+	}
+	m.lastActor = actor
+	attached := config.MCPServer{Name: server.Name, URL: server.URL, HasAuth: server.AuthToken != "", Enabled: true}
+	replaced := false
+	for index, existing := range m.value.MCPServers {
+		if existing.Name == server.Name {
+			if server.AuthToken == "" {
+				attached.HasAuth = existing.HasAuth
+			}
+			m.value.MCPServers[index] = attached
+			replaced = true
+		}
+	}
+	if !replaced {
+		m.value.MCPServers = append(m.value.MCPServers, attached)
+	}
+	m.value.Version++
+	return m.value, nil
+}
+
+func (m *fakeConfigManager) RemoveMCPServer(_ context.Context, _ string, actor, name string) (config.GuildConfig, error) {
+	if m.addErr != nil {
+		return config.GuildConfig{}, m.addErr
+	}
+	m.lastActor = actor
+	before := len(m.value.MCPServers)
+	m.value.MCPServers = slices.DeleteFunc(m.value.MCPServers, func(candidate config.MCPServer) bool { return candidate.Name == name })
+	if len(m.value.MCPServers) == before {
+		return config.GuildConfig{}, errors.Errorf("MCP server %q is not attached to this server", name)
+	}
+	m.value.Version++
 	return m.value, nil
 }
 
@@ -123,7 +148,7 @@ func TestConfigurationToolsAreExposedOnlyToAdministrators(t *testing.T) {
 	}{
 		{name: "ordinary user"},
 		{name: "delegated administrator", guildConfig: config.GuildConfig{Settings: testSettings(), AdminUserIDs: []string{"u"}}, want: true, wantTools: 2},
-		{name: "root user", rootUsers: map[string]struct{}{"u": {}}, want: true, wantTools: 5},
+		{name: "root user", rootUsers: map[string]struct{}{"u": {}}, want: true, wantTools: 7},
 		{name: "Discord administrator", permissions: discordgo.PermissionAdministrator, want: true, wantTools: 2},
 		{name: "Discord guild manager", permissions: discordgo.PermissionManageGuild, want: true, wantTools: 2},
 		{name: "Discord owner permission set", permissions: discordgo.PermissionAll, want: true, wantTools: 2},
@@ -384,7 +409,7 @@ func TestProcessKeepsConfiguredThinkingWhenAdminToolsAreExposed(t *testing.T) {
 	require.NoError(t, processor.Process(context.Background(), targetedMessage("message", "show the configuration")))
 	require.NotNil(t, generator.request)
 	assert.Equal(t, settings.ReasoningEffort, generator.request.Config.ReasoningEffort)
-	require.Len(t, generator.request.Tools, 8)
+	require.Len(t, generator.request.Tools, 10)
 	assert.Equal(t, getServerConfigurationToolName, generator.request.Tools[3].Name())
 	assert.Equal(t, setGuildPromptToolName, generator.request.Tools[5].Name())
 }
@@ -404,7 +429,7 @@ func TestRootVersionRequestPreservesRuntimeToolRouteAndRequestShape(t *testing.T
 	assert.Equal(t, genai.AccuracyPolicy{
 		RequiredFunctionNames: []string{runtimeContextToolName}, RuntimeContextRelevant: true,
 	}, generator.request.Config.AccuracyPolicy)
-	assert.Len(t, generator.request.Tools, 8)
+	assert.Len(t, generator.request.Tools, 10)
 }
 
 func schemaProperties(t *testing.T, declaration *llm.ToolDefinition) map[string]any {

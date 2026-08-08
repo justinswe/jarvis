@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/justinswe/jarvis/mq"
 	"github.com/justinswe/std/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -575,11 +576,38 @@ func TestSupervisorConfigValidation(t *testing.T) {
 		{"valkey start timeout", func(c *supervisorConfig) { c.valkeyStartTimeout = 0 }},
 		{"worker start timeout", func(c *supervisorConfig) { c.workerStartTimeout = 0 }},
 		{"shutdown timeout", func(c *supervisorConfig) { c.shutdownTimeout = 0 }},
+		{"mq driver", func(c *supervisorConfig) { c.mqDriver = "kafka" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := valid
 			test.mutate(&cfg)
 			assert.Error(t, cfg.validate())
+		})
+	}
+}
+
+// TestSupervisorNeedsNoBrokerSettingsUnderPubSub covers the deployment that has no local
+// broker at all: nothing about nats-server can be required when nothing starts it.
+func TestSupervisorNeedsNoBrokerSettingsUnderPubSub(t *testing.T) {
+	cfg := testConfig("8081")
+	cfg.mqDriver = string(mq.DriverPubSub)
+	cfg.natsPort, cfg.natsMonitorPort, cfg.natsBinary, cfg.natsConfig = "", "", "", ""
+
+	assert.False(t, cfg.supervisesNATS())
+	assert.NoError(t, cfg.validate())
+}
+
+// TestChildEnvOmitsNATSURLUnderPubSub is the failure this guards against: a NATS_URL the
+// supervisor invented would point both children at a broker it never started.
+func TestChildEnvOmitsNATSURLUnderPubSub(t *testing.T) {
+	cfg := testConfig("8081")
+	cfg.mqDriver = string(mq.DriverPubSub)
+
+	for name, env := range map[string][]string{"worker": cfg.workerEnv(), "ingestor": cfg.ingestorEnv()} {
+		t.Run(name, func(t *testing.T) {
+			for _, entry := range env {
+				assert.False(t, strings.HasPrefix(entry, "NATS_URL="), entry)
+			}
 		})
 	}
 }
@@ -600,6 +628,7 @@ func readyServer(t *testing.T) (*httptest.Server, string) {
 func testConfig(port string) supervisorConfig {
 	return supervisorConfig{
 		port:               "8080",
+		mqDriver:           string(mq.DriverNATS),
 		workerPort:         port,
 		natsPort:           "4222",
 		natsMonitorPort:    port,

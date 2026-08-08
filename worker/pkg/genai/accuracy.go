@@ -10,6 +10,9 @@ const (
 	runtimeContextFunctionName = "get_runtime_context"
 	// ChannelSearchFunctionName is the model-facing current-channel history tool.
 	ChannelSearchFunctionName = "search_current_channel"
+	// messageReactionFunctionName is the pre-bound reaction tool. It changes state, but
+	// only by adding an emoji to the message being answered, so it stays on offer.
+	messageReactionFunctionName = "add_message_reaction"
 
 	EvidenceKindRuntimeContext = "runtime_context"
 	EvidenceKindChannelHistory = "channel_history"
@@ -37,6 +40,11 @@ const (
 )
 
 var (
+	// configurationToolIntentPattern recognizes configuration requests so the
+	// classifier never forces web search onto them, and so state-changing tools are
+	// offered only when the user actually asked for one.
+	configurationToolIntentPattern = regexp.MustCompile(`(?i)\b(?:show|read|view|list|what(?:'s| is)|change|set|update|enable|disable|add|remove|clear)\b[^.!?\n]{0,100}\b(?:server configuration|server config|server settings?|guild configuration|guild config|guild settings?|jarvis settings?|guild prompt|server prompt|context window|max output tokens|message timeout|message retention|history runes?|web search|channel search|model profile|primary model|fallback model|server admin)\b|\b(?:server configuration|server config|server settings?|guild configuration|guild config|guild settings?|jarvis settings?|guild prompt|server prompt|context window|max output tokens|message timeout|message retention|history runes?|web search|channel search|model profile|primary model|fallback model|server admin)\b[^.!?\n]{0,100}\b(?:show|read|view|list|change|set|update|enable|disable|add|remove|clear)\b`)
+
 	quotedTextPattern = regexp.MustCompile("(?s)\"[^\"]*\"|“[^”]*”|`[^`]*`|(?:^|\\s)'[^'\\n]+'(?:$|\\s|[.,!?;:])")
 	spacePattern      = regexp.MustCompile(`\s+`)
 

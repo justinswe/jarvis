@@ -77,9 +77,19 @@ func (m *CachedManager) RemoveAdmin(ctx context.Context, guildID, actorID, userI
 	return updated, nil
 }
 
-// SetTier delegates tier, then invalidates the cached configuration for guildID.
-func (m *CachedManager) SetTier(ctx context.Context, guildID, actorID, tier string) (GuildConfig, error) {
-	updated, err := m.next.SetTier(ctx, guildID, actorID, tier)
+// AddMCPServer attaches the server, then invalidates the cached configuration for guildID.
+func (m *CachedManager) AddMCPServer(ctx context.Context, guildID, actorID string, server MCPServerInput) (GuildConfig, error) {
+	updated, err := m.next.AddMCPServer(ctx, guildID, actorID, server)
+	if err != nil {
+		return GuildConfig{}, err
+	}
+	m.invalidate(ctx, guildID)
+	return updated, nil
+}
+
+// RemoveMCPServer detaches the server, then invalidates the cached configuration for guildID.
+func (m *CachedManager) RemoveMCPServer(ctx context.Context, guildID, actorID, name string) (GuildConfig, error) {
+	updated, err := m.next.RemoveMCPServer(ctx, guildID, actorID, name)
 	if err != nil {
 		return GuildConfig{}, err
 	}
