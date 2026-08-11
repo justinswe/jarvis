@@ -23,6 +23,18 @@ const (
 )
 
 const (
+	// DefaultAttemptTimeout bounds one provider call. A stalled upstream that ignores
+	// its own service deadline must not be able to spend the entire request budget.
+	DefaultAttemptTimeout = 20 * time.Second
+	// DefaultFallbackReserve is withheld from the primary path so a fallback profile
+	// still has time to answer after the primary exhausts its share.
+	DefaultFallbackReserve = 15 * time.Second
+	// maxReserveFraction caps the reserve against the budget actually available, so a
+	// guild that shortens its message timeout does not starve its own primary.
+	maxReserveFraction = 3
+)
+
+const (
 	attemptInitial  = "initial"
 	attemptRecovery = "recovery"
 )
@@ -200,8 +212,14 @@ type Config struct {
 	WebSearchClients     []*websearch.Client
 	MutableConfiguration bool
 	ProbeTimeout         time.Duration
-	Registry             *llm.Registry
-	UsageRecorder        UsageRecorder
+	// AttemptTimeout bounds one provider call so a single stalled upstream cannot
+	// consume the whole request budget. Zero uses DefaultAttemptTimeout.
+	AttemptTimeout time.Duration
+	// FallbackReserve is the budget withheld from the primary path so the fallback
+	// profile still has time to answer. Zero uses DefaultFallbackReserve.
+	FallbackReserve time.Duration
+	Registry        *llm.Registry
+	UsageRecorder   UsageRecorder
 }
 
 type webSearcher interface {
@@ -509,6 +527,22 @@ func (h *Handler) maxToolRounds() int {
 		return h.cfg.MaxToolRounds
 	}
 	return DefaultMaxToolRounds
+}
+
+// attemptTimeout reports the per-provider-call bound, defaulting when unset.
+func (h *Handler) attemptTimeout() time.Duration {
+	if h.cfg.AttemptTimeout > 0 {
+		return h.cfg.AttemptTimeout
+	}
+	return DefaultAttemptTimeout
+}
+
+// fallbackReserve reports the budget withheld for the fallback, defaulting when unset.
+func (h *Handler) fallbackReserve() time.Duration {
+	if h.cfg.FallbackReserve > 0 {
+		return h.cfg.FallbackReserve
+	}
+	return DefaultFallbackReserve
 }
 
 // composeAgentSystemPrompt assembles the single-loop system prompt. The tools section

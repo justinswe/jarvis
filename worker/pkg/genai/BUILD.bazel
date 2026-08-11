@@ -24,6 +24,7 @@ go_test(
     name = "genai_test",
     srcs = [
         "accuracy_test.go",
+        "deadline_test.go",
         "google_ai_test.go",
         "handler_test.go",
         "orchestrator_test.go",

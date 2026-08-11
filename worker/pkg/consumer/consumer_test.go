@@ -9,6 +9,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	discordv1 "github.com/justinswe/jarvis/api/jarvis/discord/v1"
 	"github.com/justinswe/jarvis/mq"
+	"github.com/justinswe/jarvis/worker/pkg/llm"
 	"github.com/justinswe/std/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,6 +133,58 @@ func TestHandleNaksAfterProcessingError(t *testing.T) {
 	assert.Zero(t, ack)
 	assert.Equal(t, 1, nak, "a transient failure must be redelivered")
 	assert.Zero(t, term)
+}
+
+// TestHandleSettlesByModelErrorClass pins that redelivery is spent only where it can
+// help. Replaying a request costs another full message budget against an upstream that
+// may already be struggling, so a failure the model calls permanent is dropped rather
+// than retried until MaxDeliver runs out.
+func TestHandleSettlesByModelErrorClass(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		cause      error
+		wantNak    int
+		wantTerm   int
+		wantReason string
+	}{
+		{"transient timeout", &llm.Error{Kind: llm.ErrorTimeout, Provider: llm.ProviderGoogleAI}, 1, 0, "redelivered"},
+		{"upstream unavailable", &llm.Error{Kind: llm.ErrorService, Provider: llm.ProviderVertex}, 1, 0, "redelivered"},
+		{"unsupported input", &llm.Error{Kind: llm.ErrorInvalidRequest, Provider: llm.ProviderGoogleAI}, 0, 1, "dropped"},
+		{"non-model failure", errors.New("discord unreachable"), 1, 0, "redelivered"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			msg := encode(t, validRequest())
+			// Wrapped the way the processor actually returns it, so the classification
+			// has to survive the same error chain it sees in production.
+			processor := &fakeProcessor{err: errors.Wrap(test.cause, "generate response")}
+
+			handle(t.Context(), msg, processor)
+
+			ack, nak, term := msg.counts()
+			assert.Zero(t, ack)
+			assert.Equal(t, test.wantNak, nak, "must be %s", test.wantReason)
+			assert.Equal(t, test.wantTerm, term, "must be %s", test.wantReason)
+		})
+	}
+}
+
+// TestHandleRedeliversWhenDraining pins that shutdown never drops a request. Every
+// in-flight message fails at once when the worker stops, and those failures say nothing
+// about the request, so classifying them as permanent would lose work on every deploy.
+func TestHandleRedeliversWhenDraining(t *testing.T) {
+	msg := encode(t, validRequest())
+	// Not retryable on its own: only the cancelled context makes this redeliverable.
+	processor := &fakeProcessor{err: errors.Wrap(
+		&llm.Error{Kind: llm.ErrorInvalidRequest, Provider: llm.ProviderGoogleAI}, "generate response")}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	handle(ctx, msg, processor)
+
+	ack, nak, term := msg.counts()
+	assert.Zero(t, ack)
+	assert.Equal(t, 1, nak, "a draining worker must hand the message back")
+	assert.Zero(t, term, "shutdown must never drop a user's request")
 }
 
 func TestHandleTerminatesUnprocessableMessages(t *testing.T) {

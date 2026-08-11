@@ -20,6 +20,10 @@ const webSearchFunctionName = "search_web"
 // maxModelIDBytes bounds recorded model identifiers so usage cardinality stays predictable.
 const maxModelIDBytes = 128
 
+// outcomeFailed is the terminal outcome that returns the user nothing at all. Every
+// other failing outcome still answers from preserved work, so only this one is an alert.
+const outcomeFailed = "failed"
+
 type neutralOrchestrationTrace struct {
 	started                   time.Time
 	route                     string
@@ -151,6 +155,13 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 			zap.String("resolved_primary_profile", primary.Name),
 		)
 	}
+	// The primary path runs against a shortened deadline so the fallback profile still
+	// has time when the primary exhausts its own. Sharing one deadline meant a primary
+	// that timed out handed the fallback an already-expired context, and the fallback
+	// could never answer for the very error class that most often triggers it.
+	primaryCtx, releasePrimary := reservedContext(ctx, h.fallbackReserve(), fallback != nil)
+	defer releasePrimary()
+
 	active := primary
 	messages, err := neutralMessages(req.Messages)
 	if err != nil {
@@ -159,7 +170,7 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 	requiresImages := neutralMessagesHaveImages(messages)
 	if requiresImages && !active.Capabilities.Images {
 		err := &llm.Error{Kind: llm.ErrorInvalidRequest, Provider: active.Provider, ErrorType: "unsupported_input_image", Scope: "capability", Err: errors.New("selected model profile does not support image input")}
-		h.logNeutralTerminal(req, active, trace, searchState{}, GenerateResponse{}, "failed", err)
+		h.logNeutralTerminal(req, active, trace, searchState{}, GenerateResponse{}, outcomeFailed, err)
 		return GenerateResponse{}, err
 	}
 
@@ -184,10 +195,10 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 		// never leak into the search query, and before the loop so their results are
 		// already in the conversation.
 		system := agentSystem(config, definitions, *research, policy, active)
-		phase, conversation = h.runRequiredFunctionRounds(ctx, req, config, policy, active, system, conversation, definitions, toolMap, executed, completedMutations, &trace)
+		phase, conversation = h.runRequiredFunctionRounds(primaryCtx, req, config, policy, active, system, conversation, definitions, toolMap, executed, completedMutations, &trace)
 	}
 	if policy.WebSearchRequired && searchAvailable {
-		h.runWebSearch(ctx, req, intentRequest, research)
+		h.runWebSearch(primaryCtx, req, intentRequest, research)
 	}
 
 	offered := offeredDefinitions(definitions, policy, intentRequest)
@@ -196,11 +207,11 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 	var generationErr error
 	var loopLatency time.Duration
 	if host, ok := h.registry.Host(active.Name); ok {
-		response, conversation, generationErr, loopLatency = h.runAgentLoop(ctx, req, config, active, host, system, conversation, offered, toolMap, executed, completedMutations, &phase, &trace)
+		response, conversation, generationErr, loopLatency = h.runAgentLoop(primaryCtx, req, config, active, host, system, conversation, offered, toolMap, executed, completedMutations, &phase, &trace)
 		switch {
 		case generationErr == nil:
 			var validationLatency time.Duration
-			response, generationErr, validationLatency = h.validateFinalResponse(ctx, req, config, active, system, conversation, response, definitions, offered, phase.evidence, policy, research.attempted, research.sourceAvailable(), &trace)
+			response, generationErr, validationLatency = h.validateFinalResponse(primaryCtx, req, config, active, system, conversation, response, definitions, offered, phase.evidence, policy, research.attempted, research.sourceAvailable(), &trace)
 			loopLatency += validationLatency
 		case shouldRetrySameHost(generationErr, active, fallback, requiresImages):
 			// A retryable round failure (a transient 503 or 429) used to fall through to
@@ -211,7 +222,7 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 			retrySystem := agentSystem(config, nil, *research, policy, active)
 			var retryLatency time.Duration
 			response, generationErr, retryLatency = h.generateValidatedPresentation(
-				ctx, req, config, active, retrySystem, retryMessages, definitions, phase.evidence, policy, research.attempted, research.sourceAvailable(), &trace,
+				primaryCtx, req, config, active, retrySystem, retryMessages, definitions, phase.evidence, policy, research.attempted, research.sourceAvailable(), &trace,
 			)
 			loopLatency += retryLatency
 		}
@@ -285,7 +296,7 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 			h.logNeutralTerminal(req, active, trace, *research, result, "qualified-search-fallback", nil)
 			return result, nil
 		}
-		h.logNeutralTerminal(req, active, trace, *research, GenerateResponse{}, "failed", generationErr)
+		h.logNeutralTerminal(req, active, trace, *research, GenerateResponse{}, outcomeFailed, generationErr)
 		return GenerateResponse{}, generationErr
 	}
 	text := authoritativeIdentityPresentation(safeMutationPresentation(response.Text(), phase.records), req, policy, active, response.Metadata, phase.evidence)
@@ -454,12 +465,42 @@ func (h *Handler) generateOrchestrationRound(
 ) (llm.Response, error, time.Duration) {
 	started := time.Now()
 	trace.modelAttempts++
-	response, err := host.Generate(ctx, llm.Request{
+	response, err := h.hostGenerate(ctx, host, llm.Request{
 		Profile: profile, System: system, Messages: messages, MaxOutputTokens: config.MaxOutputTokens,
 		ReasoningEffort: config.ReasoningEffort, Tools: definitions, ToolChoice: choice,
 	})
 	trace.recordRound(profile, response)
 	return response, err, time.Since(started)
+}
+
+// hostGenerate bounds one provider call. Every model round routes through here so no
+// single stalled upstream can spend the whole request budget and leave the fallback
+// profile — or the caller's own error handling — with an already-expired context.
+// WithTimeout never extends a deadline, so this composes with the fallback reserve.
+func (h *Handler) hostGenerate(ctx context.Context, host llm.Host, request llm.Request) (llm.Response, error) {
+	callCtx, cancel := context.WithTimeout(ctx, h.attemptTimeout())
+	defer cancel()
+	return host.Generate(callCtx, request)
+}
+
+// reservedContext shortens the primary path's deadline so the fallback profile still
+// has time to answer. It returns ctx unchanged when there is nothing to reserve for,
+// no deadline to divide, or too little budget to divide safely.
+func reservedContext(ctx context.Context, reserve time.Duration, fallbackAvailable bool) (context.Context, context.CancelFunc) {
+	if !fallbackAvailable || reserve <= 0 {
+		return ctx, func() {}
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	if budget := time.Until(deadline); reserve > budget/maxReserveFraction {
+		reserve = budget / maxReserveFraction
+	}
+	if reserve <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
 func (h *Handler) generatePresentation(
@@ -488,7 +529,7 @@ func (h *Handler) generatePresentation(
 	}
 	started := time.Now()
 	trace.modelAttempts++
-	response, err := host.Generate(ctx, request)
+	response, err := h.hostGenerate(ctx, host, request)
 	trace.recordRound(profile, response)
 	return response, err, time.Since(started)
 }
@@ -1679,7 +1720,14 @@ func (h *Handler) logNeutralTerminal(
 	}
 	if err != nil {
 		fields = append(fields, modelErrorFields(err)...)
-		app.L().Warn("Model orchestration completed", fields...)
+		// Only a request that returns nothing is an incident. The "-preserved" outcomes
+		// still answer the user from a draft, a tool report, or a qualified search
+		// result, so they are recoveries and must not page anyone.
+		if outcome == outcomeFailed {
+			app.L().Error("Model orchestration completed", fields...)
+		} else {
+			app.L().Warn("Model orchestration completed", fields...)
+		}
 	} else {
 		app.L().Info("Model orchestration completed", fields...)
 	}
