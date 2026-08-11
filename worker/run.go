@@ -97,6 +97,8 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		DefaultPrompt:        cfg.defaultPrompt,
 		MaxOutputTokens:      cfg.maxOutputTokens,
 		MaxToolRounds:        cfg.agentMaxToolRounds,
+		AttemptTimeout:       cfg.modelAttemptTimeout,
+		FallbackReserve:      cfg.modelFallbackReserve,
 		OpenRouterAPIKey:     cfg.openRouterAPIKey,
 		GoogleAIAPIKey:       cfg.googleAIAPIKey,
 		NVIDIAAPIKey:         cfg.nvidiaAPIKey,
@@ -240,6 +242,17 @@ func (cfg workerConfig) validate() error {
 	// message would be redelivered once while the first delivery was still working.
 	if cfg.mqMaxProcessingTime < cfg.mqAckWait {
 		return errors.New("max processing time must be at least the acknowledgement wait")
+	}
+	if cfg.modelAttemptTimeout <= 0 {
+		return errors.New("model attempt timeout must be positive")
+	}
+	if cfg.modelFallbackReserve <= 0 {
+		return errors.New("model fallback reserve must be positive")
+	}
+	// One capped attempt plus the fallback's reserve has to fit, or the primary is
+	// denied even a single complete provider call.
+	if cfg.modelAttemptTimeout+cfg.modelFallbackReserve > cfg.messageTimeout {
+		return errors.New("model attempt timeout plus fallback reserve must fit within the message timeout")
 	}
 	for _, userID := range cfg.rootUserIDs {
 		if !validRootUserID(userID) {

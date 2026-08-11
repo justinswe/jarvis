@@ -17,6 +17,7 @@ go_library(
     deps = [
         "//api/jarvis/discord/v1:discord",
         "//mq",
+        "//worker/pkg/llm",
         "@com_github_bwmarrin_discordgo//:discordgo",
         "@com_github_justinswe_std//app",
         "@com_github_justinswe_std//errors",
@@ -32,6 +33,7 @@ go_test(
     deps = [
         "//api/jarvis/discord/v1:discord",
         "//mq",
+        "//worker/pkg/llm",
         "@com_github_bwmarrin_discordgo//:discordgo",
         "@com_github_justinswe_std//errors",
         "@com_github_stretchr_testify//assert",

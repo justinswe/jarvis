@@ -54,6 +54,7 @@ type workerConfig struct {
 	agentMaxToolRounds                                              int
 	messageRetentionDays                                            int
 	messageTimeout                                                  time.Duration
+	modelAttemptTimeout, modelFallbackReserve                       time.Duration
 }
 
 // newWorkerConfig is the worker configuration before flags and environment.
@@ -71,6 +72,8 @@ func newWorkerConfig() workerConfig {
 		reasoningEffort:      string(llm.ReasoningLow),
 		messageRetentionDays: config.DefaultMessageRetentionDays,
 		messageTimeout:       time.Minute,
+		modelAttemptTimeout:  genai.DefaultAttemptTimeout,
+		modelFallbackReserve: genai.DefaultFallbackReserve,
 		mcpCallTimeout:       15 * time.Second,
 		storeDriver:          string(store.DriverNone),
 		storeSweepInterval:   time.Hour,
@@ -149,6 +152,8 @@ func newRootCommand() *cobra.Command {
 	flags.StringVar(&cfg.reasoningEffort, "reasoning-effort", cfg.reasoningEffort, "Default model thinking level: low, medium, or high")
 	flags.StringVar(&cfg.discordBotToken, "discord-bot-token", cfg.discordBotToken, "Discord bot token")
 	flags.DurationVar(&cfg.messageTimeout, "message-timeout", cfg.messageTimeout, "Overall message processing timeout")
+	flags.DurationVar(&cfg.modelAttemptTimeout, "model-attempt-timeout", cfg.modelAttemptTimeout, "Deadline for one provider call, so a stalled upstream cannot spend the whole message timeout")
+	flags.DurationVar(&cfg.modelFallbackReserve, "model-fallback-reserve", cfg.modelFallbackReserve, "Share of the message timeout withheld from the primary model so the fallback profile still has time to answer")
 	flags.IntVar(&cfg.messageRetentionDays, "message-retention-days", cfg.messageRetentionDays, "Default message retention in days")
 	flags.StringVar(&cfg.storeDriver, "store-driver", cfg.storeDriver, "Storage backend for history, configuration, and reply claims: none, postgres, or sqlite")
 	flags.StringVar(&cfg.postgresDSN, "postgres-dsn", cfg.postgresDSN, "PostgreSQL connection string (required when the store driver is postgres)")
