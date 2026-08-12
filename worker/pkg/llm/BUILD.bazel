@@ -5,6 +5,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "llm",
     srcs = [
+        "embed.go",
         "errors.go",
         "openai_compatible.go",
         "profiles.go",

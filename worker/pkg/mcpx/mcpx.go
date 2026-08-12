@@ -62,9 +62,6 @@ func (c *Connector) timeout() time.Duration {
 // sessions. A failed or misbehaving server is logged and skipped — it never fails the
 // message. Sessions live for one message only, so no cross-request or cross-guild
 // state exists to leak.
-//
-// ponytail: per-message connect+list; add a per-guild pooled session with idle
-// eviction when MCP latency measurably matters.
 func (c *Connector) GuildTools(ctx context.Context, guildID string, servers []config.MCPServer) ([]genai.FunctionTool, func()) {
 	var tools []genai.FunctionTool
 	var sessions []*mcp.ClientSession

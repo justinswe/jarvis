@@ -40,29 +40,29 @@ type configurationTool struct {
 }
 
 type configurationResponse struct {
-	Source                string                 `json:"source"`
-	Version               int64                  `json:"version"`
-	AccessClass           string                 `json:"access_class"`
-	Prompt                string                 `json:"prompt,omitempty"`
-	GuildPrompt           string                 `json:"guild_prompt"`
-	ThreadMessages        int                    `json:"thread_context_window,omitempty"`
-	ParentMessages        int                    `json:"parent_context_window,omitempty"`
-	ChannelMessages       int                    `json:"channel_context_window,omitempty"`
-	HistoryRunes          int                    `json:"history_runes,omitempty"`
-	MaxOutputTokens       int                    `json:"max_output_tokens,omitempty"`
-	MessageTimeoutSeconds int64                  `json:"message_timeout_seconds,omitempty"`
-	MessageRetentionDays  int                    `json:"message_retention_days,omitempty"`
-	WebSearchEnabled      bool                   `json:"web_search_enabled,omitempty"`
-	ChannelSearchEnabled  bool                   `json:"channel_search_enabled,omitempty"`
-	ReasoningEffort       string                 `json:"reasoning_effort,omitempty"`
-	AdminUserIDs          []string               `json:"admin_user_ids,omitempty"`
-	Tier                  string                 `json:"tier,omitempty"`
+	Source                string                   `json:"source"`
+	Version               int64                    `json:"version"`
+	AccessClass           string                   `json:"access_class"`
+	Prompt                string                   `json:"prompt,omitempty"`
+	GuildPrompt           string                   `json:"guild_prompt"`
+	ThreadMessages        int                      `json:"thread_context_window,omitempty"`
+	ParentMessages        int                      `json:"parent_context_window,omitempty"`
+	ChannelMessages       int                      `json:"channel_context_window,omitempty"`
+	HistoryRunes          int                      `json:"history_runes,omitempty"`
+	MaxOutputTokens       int                      `json:"max_output_tokens,omitempty"`
+	MessageTimeoutSeconds int64                    `json:"message_timeout_seconds,omitempty"`
+	MessageRetentionDays  int                      `json:"message_retention_days,omitempty"`
+	WebSearchEnabled      bool                     `json:"web_search_enabled,omitempty"`
+	ChannelSearchEnabled  bool                     `json:"channel_search_enabled,omitempty"`
+	ReasoningEffort       string                   `json:"reasoning_effort,omitempty"`
+	AdminUserIDs          []string                 `json:"admin_user_ids,omitempty"`
+	Tier                  string                   `json:"tier,omitempty"`
 	MCPServers            []configurationMCPServer `json:"mcp_servers,omitempty"`
-	ChangedFields         []string               `json:"changed_fields,omitempty"`
-	PrimaryModelProfile   string                 `json:"primary_model_profile,omitempty"`
-	FallbackModelProfile  string                 `json:"fallback_model_profile"`
-	WebSearchProviders    []string               `json:"web_search_providers"`
-	AvailableProfiles     []configurationProfile `json:"available_model_profiles,omitempty"`
+	ChangedFields         []string                 `json:"changed_fields,omitempty"`
+	PrimaryModelProfile   string                   `json:"primary_model_profile,omitempty"`
+	FallbackModelProfile  string                   `json:"fallback_model_profile"`
+	WebSearchProviders    []string                 `json:"web_search_providers"`
+	AvailableProfiles     []configurationProfile   `json:"available_model_profiles,omitempty"`
 }
 
 // configurationMCPServer is the root-visible view of one attached MCP server. The
@@ -87,30 +87,38 @@ type configurationProfile struct {
 	MaxOutputTokens   int    `json:"max_output_tokens,omitempty"`
 }
 
+// accessClass resolves the administrative access ladder for the requesting user:
+// root, delegated_admin, or discord_admin. Empty means unauthorized.
+func (p *Processor) accessClass(ctx context.Context, m *discordgo.MessageCreate, guildConfig config.GuildConfig) (access string, root bool) {
+	if m.GuildID == "" || m.Author == nil {
+		return "", false
+	}
+	if _, root := p.rootUsers[m.Author.ID]; root {
+		return "root", true
+	}
+	if guildConfig.IsAdmin(m.Author.ID) {
+		return "delegated_admin", false
+	}
+	permissions, err := p.client.UserChannelPermissions(ctx, m.Author.ID, m.ChannelID)
+	if err != nil {
+		app.L().Debug("Failed to resolve Discord administrator permissions",
+			zap.String("guild_id", m.GuildID), zap.String("user_id", m.Author.ID),
+			zap.String("channel_id", m.ChannelID), zap.Error(err))
+		return "", false
+	}
+	if permissions&discordgo.PermissionAdministrator != 0 || permissions&discordgo.PermissionManageGuild != 0 {
+		return "discord_admin", false
+	}
+	return "", false
+}
+
 func (p *Processor) configurationTools(ctx context.Context, m *discordgo.MessageCreate, guildConfig config.GuildConfig) ([]genai.FunctionTool, bool) {
-	if p.manager == nil || m.GuildID == "" || m.Author == nil {
-		return nil, false
-	}
-	_, root := p.rootUsers[m.Author.ID]
-	access := ""
-	if root {
-		access = "root"
-	} else if guildConfig.IsAdmin(m.Author.ID) {
-		access = "delegated_admin"
-	}
-	authorized := access != ""
-	if !authorized {
-		permissions, err := p.client.UserChannelPermissions(ctx, m.Author.ID, m.ChannelID)
-		if err != nil {
-			app.L().Debug("Failed to resolve Discord administrator permissions",
-				zap.String("guild_id", m.GuildID), zap.String("user_id", m.Author.ID),
-				zap.String("channel_id", m.ChannelID), zap.Error(err))
-		} else if permissions&discordgo.PermissionAdministrator != 0 || permissions&discordgo.PermissionManageGuild != 0 {
-			authorized = true
-			access = "discord_admin"
-		}
-	}
-	if !authorized {
+	access, root := p.accessClass(ctx, m, guildConfig)
+	return p.configurationToolsFor(m, access, root)
+}
+
+func (p *Processor) configurationToolsFor(m *discordgo.MessageCreate, access string, root bool) ([]genai.FunctionTool, bool) {
+	if p.manager == nil || access == "" {
 		return nil, false
 	}
 	base := configurationTool{

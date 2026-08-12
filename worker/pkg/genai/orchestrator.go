@@ -138,6 +138,12 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 	if err != nil {
 		return GenerateResponse{}, err
 	}
+	if config.Roleplay != nil {
+		trace.route = "roleplay"
+		primary, fallback, stale := h.registry.Resolve(config.PrimaryModelProfile, config.FallbackModelProfile)
+		trace.stale = stale
+		return h.generateRoleplay(ctx, req, config, primary, fallback, &trace)
+	}
 	intentRequest := resolvedIntentRequest(req)
 	policy := h.policyForResolvedRequest(req, config, intentRequest)
 	trace.searchRequired = policy.WebSearchRequired

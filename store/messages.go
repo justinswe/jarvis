@@ -162,6 +162,44 @@ func scanMessage(rows interface{ Scan(...any) error }, channelID string) (*disco
 	return message, nil
 }
 
+// MessagesAfter returns stored messages newer than afterID, oldest first — the
+// summarization pipeline's read of the conversation behind a memory watermark.
+func (s *Store) MessagesAfter(ctx context.Context, guildID, channelID string, afterID int64, limit int) ([]*discordgo.Message, error) {
+	if channelID == "" {
+		return nil, errors.New("channel ID is required")
+	}
+	if limit <= 0 {
+		return nil, errors.New("message limit must be positive")
+	}
+	cid, err := snowflake(channelID)
+	if err != nil {
+		return nil, err
+	}
+	gid, err := optionalSnowflake(guildID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT message_id, guild_id, author_id, author_username, author_global_name,
+			author_bot, message_kind, content, mentioned_user_ids,
+			reference_channel_id, reference_message_id, created_at
+		FROM messages WHERE channel_id = ? AND message_id > ? AND guild_id = ? AND expires_at > @now
+		ORDER BY message_id ASC LIMIT ?`), cid, afterID, gid, limit)
+	if err != nil {
+		return nil, errors.Wrap(err, "query Discord message range")
+	}
+	defer rows.Close()
+	var messages []*discordgo.Message
+	for rows.Next() {
+		message, err := scanMessage(rows, channelID)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, errors.Wrap(rows.Err(), "read Discord message range")
+}
+
 // reference flattens an optional reply reference to the schema's zero-means-absent pair.
 func reference(ref *discordgo.MessageReference) (channelID, messageID int64, err error) {
 	if ref == nil {

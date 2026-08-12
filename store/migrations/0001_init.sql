@@ -98,3 +98,30 @@ CREATE TABLE reply_claims (
   expires_at BIGINT NOT NULL,
   PRIMARY KEY (channel_id, message_id)
 );
+
+-- Roleplay characters and their channel bindings. card_json is the imported SillyTavern
+-- card verbatim; avatar_png is the base64 source PNG when the card arrived embedded in
+-- one.
+
+CREATE TABLE characters (
+  id         BIGINT PRIMARY KEY,
+  guild_id   BIGINT NOT NULL,
+  name       TEXT NOT NULL,
+  card_json  TEXT NOT NULL,
+  avatar_png TEXT NOT NULL DEFAULT '',
+  created_by BIGINT NOT NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+
+-- Case-insensitive uniqueness so "Elyra" and "elyra" are one character; both dialects
+-- support the expression index.
+CREATE UNIQUE INDEX characters_guild_name ON characters(guild_id, lower(name));
+
+CREATE TABLE channel_characters (
+  channel_id   BIGINT PRIMARY KEY,
+  guild_id     BIGINT NOT NULL,
+  character_id BIGINT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+  activated_by BIGINT NOT NULL,
+  created_at   BIGINT NOT NULL
+);

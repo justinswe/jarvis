@@ -55,6 +55,10 @@ type workerConfig struct {
 	messageRetentionDays                                            int
 	messageTimeout                                                  time.Duration
 	modelAttemptTimeout, modelFallbackReserve                       time.Duration
+	embeddingModelProfile                                           string
+	memoryEnabled                                                   bool
+	memorySummarizeTurns, memoryContextRunes, memoryMaxRecords      int
+	memoryIdleFlush                                                 time.Duration
 }
 
 // newWorkerConfig is the worker configuration before flags and environment.
@@ -77,6 +81,11 @@ func newWorkerConfig() workerConfig {
 		mcpCallTimeout:       15 * time.Second,
 		storeDriver:          string(store.DriverNone),
 		storeSweepInterval:   time.Hour,
+		memoryEnabled:        true,
+		memorySummarizeTurns: 20,
+		memoryContextRunes:   3000,
+		memoryMaxRecords:     500,
+		memoryIdleFlush:      30 * time.Minute,
 
 		mqDriver:            string(mq.DriverNATS),
 		natsURL:             nats.DefaultURL,
@@ -180,6 +189,12 @@ func newRootCommand() *cobra.Command {
 	flags.DurationVar(&cfg.valkeyConfigCacheTTL, "valkey-config-cache-ttl", cfg.valkeyConfigCacheTTL, "Guild configuration cache time-to-live; bounds staleness if a write invalidation is missed")
 	flags.StringSliceVar(&cfg.guildTierLimits, "guild-tier", cfg.guildTierLimits, "Subscription tier limits: name=requests-per-second:burst:tokens-per-hour (comma-capable and repeatable)")
 	flags.StringVar(&cfg.defaultGuildTier, "default-guild-tier", cfg.defaultGuildTier, "Tier applied to servers with no assigned or a no longer defined tier")
+	flags.StringVar(&cfg.embeddingModelProfile, "embedding-model-profile", cfg.embeddingModelProfile, "Memory embedding model as name=provider:model-id (vertex or google-ai); empty degrades memory retrieval to full-text")
+	flags.BoolVar(&cfg.memoryEnabled, "memory-enabled", cfg.memoryEnabled, "Enable persistent character memory; requires the postgres store driver")
+	flags.IntVar(&cfg.memorySummarizeTurns, "memory-summarize-turns", cfg.memorySummarizeTurns, "Turns accumulated in a channel before an async memory summarization pass runs")
+	flags.DurationVar(&cfg.memoryIdleFlush, "memory-idle-flush", cfg.memoryIdleFlush, "How long unsummarized conversation may wait before a quiet channel is flushed to memory")
+	flags.IntVar(&cfg.memoryContextRunes, "memory-context-runes", cfg.memoryContextRunes, "Rune budget for the injected memory block, separate from the history budget")
+	flags.IntVar(&cfg.memoryMaxRecords, "memory-max-records", cfg.memoryMaxRecords, "Unpinned memory records per character before the oldest are consolidated into a digest")
 	return command
 }
 

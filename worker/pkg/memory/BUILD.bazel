@@ -1,0 +1,63 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# The live evaluation belongs to the hand-written memory_eval target below: it needs a
+# real PostgreSQL and model credentials. One directive per file — gazelle reads only the
+# first path on a line.
+# gazelle:exclude memory_eval_test.go
+# gazelle:exclude manual_test_main_test.go
+
+go_library(
+    name = "memory",
+    srcs = [
+        "extract.go",
+        "memory.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/memory",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//store",
+        "//worker/pkg/genai",
+        "//worker/pkg/llm",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_justinswe_std//app",
+        "@com_github_justinswe_std//errors",
+        "@org_uber_go_zap//:zap",
+    ],
+)
+
+go_test(
+    name = "memory_test",
+    srcs = ["memory_test.go"],
+    embed = [":memory"],
+    deps = [
+        "//store",
+        "//worker/pkg/llm",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# The FR-1 acceptance evaluation: 500 scripted turns against real PostgreSQL, a real
+# extraction model, and real embeddings. Hand-written because its sources are excluded
+# above; `keep` preserves this rule only.
+# keep
+go_test(
+    name = "memory_eval",
+    size = "enormous",
+    srcs = [
+        "manual_test_main_test.go",
+        "memory_eval_test.go",
+    ],
+    embed = [":memory"],
+    tags = ["manual"],
+    deps = [
+        "//store",
+        "//worker/pkg/config",
+        "//worker/pkg/genai",
+        "//worker/pkg/llm",
+        "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_justinswe_std//app",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

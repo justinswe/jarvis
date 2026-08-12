@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "character",
+    srcs = [
+        "card.go",
+        "fetch.go",
+        "png.go",
+        "screen.go",
+    ],
+    importpath = "github.com/justinswe/jarvis/worker/pkg/character",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//worker/pkg/llm",
+        "@com_github_justinswe_std//errors",
+    ],
+)
+
+go_test(
+    name = "character_test",
+    srcs = [
+        "card_test.go",
+        "png_test.go",
+    ],
+    embed = [":character"],
+    deps = [
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
