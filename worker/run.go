@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/justinswe/jarvis/mq"
@@ -18,6 +19,7 @@ import (
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
 	"github.com/justinswe/jarvis/worker/pkg/mcpx"
+	"github.com/justinswe/jarvis/worker/pkg/memory"
 	"github.com/justinswe/jarvis/worker/pkg/server"
 	"github.com/justinswe/jarvis/worker/pkg/usage"
 	"github.com/justinswe/jarvis/worker/pkg/valkeyconn"
@@ -53,6 +55,8 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 	var recorder discord.Recorder
 	var claimer discord.ReplyClaimer
 	var mcpAuth mcpx.AuthSource
+	var characters discord.CharacterStore
+	var memoryStore *store.Store
 	if cfg.storeEnabled() {
 		persistent, storeErr := store.Open(ctx, cfg.storeConfig())
 		if storeErr != nil {
@@ -65,6 +69,8 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		persistent.SetReplyClaimTTL(cfg.mqAckWait)
 		claimer = persistent
 		mcpAuth = persistent
+		characters = persistent
+		memoryStore = persistent
 		app.L().Info("Message store initialized", zap.String("driver", cfg.storeDriver))
 	}
 	defaultMCPServers, err := cfg.defaultMCPServers()
@@ -92,27 +98,45 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		}
 	}
 	generator, err := genai.New(ctx, genai.Config{
-		ProjectID:            cfg.projectID,
-		Location:             cfg.location,
-		DefaultPrompt:        cfg.defaultPrompt,
-		MaxOutputTokens:      cfg.maxOutputTokens,
-		MaxToolRounds:        cfg.agentMaxToolRounds,
-		AttemptTimeout:       cfg.modelAttemptTimeout,
-		FallbackReserve:      cfg.modelFallbackReserve,
-		OpenRouterAPIKey:     cfg.openRouterAPIKey,
-		GoogleAIAPIKey:       cfg.googleAIAPIKey,
-		NVIDIAAPIKey:         cfg.nvidiaAPIKey,
-		ModelProfiles:        cfg.modelProfiles,
-		PrimaryModelProfile:  cfg.primaryModelProfile,
-		FallbackModelProfile: cfg.fallbackModelProfile,
-		WebSearchClients:     webSearchClients,
-		MutableConfiguration: cfg.storeEnabled(),
-		UsageRecorder:        usageRecorder,
+		ProjectID:             cfg.projectID,
+		Location:              cfg.location,
+		DefaultPrompt:         cfg.defaultPrompt,
+		MaxOutputTokens:       cfg.maxOutputTokens,
+		MaxToolRounds:         cfg.agentMaxToolRounds,
+		AttemptTimeout:        cfg.modelAttemptTimeout,
+		FallbackReserve:       cfg.modelFallbackReserve,
+		OpenRouterAPIKey:      cfg.openRouterAPIKey,
+		GoogleAIAPIKey:        cfg.googleAIAPIKey,
+		NVIDIAAPIKey:          cfg.nvidiaAPIKey,
+		ModelProfiles:         cfg.modelProfiles,
+		PrimaryModelProfile:   cfg.primaryModelProfile,
+		FallbackModelProfile:  cfg.fallbackModelProfile,
+		WebSearchClients:      webSearchClients,
+		MutableConfiguration:  cfg.storeEnabled(),
+		UsageRecorder:         usageRecorder,
+		EmbeddingModelProfile: cfg.embeddingModelProfile,
 	})
 	if err != nil {
 		return errors.Wrap(err, "initialize model orchestration")
 	}
 	defer generator.Close()
+	var memoryEngine discord.MemoryEngine
+	if cfg.memoryEnabled && memoryStore != nil && memoryStore.MemoryAvailable() {
+		memoryConfig := memory.Config{
+			Store: memoryStore, Registry: generator.Registry(), UsageRecorder: usageRecorder,
+			SummarizeTurns: cfg.memorySummarizeTurns, IdleFlush: cfg.memoryIdleFlush,
+			MaxRecords: cfg.memoryMaxRecords,
+		}
+		if embedder := generator.Embedder(); embedder != nil {
+			memoryConfig.Embedder = embedder
+		}
+		pipeline := memory.New(memoryConfig)
+		pipeline.Start(ctx)
+		memoryEngine = pipeline
+		app.L().Info("Persistent memory pipeline initialized",
+			zap.Int("summarize_turns", cfg.memorySummarizeTurns),
+			zap.Bool("embeddings", generator.Embedder() != nil))
+	}
 	webSearchProviders := make([]string, 0, len(generator.WebSearchProviders()))
 	for _, provider := range generator.WebSearchProviders() {
 		webSearchProviders = append(webSearchProviders, string(provider))
@@ -130,6 +154,9 @@ func runWorker(parent context.Context, cfg workerConfig) error {
 		Limiter:            limiter,
 		Recorder:           recorder,
 		ReplyClaimer:       claimer,
+		Characters:         characters,
+		Memory:             memoryEngine,
+		MemoryContextRunes: cfg.memoryContextRunes,
 		MCP:                mcpx.New(cfg.mcpConfig(), mcpAuth),
 		DefaultMCPServers:  defaultMCPServers,
 	})
@@ -257,6 +284,19 @@ func (cfg workerConfig) validate() error {
 	for _, userID := range cfg.rootUserIDs {
 		if !validRootUserID(userID) {
 			return errors.Errorf("root user ID %q must be a 17-20 digit Discord user ID", userID)
+		}
+	}
+	if cfg.memoryEnabled {
+		if cfg.memorySummarizeTurns < 1 {
+			return errors.New("memory summarize turns must be at least 1")
+		}
+		if cfg.memoryContextRunes < 1 || cfg.memoryMaxRecords < 1 {
+			return errors.New("memory context runes and max records must be positive")
+		}
+		// Summarization reads recorded messages; a flush slower than retention would
+		// let the raw conversation expire before it ever became memory.
+		if cfg.memoryIdleFlush <= 0 || cfg.memoryIdleFlush >= time.Duration(cfg.messageRetentionDays)*24*time.Hour {
+			return errors.New("memory idle flush must be positive and shorter than message retention")
 		}
 	}
 	if !cfg.valkeyEnabled {

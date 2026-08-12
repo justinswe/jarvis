@@ -203,6 +203,14 @@ Recent conversation context is loaded from Discord by default. When a store driv
 
 Within one worker instance, overlapping requests in the same Discord thread use latest-message-wins processing. A newer request cancels the active request, replaces any older pending request, and waits for cancellation to finish before generating one response from the latest available thread history. Existing context-window and rune-budget settings still apply. Separate threads remain concurrent; deployments with multiple worker replicas need external request affinity or distributed coordination to provide the same guarantee across replicas.
 
+## Roleplay characters and persistent memory
+
+Jarvis doubles as a roleplay companion. Administrators import SillyTavern/TavernAI character cards (v1 and v2, PNG or JSON, by URL or attachment) through the `import_character` tool; every import passes a fixed, non-configurable content screen before it is stored. `activate_character` binds a character to the current channel or thread: the character then answers **every** message there, in character, in-channel — no citation footers, no tools, no assistant register. Messages starting with `ooc`, `(ooc)`, or `//` escape to assistant mode with the full tool surface, which is how characters and memory are managed inside a roleplay channel. Card text is authored content bracketed by fixed platform rules it cannot override.
+
+With `STORE_DRIVER=postgres` (pgvector required) and `--memory-enabled` (default), conversation is summarized asynchronously into durable memory records — rolling summaries plus entity, relationship, and plot state — scoped per character per server, embedded via `--embedding-model-profile`, and recalled into context on every turn. Without an embedding profile, retrieval degrades to pinned + full-text. The memory book is a tool surface: `list_memories`, `pin_memory` (pinned records are never evicted), `edit_memory`, `delete_memory`, `add_memory`. Background summarization is metered against guild tiers like any other generation.
+
+One safety behavior operates outside the persona and is not configurable by guilds, cards, or prompts: sexualized-minor content is refused at card import and at generation.
+
 ## Configuration
 
 Explicit model profiles may host generation on Google AI, Vertex AI, OpenRouter, or NVIDIA hosted NIM. Web-search providers are configured independently from model profiles. An optional SQL store provides persistent Discord history, per-server configuration, and the reply claim multi-site deployments require. PostgreSQL 16 is the shared, HA-capable backend; SQLite is the zero-infrastructure single-site backend — one file next to the container, no server to run. Both sit behind one implementation, selected by `STORE_DRIVER`. See [Storage](docs/store.md).
@@ -246,6 +254,12 @@ The primary configuration variables are:
 | `MCP_ENCRYPTION_KEY`             | To store MCP tokens        | 64-hex-char AES-256 key sealing per-guild MCP auth tokens at rest. See [docs/store.md](docs/store.md).                                                                    |
 | `MCP_CALL_TIMEOUT`               | No                         | Deadline for each MCP connect, tool listing, and tool call; defaults to `15s`.                                                                                            |
 | `MCP_ALLOW_PRIVATE_NETWORKS`     | No                         | Permits MCP URLs on loopback/private networks and plain `http` — for self-hosted servers only; defaults to `false`.                                                       |
+| `EMBEDDING_MODEL_PROFILE`        | No                         | Memory embedding model as `name=provider:model-id` (`vertex` or `google-ai`). Empty degrades memory retrieval to pinned + full-text.                                      |
+| `MEMORY_ENABLED`                 | No                         | Persistent character memory; defaults to `true` and activates only under `STORE_DRIVER=postgres` with pgvector available.                                                |
+| `MEMORY_SUMMARIZE_TURNS`         | No                         | Turns accumulated in a channel before an async memory summarization pass; defaults to `20`.                                                                              |
+| `MEMORY_IDLE_FLUSH`              | No                         | How long unsummarized conversation may wait before a quiet channel is flushed to memory; defaults to `30m`.                                                              |
+| `MEMORY_CONTEXT_RUNES`           | No                         | Rune budget for the injected memory block, separate from `HISTORY_RUNES`; defaults to `3000`.                                                                            |
+| `MEMORY_MAX_RECORDS`             | No                         | Unpinned memory records per character before the oldest consolidate into a digest; defaults to `500`.                                                                    |
 
 Every non-repeatable command flag is also available as an uppercase environment variable with hyphens replaced by underscores. For example, `--message-retention-days` maps to `MESSAGE_RETENTION_DAYS`. Use `--help` to see all options.
 

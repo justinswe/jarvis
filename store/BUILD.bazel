@@ -5,13 +5,16 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # `bazel test //...`. One directive per file — gazelle reads only the first path on a line.
 # gazelle:exclude live_test.go
 # gazelle:exclude manual_test_main_test.go
+# gazelle:exclude memory_live_test.go
 
 go_library(
     name = "store",
     srcs = [
+        "characters.go",
         "config.go",
         "crypto.go",
         "dialect.go",
+        "memory.go",
         "messages.go",
         "migrate.go",
         "reply.go",
@@ -20,6 +23,7 @@ go_library(
     embedsrcs = [
         "migrations/0001_init.sql",
         "migrations/0002_mcp_servers.sql",
+        "migrations/0003_memory.pg.sql",
     ],
     importpath = "github.com/justinswe/jarvis/store",
     visibility = ["//visibility:public"],
@@ -38,7 +42,9 @@ go_library(
 go_test(
     name = "store_test",
     srcs = [
+        "characters_test.go",
         "crypto_test.go",
+        "memory_test.go",
         "store_test.go",
     ],
     embed = [":store"],
@@ -59,8 +65,11 @@ go_test(
     name = "postgres_live",
     size = "large",
     srcs = [
+        "characters_test.go",
         "live_test.go",
         "manual_test_main_test.go",
+        "memory_live_test.go",
+        "memory_test.go",
         "store_test.go",
     ],
     embed = [":store"],

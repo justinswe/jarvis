@@ -17,6 +17,9 @@ type dialect struct {
 	forUpdate string
 	// rebind converts the package's `?` placeholders to the backend's positional form.
 	rebind func(string) string
+	// postgres marks the backend that runs NNNN_name.pg.sql migrations. The other
+	// backend records those versions and skips their bodies.
+	postgres bool
 }
 
 var (
@@ -28,6 +31,7 @@ var (
 		now:       "extract(epoch from now())::bigint",
 		forUpdate: " FOR UPDATE",
 		rebind:    rebindPositional,
+		postgres:  true,
 	}
 )
 

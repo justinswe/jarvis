@@ -8,10 +8,12 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	discordmcp "github.com/justinswe/discord-mcp"
+	"github.com/justinswe/jarvis/store"
 	"github.com/justinswe/jarvis/worker/pkg/config"
 	"github.com/justinswe/jarvis/worker/pkg/genai"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
 	"github.com/justinswe/jarvis/worker/pkg/mcpx"
+	"github.com/justinswe/jarvis/worker/pkg/memory"
 	"github.com/justinswe/jarvis/worker/pkg/version"
 	"github.com/justinswe/std/errors"
 )
@@ -64,12 +66,25 @@ type ReplyClaimer interface {
 	HoldReply(ctx context.Context, channelID, messageID string) error
 }
 
+// MemoryEngine supplies persistent-memory retrieval, turn notes, and the memory book.
+// Implemented by *memory.Pipeline.
+type MemoryEngine interface {
+	NoteTurn(ctx context.Context, turn memory.Turn)
+	Retrieve(ctx context.Context, guildID string, characterID int64, query string, budgetRunes int) string
+	List(ctx context.Context, guildID string, characterID int64, limit int) ([]store.MemoryRecord, error)
+	Pin(ctx context.Context, guildID string, id int64, pinned bool) error
+	Edit(ctx context.Context, guildID string, id int64, content string) error
+	Delete(ctx context.Context, guildID string, id int64) error
+	Add(ctx context.Context, guildID string, characterID int64, content string, pinned bool) error
+}
+
 // Client contains the Discord REST operations used while processing a message.
 type Client interface {
 	Channel(context.Context, string) (*discordgo.Channel, error)
 	Message(context.Context, string, string) (*discordgo.Message, error)
 	Messages(context.Context, string, int, string) ([]*discordgo.Message, error)
 	SendMessage(context.Context, string, string) (*discordgo.Message, error)
+	SendFile(ctx context.Context, channelID, content string, files []*discordgo.File) (*discordgo.Message, error)
 	StartThread(context.Context, string, string, string, int) (*discordgo.Channel, error)
 	AddReaction(context.Context, string, string, string) error
 	RemoveReaction(context.Context, string, string, string, string) error
@@ -96,6 +111,15 @@ type Processor struct {
 	// replies is nil when no shared store is configured. Nothing then deduplicates
 	// replies, which is why more than one Gateway connection requires a store driver.
 	replies ReplyClaimer
+	// characters is nil when no store is configured; every channel then runs in
+	// assistant mode and no character tools are offered.
+	characters CharacterStore
+	// memory is nil unless the postgres store enables the persistent-memory pipeline.
+	memory             MemoryEngine
+	memoryContextRunes int
+	// fetchCard downloads card files and archives; tests override it. Nil uses
+	// character.Fetch.
+	fetchCard func(ctx context.Context, url string) ([]byte, error)
 	// mcp is nil when MCP is not wired; tools then stay native, exactly as before.
 	mcp               *mcpx.Connector
 	defaultMCPServers []config.MCPServer
@@ -119,6 +143,13 @@ type ProcessorConfig struct {
 	Limiter            Limiter
 	Recorder           Recorder
 	ReplyClaimer       ReplyClaimer
+	// Characters enables roleplay characters; nil keeps every channel in assistant mode.
+	Characters CharacterStore
+	// Memory enables persistent-memory retrieval and the memory book; nil disables both.
+	Memory MemoryEngine
+	// MemoryContextRunes bounds the injected memory block, separately from the history
+	// budget so memory and history never evict each other. Zero uses 3000.
+	MemoryContextRunes int
 	// MCP enables the MCP tool path: built-ins served in-process plus the guild's
 	// remote servers. Nil keeps native tools only.
 	MCP *mcpx.Connector
@@ -146,6 +177,9 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 	if strings.TrimSpace(cfg.Version) == "" {
 		cfg.Version = version.Value
 	}
+	if cfg.MemoryContextRunes <= 0 {
+		cfg.MemoryContextRunes = 3000
+	}
 	session, err := discordgo.New("Bot " + cfg.DiscordBotToken)
 	if err != nil {
 		return nil, errors.Wrap(err, "create Discord REST client")
@@ -169,6 +203,8 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 		history: cfg.History, manager: cfg.ConfigManager, models: cfg.ModelRegistry, webSearchProviders: append([]string(nil), cfg.WebSearchProviders...),
 		rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
 		limiter: cfg.Limiter, recorder: cfg.Recorder, replies: cfg.ReplyClaimer,
+		characters: cfg.Characters,
+		memory:     cfg.Memory, memoryContextRunes: cfg.MemoryContextRunes,
 		mcp: cfg.MCP, defaultMCPServers: append([]config.MCPServer(nil), cfg.DefaultMCPServers...),
 	}
 	if cfg.MCP != nil {
@@ -198,6 +234,12 @@ func (c restClient) Messages(ctx context.Context, channelID string, limit int, b
 
 func (c restClient) SendMessage(ctx context.Context, channelID, content string) (*discordgo.Message, error) {
 	return c.session.ChannelMessageSendComplex(channelID, suppressedMessage(content), discordgo.WithContext(ctx))
+}
+
+func (c restClient) SendFile(ctx context.Context, channelID, content string, files []*discordgo.File) (*discordgo.Message, error) {
+	message := suppressedMessage(content)
+	message.Files = files
+	return c.session.ChannelMessageSendComplex(channelID, message, discordgo.WithContext(ctx))
 }
 
 func (c restClient) StartThread(ctx context.Context, channelID, messageID, name string, archiveDuration int) (*discordgo.Channel, error) {

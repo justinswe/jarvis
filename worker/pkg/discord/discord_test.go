@@ -45,6 +45,7 @@ type fakeClient struct {
 	referenced     *discordgo.Message
 	messages       func(context.Context, string, int, string) ([]*discordgo.Message, error)
 	sendMessage    func(context.Context, string, string) (*discordgo.Message, error)
+	sendFile       func(context.Context, string, string, []*discordgo.File) (*discordgo.Message, error)
 	startThread    func(context.Context, string, string, string, int) (*discordgo.Channel, error)
 	addReaction    func(context.Context, string, string, string) error
 	removeReaction func(context.Context, string, string, string, string) error
@@ -92,6 +93,13 @@ func (f *fakeClient) SendMessage(ctx context.Context, channelID, content string)
 		return &discordgo.Message{}, nil
 	}
 	return f.sendMessage(ctx, channelID, content)
+}
+
+func (f *fakeClient) SendFile(ctx context.Context, channelID, content string, files []*discordgo.File) (*discordgo.Message, error) {
+	if f.sendFile == nil {
+		return &discordgo.Message{}, nil
+	}
+	return f.sendFile(ctx, channelID, content, files)
 }
 
 func (f *fakeClient) StartThread(ctx context.Context, channelID, messageID, name string, duration int) (*discordgo.Channel, error) {

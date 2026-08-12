@@ -57,7 +57,8 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 		require.NoError(t, err)
 		var version int64
 		require.NoError(t, s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version))
-		assert.Equal(t, int64(2), version)
+		// 0003 is Postgres-only (.pg.sql): SQLite records the version and skips the body.
+		assert.Equal(t, int64(3), version)
 		require.NoError(t, s.Close())
 	}
 }

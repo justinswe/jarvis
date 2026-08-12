@@ -56,6 +56,14 @@ func applyMigration(ctx context.Context, db *sql.DB, d dialect, name string, ver
 		return errors.Wrap(err, "begin migration transaction")
 	}
 	defer func() { _ = tx.Rollback() }()
+	// NNNN_name.pg.sql migrations are PostgreSQL-only (pgvector, tsvector). SQLite
+	// records the version and skips the body, keeping one shared version stream.
+	if strings.Contains(name, ".pg.") && !d.postgres {
+		if _, err := tx.ExecContext(ctx, d.rebind(`INSERT INTO schema_migrations (version) VALUES (?)`), version); err != nil {
+			return errors.Wrap(err, "record skipped migration")
+		}
+		return errors.Wrap(tx.Commit(), "commit skipped migration")
+	}
 	for _, statement := range splitStatements(string(body)) {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return errors.Wrapf(err, "execute %q", firstLine(statement))

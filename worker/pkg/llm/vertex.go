@@ -35,6 +35,7 @@ type VertexConfig struct {
 	Generate    VertexGenerateFunc
 	GetModel    VertexGetModelFunc
 	CountTokens VertexCountTokensFunc
+	Embed       VertexEmbedFunc
 }
 
 // GoogleAIConfig configures the Gemini Developer API adapter.
@@ -69,10 +70,12 @@ func NewVertexHost(ctx context.Context, config VertexConfig) (Host, Prober, erro
 		config.Generate = client.Models.GenerateContent
 		config.GetModel = client.Models.Get
 		config.CountTokens = client.Models.CountTokens
+		config.Embed = client.Models.EmbedContent
 	}
 	host := &googleGenAIHost{
 		provider: ProviderVertex, continuationFormat: vertexContinuationFormat,
 		generate: config.Generate, getModel: config.GetModel, countTokens: config.CountTokens,
+		embed: config.Embed,
 	}
 	return host, host, nil
 }
@@ -96,6 +99,7 @@ func NewGoogleAIHost(ctx context.Context, config GoogleAIConfig) (Host, Prober, 
 	host := &googleGenAIHost{
 		provider: ProviderGoogleAI, continuationFormat: googleAIContinuationFormat,
 		generate: client.Models.GenerateContent, getModel: client.Models.Get, countTokens: client.Models.CountTokens,
+		embed: client.Models.EmbedContent,
 	}
 	return host, host, nil
 }
@@ -106,6 +110,7 @@ type googleGenAIHost struct {
 	generate           VertexGenerateFunc
 	getModel           VertexGetModelFunc
 	countTokens        VertexCountTokensFunc
+	embed              VertexEmbedFunc
 }
 
 var explicitGeminiModelPattern = regexp.MustCompile(`^gemini-([1-9][0-9]*)(?:\.[0-9]+)?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?$`)

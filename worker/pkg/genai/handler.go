@@ -144,6 +144,9 @@ type RequestConfig struct {
 	AccuracyPolicy       AccuracyPolicy
 	PrimaryModelProfile  string
 	FallbackModelProfile string
+	// Roleplay switches the generation to the in-character path: no tools, no web
+	// search, no accuracy policy, roleplay system prompt. Nil is assistant mode.
+	Roleplay *RoleplayConfig
 }
 
 // Source is a validated, normalized web-search result.
@@ -209,9 +212,13 @@ type Config struct {
 	ModelProfiles        []string
 	PrimaryModelProfile  string
 	FallbackModelProfile string
-	WebSearchClients     []*websearch.Client
-	MutableConfiguration bool
-	ProbeTimeout         time.Duration
+	// EmbeddingModelProfile names the memory-retrieval embedding model as
+	// name=provider:model-id (vertex or google-ai only). Empty disables embeddings;
+	// memory then degrades to full-text retrieval.
+	EmbeddingModelProfile string
+	WebSearchClients      []*websearch.Client
+	MutableConfiguration  bool
+	ProbeTimeout          time.Duration
 	// AttemptTimeout bounds one provider call so a single stalled upstream cannot
 	// consume the whole request budget. Zero uses DefaultAttemptTimeout.
 	AttemptTimeout time.Duration
@@ -232,6 +239,8 @@ type Handler struct {
 	observeGeneration func(generationDiagnostics)
 	registry          *llm.Registry
 	webSearchers      []webSearcher
+	// embedder is nil when no embedding model profile is configured.
+	embedder *llm.BoundEmbedder
 }
 
 type generationDiagnostics struct {
@@ -297,6 +306,20 @@ func New(ctx context.Context, cfg Config) (*Handler, error) {
 	for _, profile := range profiles {
 		providers[profile.Provider] = struct{}{}
 	}
+	var embeddingSpec *llm.ProfileSpec
+	if strings.TrimSpace(cfg.EmbeddingModelProfile) != "" {
+		spec, specErr := llm.ParseProfile(cfg.EmbeddingModelProfile)
+		if specErr != nil {
+			return nil, errors.Wrap(specErr, "parse embedding model profile")
+		}
+		if spec.Provider != llm.ProviderVertex && spec.Provider != llm.ProviderGoogleAI {
+			return nil, errors.New("embedding-model-profile must name a vertex or google-ai model")
+		}
+		// The embedding provider joins the credential validation and host construction
+		// below even when no chat profile uses it.
+		providers[spec.Provider] = struct{}{}
+		embeddingSpec = &spec
+	}
 	if err := validateProviderCredentials(cfg, providers); err != nil {
 		return nil, err
 	}
@@ -350,9 +373,32 @@ func New(ctx context.Context, cfg Config) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	if embeddingSpec != nil {
+		embedHost, ok := hostsByProvider[embeddingSpec.Provider].(llm.Embedder)
+		if !ok {
+			return nil, errors.Errorf("provider %s has no embedding support", embeddingSpec.Provider)
+		}
+		h.embedder = &llm.BoundEmbedder{Host: embedHost, ModelID: embeddingSpec.ModelID}
+		// Fail closed at startup, exactly like chat profile probing: a configured but
+		// broken embedding model is loud, not a silent degradation.
+		probeTimeout := cfg.ProbeTimeout
+		if probeTimeout <= 0 {
+			probeTimeout = 10 * time.Second
+		}
+		probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout)
+		defer cancelProbe()
+		if _, probeErr := h.embedder.Embed(probeCtx, []string{"probe"}); probeErr != nil {
+			return nil, errors.Wrap(probeErr, "probe embedding model")
+		}
+		app.L().Info("Embedding model probed", zap.String("provider", string(embeddingSpec.Provider)),
+			zap.String("model", embeddingSpec.ModelID), zap.Int("dimension", llm.EmbeddingDimension))
+	}
 	h.logModelRouting()
 	return h, nil
 }
+
+// Embedder returns the configured memory embedder, or nil when embeddings are disabled.
+func (h *Handler) Embedder() *llm.BoundEmbedder { return h.embedder }
 
 func validateProviderCredentials(cfg Config, providers map[llm.Provider]struct{}) error {
 	var failures []string
