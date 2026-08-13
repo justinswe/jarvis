@@ -8,7 +8,7 @@ require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/justinswe/discord-mcp v0.0.2
-	github.com/justinswe/std v1.0.0
+	github.com/justinswe/std v1.2.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/nats-io/nats.go v1.52.0
 	github.com/spf13/cobra v1.10.2
