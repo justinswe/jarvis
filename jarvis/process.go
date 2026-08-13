@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/justinswe/std/app"
 	"github.com/justinswe/std/errors"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type managedProcess interface {
@@ -29,7 +34,7 @@ func startProcess(binary string, args []string, env []string) (managedProcess, e
 	command := exec.Command(binary, args...)
 	command.Env = env
 	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
+	command.Stderr = &childLog{name: filepath.Base(binary)}
 	// Stdin is deliberately left closed. Every child is a server that never reads it, and
 	// sharing the supervisor's stdin between them would only let one steal the others' input.
 	if err := command.Start(); err != nil {
@@ -44,6 +49,66 @@ func startProcess(binary string, args []string, env []string) (managedProcess, e
 		close(process.done)
 	}()
 	return process, nil
+}
+
+// childLog forwards a child's stderr into the supervisor's own structured log.
+type childLog struct {
+	name string
+	mu   sync.Mutex
+	buf  []byte
+}
+
+// childLevels maps the nats-server log tags to levels, longest concern first.
+var childLevels = []struct {
+	tag   string
+	level zapcore.Level
+}{
+	{"[FTL]", zapcore.ErrorLevel},
+	{"[ERR]", zapcore.ErrorLevel},
+	{"[WRN]", zapcore.WarnLevel},
+	{"[INF]", zapcore.InfoLevel},
+	{"[DBG]", zapcore.DebugLevel},
+	{"[TRC]", zapcore.DebugLevel},
+}
+
+// Write buffers whole lines out of a stream that does not arrive line-aligned.
+//
+// os/exec copies through a 32KiB buffer, so one call routinely carries several
+// lines and can split the last one.
+func (w *childLog) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.buf = append(w.buf, p...)
+	for {
+		end := bytes.IndexByte(w.buf, '\n')
+		if end < 0 {
+			return len(p), nil
+		}
+		line := strings.TrimSpace(string(w.buf[:end]))
+		w.buf = w.buf[end+1:]
+		if line != "" {
+			w.log(line)
+		}
+	}
+}
+
+// log re-emits one child line at the level its tag names.
+func (w *childLog) log(line string) {
+	level, message := zapcore.ErrorLevel, line
+	for _, candidate := range childLevels {
+		at := strings.Index(line, candidate.tag)
+		if at < 0 {
+			continue
+		}
+		// Everything before the tag is the child's own pid and timestamp prefix, which
+		// the supervisor's encoder supplies again.
+		level, message = candidate.level, strings.TrimSpace(line[at+len(candidate.tag):])
+		break
+	}
+	if entry := app.L().Check(level, message); entry != nil {
+		entry.Write(zap.String("child", w.name))
+	}
 }
 
 // childEnv applies overrides to base, replacing rather than shadowing.

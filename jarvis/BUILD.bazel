@@ -17,6 +17,7 @@ go_library(
         "@com_github_justinswe_std//errors",
         "@com_github_spf13_cobra//:cobra",
         "@org_uber_go_zap//:zap",
+        "@org_uber_go_zap//zapcore",
         "@rules_go//go/runfiles",
     ],
 )
@@ -42,6 +43,7 @@ go_test(
     srcs = [
         "jarvis_test.go",
         "locate_test.go",
+        "process_test.go",
     ],
     # The resolver tests assert every child is reachable from runfiles. Valkey is
     # absent on macOS by design, so only its skipped-when-disabled path is asserted.
@@ -58,6 +60,9 @@ go_test(
         "@com_github_justinswe_std//errors",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@org_uber_go_zap//:zap",
+        "@org_uber_go_zap//zapcore",
+        "@org_uber_go_zap//zaptest/observer",
     ],
 )
 
