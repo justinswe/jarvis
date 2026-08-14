@@ -235,8 +235,8 @@
   "moduleExtensions": {
     "//third_party/images:images.bzl%images": {
       "general": {
-        "bzlTransitiveDigest": "QarGnYuOv+e0zcegzLgXf72+SC9lguSGRn25sdbavE0=",
-        "usagesDigest": "agwhHTx4MOod+8IPqITrn6qvjKCyWZJ012nlhUg3LW4=",
+        "bzlTransitiveDigest": "03bdIzumBywdsJsFmgGUAWivrmhy2jROmNXMmskz+sU=",
+        "usagesDigest": "9z7R0h9uR8AFtZHoLatiFeaAIf+qLFH+w43XqKY+Y6U=",
         "recordedInputs": [
           "REPO_MAPPING:,rules_img rules_img+",
           "REPO_MAPPING:rules_img+,bazel_skylib bazel_skylib+",
@@ -247,7 +247,7 @@
           "distroless_base_debian13_nonroot": {
             "repoRuleId": "@@rules_img+//img/private/repository_rules:pull.bzl%pull",
             "attributes": {
-              "digest": "sha256:ced0a2b1936b14d5bddc2ee02a807b1586ca6576a967f5b043f4a3301c8a8f6b",
+              "digest": "sha256:97b9d04bed1c754b756c3c4b6a04915c22fb0b5d96a59944eb3bf78c26e6e157",
               "registry": "gcr.io",
               "repository": "distroless/base-debian13",
               "tag": "nonroot"
@@ -259,7 +259,7 @@
     "//third_party/nats:nats.bzl%nats": {
       "general": {
         "bzlTransitiveDigest": "FCQwHpYEdYBCah9QTphHenlpqThRavB7mrA+991kqn0=",
-        "usagesDigest": "SF8AcoaVG6HqAXULmLh/GNcZNc0mQNp39hf4diz/Y7s=",
+        "usagesDigest": "vWiF/jFH7BHNNYmWwn7kTwHjIwJkfxrh5heIh5rr5SY=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools"
         ],
@@ -310,7 +310,7 @@
     "//third_party/valkey:valkey.bzl%valkey": {
       "general": {
         "bzlTransitiveDigest": "qwm2QnFj2Tvh+w0wYU84FCl8GaoJFhVl/qrw/eEaG4o=",
-        "usagesDigest": "WdqH1NSoJDJt5GScbn06YbAtsQM+XmeABvTtbGf80U4=",
+        "usagesDigest": "4EwzRIjPKm67mE2qodQcHfI3sJaSG7alOastpfHcjFo=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools"
         ],
@@ -363,7 +363,7 @@
     "@@rules_buf+//buf:extensions.bzl%buf": {
       "general": {
         "bzlTransitiveDigest": "IjW2he5lp+L/zEfsBKIilXijyHH6PC4Lf3y19MA6G4c=",
-        "usagesDigest": "LUr0E6Pz5QRjbGuMQf96JQcPceMhodeMhrkFEXr3l84=",
+        "usagesDigest": "UisNAtQluwc/PGhkLEf2+jZi4rEqAF3w8Uty2tvoLCo=",
         "recordedInputs": [
           "REPO_MAPPING:rules_buf+,bazel_tools bazel_tools"
         ],
@@ -636,7 +636,7 @@
     "@@toolchains_buildbuddy+//:extensions.bzl%buildbuddy": {
       "general": {
         "bzlTransitiveDigest": "YThiSErJv+jiCHJzZIEyk0yegQRS/x+T/ce309eGTvA=",
-        "usagesDigest": "SANjEXReewI4qqyrvDdvHvuFHH8mbXQ63x1sKzcc6q0=",
+        "usagesDigest": "qFZ6VeiD/sI6liB8GhFWLWOWtiwDYpfUEnmDqZQJvPU=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "buildbuddy_toolchain": {

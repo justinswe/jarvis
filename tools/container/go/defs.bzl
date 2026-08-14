@@ -9,7 +9,7 @@ def go_container_image(
         name,
         binary,
         base,
-        platform,
+        platforms,
         registry,
         repository,
         tag = "latest",
@@ -27,7 +27,7 @@ def go_container_image(
         name: Name of the OCI image target.
         binary: Go binary target to package.
         base: Base image target.
-        platform: Target platform for the image.
+        platforms: Target platforms for the image; more than one produces an image index.
         registry: Destination registry for the push target.
         repository: Destination repository and local image name.
         tag: Image tag for load and push operations.
@@ -68,7 +68,7 @@ def go_container_image(
         include_runfiles = False,
         layers = layers,
         path = "/app/" + _target_name(binary),
-        platforms = [platform],
+        platforms = platforms,
         visibility = visibility,
         working_dir = "/app",
         **kwargs
