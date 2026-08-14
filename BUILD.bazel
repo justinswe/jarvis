@@ -40,8 +40,9 @@ config_setting(
     ],
 )
 
-# The image only ever ships linux/amd64; the other platforms exist so local runs
-# and manual live tests can start a real broker on the developer's machine.
+# Resolves per target platform: the image index builds this once per image
+# architecture, and the darwin branches let local runs and manual live tests
+# start a real broker on the developer's machine.
 alias(
     name = "nats_server_host",
     actual = select({
@@ -92,18 +93,31 @@ filegroup(
 )
 
 platform(
-    name = "linux_amd64",
+    name = "linux_amd64_platform",
     constraint_values = [
         "@platforms//cpu:x86_64",
         "@platforms//os:linux",
     ],
 )
 
+platform(
+    name = "linux_arm64_platform",
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:linux",
+    ],
+)
+
+LINUX_PLATFORMS = [
+    ":linux_amd64_platform",
+    ":linux_arm64_platform",
+]
+
 go_container_image(
     name = "ingestor_image",
     base = "@distroless_base_debian13_nonroot",
     binary = "//ingestor",
-    platform = ":linux_amd64",
+    platforms = LINUX_PLATFORMS,
     registry = "index.docker.io",
     repository = "justinswe/jarvis-ingestor",
     tag = MODULE_VERSION,
@@ -115,7 +129,7 @@ go_container_image(
     name = "worker_image",
     base = "@distroless_base_debian13_nonroot",
     binary = "//worker",
-    platform = ":linux_amd64",
+    platforms = LINUX_PLATFORMS,
     registry = "index.docker.io",
     repository = "justinswe/jarvis-worker",
     tag = MODULE_VERSION,
@@ -136,10 +150,10 @@ go_container_image(
     binary = "//jarvis",
     file_metadata = {"/app/nats-server": file_metadata(mode = "0755")},
     files = {
-        "/app/nats-server": "@nats_server_linux_amd64//:nats-server",
+        "/app/nats-server": ":nats_server_host",
         "/app/nats.conf": "//jarvis:nats.conf",
     },
-    platform = ":linux_amd64",
+    platforms = LINUX_PLATFORMS,
     registry = "index.docker.io",
     repository = "justinswe/jarvis",
     tag = MODULE_VERSION,
