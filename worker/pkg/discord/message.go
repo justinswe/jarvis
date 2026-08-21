@@ -57,14 +57,9 @@ func (p *Processor) answer(ctx context.Context, channel *discordgo.Channel, m *d
 	if !isThreadChannel(channel) {
 		return p.processTargetedMessage(ctx, channel, m)
 	}
-	err := p.threadQueue.Run(ctx, m.ChannelID, func(threadCtx context.Context) error {
+	return p.threadQueue.Run(ctx, m.ChannelID, func(threadCtx context.Context) error {
 		return p.processTargetedMessage(threadCtx, channel, m)
 	})
-	if errors.Is(err, errThreadRequestSuperseded) {
-		app.L().Debug("Discord AI request superseded", discordRequestFields(channel, m)...)
-		return nil
-	}
-	return err
 }
 
 // processTargetedMessage handles one request after targeting and queue coordination.
@@ -80,7 +75,7 @@ func (p *Processor) processTargetedMessage(ctx context.Context, channel *discord
 
 	// Recorded here — after targeting, before admission — so stored history is exactly
 	// the conversation addressed to the bot, including requests the limiter turned away.
-	p.record(ctx, settings.MessageRetentionDays, m.Message)
+	p.record(ctx, settings.MessageRetentionDays, withAttachmentNote(m.Message))
 
 	started := time.Now()
 	fields := discordRequestFields(channel, m)
@@ -99,9 +94,6 @@ func (p *Processor) processTargetedMessage(ctx context.Context, channel *discord
 			app.L().Debug("Failed to remove processing reaction", zap.Error(err))
 		}
 	}()
-	if threadRequestSuperseded(ctx) {
-		return errThreadRequestSuperseded
-	}
 
 	processCtx, cancel := context.WithTimeout(ctx, settings.MessageTimeout)
 	defer cancel()
@@ -188,9 +180,6 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		memoryBlock <- ""
 	}
 	built, err := p.buildPromptWithIntent(ctx, channel, m, settings)
-	if threadRequestSuperseded(replyCtx) {
-		return errThreadRequestSuperseded
-	}
 	if err != nil {
 		app.L().Warn("Failed to build AI request", append(fields, zap.Error(err))...)
 		if errors.Is(err, errEmptyMessageContent) {
@@ -221,7 +210,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		Config: &genai.RequestConfig{
 			Prompt:               settings.EffectivePrompt(),
 			MaxOutputTokens:      settings.MaxOutputTokens,
-			WebSearchEnabled:     settings.WebSearchEnabled && roleplay == nil,
+			WebSearchEnabled:     settings.WebSearchEnabled && roleplay == nil && sanitized != "",
 			ReasoningEffort:      settings.ReasoningEffort,
 			PrimaryModelProfile:  settings.PrimaryModelProfile,
 			FallbackModelProfile: settings.FallbackModelProfile,
@@ -247,13 +236,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		request.Tools, releaseMCP = p.mcpTools(ctx, m, guildConfig, native)
 	}
 	defer releaseMCP()
-	if threadRequestSuperseded(replyCtx) {
-		return errThreadRequestSuperseded
-	}
 	response, err := p.generator.Generate(ctx, request)
-	if threadRequestSuperseded(replyCtx) {
-		return errThreadRequestSuperseded
-	}
 	if err != nil {
 		app.L().Warn("Model generation failed", append(fields,
 			zap.Duration("duration", time.Since(started)),
@@ -276,16 +259,7 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 	if len(response.Sources) > 0 {
 		reply = appendSources(reply, response.Sources)
 	}
-	reply = appendEvidence(reply, response.Evidence)
-	statuses := append([]genai.EvidenceStatus(nil), response.EvidenceStatuses...)
-	if response.EvidenceStatus != "" {
-		statuses = append(statuses, response.EvidenceStatus)
-	}
-	reply = appendEvidenceStatuses(reply, statuses, response.Sources)
 	reply = appendRateLimitWarning(reply, admission.NearLimit)
-	if threadRequestSuperseded(replyCtx) {
-		return errThreadRequestSuperseded
-	}
 	var sent []*discordgo.Message
 	if roleplay != nil {
 		// A character speaks in its channel; opening an "AI Thread" would break the scene.
@@ -294,9 +268,6 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		sent, err = p.sendReply(replyCtx, channel, m, reply)
 	}
 	if err != nil {
-		if threadRequestSuperseded(replyCtx) {
-			return errThreadRequestSuperseded
-		}
 		app.L().Warn("Failed to post Discord reply", append(fields,
 			zap.Duration("duration", time.Since(started)),
 			zap.Int("source_count", len(response.Sources)),
@@ -305,7 +276,8 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 		)...)
 		return err
 	}
-	p.record(replyCtx, settings.MessageRetentionDays, sent...)
+	// The send API's response carries no guild, and stored history is read by guild.
+	p.record(replyCtx, settings.MessageRetentionDays, stampGuild(m.GuildID, sent)...)
 	if p.memory != nil && m.GuildID != "" {
 		// Detached like record(): a spent reply deadline must not lose the turn note.
 		noteCtx, cancelNote := context.WithTimeout(context.WithoutCancel(replyCtx), 10*time.Second)
@@ -314,9 +286,6 @@ func (p *Processor) processMessage(ctx, replyCtx context.Context, channel *disco
 			CharacterID: memoryScope(active), Tier: guildConfig.Tier,
 		})
 		cancelNote()
-	}
-	if threadRequestSuperseded(replyCtx) {
-		return errThreadRequestSuperseded
 	}
 	app.L().Info("Discord AI request completed", append(fields,
 		zap.Duration("duration", time.Since(started)),

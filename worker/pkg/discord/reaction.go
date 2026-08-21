@@ -39,10 +39,12 @@ func (messageReactionTool) Declaration() *llm.ToolDefinition {
 			"Use this when a lightweight reaction improves the interaction, but not instead of a substantive answer when one is needed. " +
 			"Omit message_id to react to the current request; use only message IDs provided in the conversation or by search_current_channel.",
 		InputSchema: llm.JSONSchema{"type": "object", "properties": map[string]any{
-			"emoji": map[string]any{"type": "string", "description": "The emoji character itself, such as 💯 or 👍. Translate a name the user gives into its character: \"100\" is 💯, \"thumbs up\" is 👍. Never send a :shortcode: name, a word, or digits. Custom Discord emoji and the reserved processing emoji are not supported."},
+			"emoji": map[string]any{"type": "string", "description": "The emoji character itself, such as 💯 or 👍. Translate a name the user gives into its character: \"100\" is 💯, \"thumbs up\" is 👍. Never send a :shortcode: name, a word, or digits. Custom Discord emoji and the reserved processing emoji 🤔 are not supported."},
 			"message_id": map[string]any{"type": "string", "description": "Optional message ID from the current channel. Omit this to react to the current request."},
 		}, "required": []string{"emoji"}},
-		Effect: llm.ToolEffectMutation,
+		// A reaction is cosmetic: a failed one must not displace the answer the way a
+		// failed configuration change does.
+		Effect: llm.ToolEffectReadOnly,
 	}
 }
 

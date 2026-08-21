@@ -2,7 +2,6 @@ package discord
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,46 +9,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestThreadRequestQueueRunsOnlyLatestPendingRequest(t *testing.T) {
+func TestThreadRequestQueueRunsRequestsInOrder(t *testing.T) {
 	queue := &threadRequestQueue{}
 	firstStarted := make(chan struct{})
-	firstCanceled := make(chan error, 1)
 	releaseFirst := make(chan struct{})
-	thirdStarted := make(chan struct{})
-	var secondRan atomic.Bool
+	var order []int
 
-	firstResult := runQueuedRequest(queue, "thread", func(ctx context.Context) error {
+	firstResult := runQueuedRequest(queue, "thread", func(context.Context) error {
 		close(firstStarted)
-		<-ctx.Done()
-		firstCanceled <- context.Cause(ctx)
 		<-releaseFirst
-		return ctx.Err()
+		order = append(order, 1)
+		return nil
 	})
 	requireReceive(t, firstStarted)
-
 	secondResult := runQueuedRequest(queue, "thread", func(context.Context) error {
-		secondRan.Store(true)
+		order = append(order, 2)
 		return nil
 	})
-	assert.ErrorIs(t, requireReceive(t, firstCanceled), errThreadRequestSuperseded)
-	require.Eventually(t, func() bool { return queue.hasPending("thread") }, time.Second, time.Millisecond)
-
+	require.Eventually(t, func() bool { return queue.pendingCount("thread") == 1 }, time.Second, time.Millisecond)
 	thirdResult := runQueuedRequest(queue, "thread", func(context.Context) error {
-		close(thirdStarted)
+		order = append(order, 3)
 		return nil
 	})
-	assert.ErrorIs(t, requireReceive(t, secondResult), errThreadRequestSuperseded)
-	assert.False(t, secondRan.Load())
-	select {
-	case <-thirdStarted:
-		t.Fatal("latest request started before the active request stopped")
-	default:
-	}
+	require.Eventually(t, func() bool { return queue.pendingCount("thread") == 2 }, time.Second, time.Millisecond)
+	assert.Empty(t, order, "queued requests must wait for the active one")
 
 	close(releaseFirst)
-	assert.ErrorIs(t, requireReceive(t, firstResult), errThreadRequestSuperseded)
-	requireReceive(t, thirdStarted)
+	assert.NoError(t, requireReceive(t, firstResult))
+	assert.NoError(t, requireReceive(t, secondResult))
 	assert.NoError(t, requireReceive(t, thirdResult))
+	assert.Equal(t, []int{1, 2, 3}, order)
 	require.Eventually(t, func() bool { return !queue.hasThread("thread") }, time.Second, time.Millisecond)
 }
 
@@ -94,14 +83,15 @@ func requireReceive[T any](t *testing.T, values <-chan T) T {
 	}
 }
 
-func (q *threadRequestQueue) hasPending(threadID string) bool {
+func (q *threadRequestQueue) pendingCount(threadID string) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.threads[threadID] != nil && q.threads[threadID].pending != nil
+	return len(q.threads[threadID])
 }
 
 func (q *threadRequestQueue) hasThread(threadID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.threads[threadID] != nil
+	_, ok := q.threads[threadID]
+	return ok
 }

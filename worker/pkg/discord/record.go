@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -33,4 +34,34 @@ func (p *Processor) record(ctx context.Context, retentionDays int, messages ...*
 				zap.Error(err))
 		}
 	}
+}
+
+// stampGuild fills in the guild on messages returned by the send API, which omits it.
+func stampGuild(guildID string, messages []*discordgo.Message) []*discordgo.Message {
+	for _, message := range messages {
+		if message != nil && message.GuildID == "" {
+			message.GuildID = guildID
+		}
+	}
+	return messages
+}
+
+// withAttachmentNote returns a copy whose blank content names its image attachments, so
+// an image-only post still shows up in stored history.
+func withAttachmentNote(message *discordgo.Message) *discordgo.Message {
+	if strings.TrimSpace(message.Content) != "" || len(message.Attachments) == 0 {
+		return message
+	}
+	names := make([]string, 0, len(message.Attachments))
+	for _, attachment := range message.Attachments {
+		if attachment != nil && strings.HasPrefix(attachment.ContentType, "image/") {
+			names = append(names, attachment.Filename)
+		}
+	}
+	if len(names) == 0 {
+		return message
+	}
+	copied := *message
+	copied.Content = "[image: " + strings.Join(names, ", ") + "]"
+	return &copied
 }

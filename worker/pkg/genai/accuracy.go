@@ -159,10 +159,14 @@ func ClassifyAccuracyPolicy(request string) AccuracyPolicy {
 	return policy
 }
 
-// ResolveIntentRequest adds the immediately preceding request only for elliptical follow-ups.
+// shortFollowupWords is the length at or below which a request is assumed to lean on
+// the previous one: "Prices", "what about high elo", "list them by name".
+const shortFollowupWords = 4
+
+// ResolveIntentRequest adds the immediately preceding request for elliptical or short follow-ups.
 func ResolveIntentRequest(context IntentContext) string {
 	current := sanitizeText(context.CurrentRequest)
-	if current == "" || !ellipticalFollowupPattern.MatchString(current) {
+	if current == "" || !(ellipticalFollowupPattern.MatchString(current) || len(strings.Fields(current)) <= shortFollowupWords) {
 		return current
 	}
 	previous := sanitizeText(context.PreviousUserRequest)
@@ -370,12 +374,25 @@ func volunteeredRuntimeClaim(text, request string) bool {
 	if currentClaimPattern.MatchString(text) {
 		return true
 	}
-	for _, claim := range timeClaimPattern.FindAllString(text, -1) {
-		if timezoneClaimPattern.MatchString(claim) && !strings.Contains(strings.ToLower(request), strings.ToLower(claim)) {
+	for _, claim := range unechoedClaims(timeClaimPattern.FindAllString(text, -1), request) {
+		if timezoneClaimPattern.MatchString(claim) {
 			return true
 		}
 	}
 	return false
+}
+
+// unechoedClaims drops claims the request itself already states: repeating the user's
+// "2 AM" or "PDT" back is conversation, not a claim about the current moment.
+func unechoedClaims(claims []string, request string) []string {
+	lower := strings.ToLower(request)
+	var kept []string
+	for _, claim := range claims {
+		if !strings.Contains(lower, strings.ToLower(strings.TrimSpace(claim))) {
+			kept = append(kept, claim)
+		}
+	}
+	return kept
 }
 
 func validateRuntimeClaims(text, request string, attributes map[string]string) string {
@@ -386,30 +403,37 @@ func validateRuntimeClaims(text, request string, attributes map[string]string) s
 	if location, locationErr := time.LoadLocation(attributes["timezone"]); locationErr == nil {
 		current = current.In(location)
 	}
+	// Clock values are compared to the runtime only when the request asks what time it
+	// is; a scheduling answer ("drops at 1 AM PDT tonight") names other moments.
+	aboutNow := runtimeIntentPattern.MatchString(request) || localTimePattern.MatchString(request)
 	timeClaims := timeClaimPattern.FindAllString(text, -1)
 	if directTimeRequestPattern.MatchString(request) && len(timeClaims) == 0 {
 		return "missing_runtime_time_claim"
 	}
-	for _, claim := range timeClaims {
-		if !timeClaimMatches(claim, current) {
-			return "runtime_time_mismatch"
+	if aboutNow {
+		for _, claim := range unechoedClaims(timeClaims, request) {
+			if !timeClaimMatches(claim, current) {
+				return "runtime_time_mismatch"
+			}
 		}
 	}
 	dateClaims := dateClaimPattern.FindAllString(text, -1)
 	if directDateRequestPattern.MatchString(request) && len(dateClaims) == 0 {
 		return "missing_runtime_date_claim"
 	}
-	for _, claim := range dateClaims {
-		if !dateClaimMatches(claim, current) {
-			return "runtime_date_mismatch"
+	if aboutNow {
+		for _, claim := range unechoedClaims(dateClaims, request) {
+			if !dateClaimMatches(claim, current) {
+				return "runtime_date_mismatch"
+			}
 		}
 	}
-	if runtimeYearRequestPattern.MatchString(request) {
+	if aboutNow && runtimeYearRequestPattern.MatchString(request) {
 		yearClaims := yearClaimPattern.FindAllString(text, -1)
 		if directYearRequestPattern.MatchString(request) && len(yearClaims) == 0 {
 			return "missing_runtime_year_claim"
 		}
-		for _, claim := range yearClaims {
+		for _, claim := range unechoedClaims(yearClaims, request) {
 			if claim != current.Format("2006") {
 				return "runtime_year_mismatch"
 			}
@@ -419,19 +443,23 @@ func validateRuntimeClaims(text, request string, attributes map[string]string) s
 	if directDayRequestPattern.MatchString(request) && len(weekdayClaims) == 0 && len(dateClaims) == 0 {
 		return "missing_runtime_day_claim"
 	}
-	for _, claim := range weekdayClaims {
-		if !strings.EqualFold(claim, attributes["weekday"]) {
-			return "runtime_weekday_mismatch"
+	if aboutNow {
+		for _, claim := range unechoedClaims(weekdayClaims, request) {
+			if !strings.EqualFold(claim, attributes["weekday"]) {
+				return "runtime_weekday_mismatch"
+			}
 		}
 	}
 	timezoneClaims := timezoneClaimPattern.FindAllString(text, -1)
 	if directTimeRequestPattern.MatchString(request) && len(timezoneClaims) == 0 {
 		return "missing_runtime_timezone_claim"
 	}
-	for _, claim := range timezoneClaims {
-		zone, _ := current.Zone()
-		if !strings.EqualFold(claim, attributes["timezone"]) && !strings.EqualFold(claim, zone) && !(claim == "GMT" && zone == "UTC") {
-			return "runtime_timezone_mismatch"
+	if aboutNow {
+		for _, claim := range unechoedClaims(timezoneClaims, request) {
+			zone, _ := current.Zone()
+			if !strings.EqualFold(claim, attributes["timezone"]) && !strings.EqualFold(claim, zone) && !(claim == "GMT" && zone == "UTC") {
+				return "runtime_timezone_mismatch"
+			}
 		}
 	}
 	versionClaims := []string(nil)

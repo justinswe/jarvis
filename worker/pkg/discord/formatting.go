@@ -18,10 +18,7 @@ import (
 var botPrefixPattern = regexp.MustCompile(`(?i)^(?:\s*(?:jarvis|jarvischat)\s*[:\-]\s*)+`)
 var channelMentionPattern = regexp.MustCompile(`<#[0-9]+>`)
 
-const (
-	webUnconfirmedEvidenceStatusSentence = "Current details could not be confirmed from usable web sources."
-	nearRateLimitSentence                = "This server is near its request limit. Replies may pause shortly."
-)
+const nearRateLimitSentence = "This server is near its request limit. Replies may pause shortly."
 
 // appendRateLimitWarning adds a subtext notice when the server is near its usage limits.
 func appendRateLimitWarning(text string, nearLimit bool) string {
@@ -29,13 +26,6 @@ func appendRateLimitWarning(text string, nearLimit bool) string {
 		return text
 	}
 	return strings.TrimSpace(text) + "\n\n-# " + rateLimitedReaction + " " + nearRateLimitSentence
-}
-
-var evidenceStatusText = map[genai.EvidenceStatus]string{
-	genai.EvidenceStatusWebUnconfirmed:     webUnconfirmedEvidenceStatusSentence,
-	genai.EvidenceStatusRuntimeUnconfirmed: "Current runtime details could not be confirmed.",
-	genai.EvidenceStatusChannelUnconfirmed: "Requested channel history could not be confirmed.",
-	genai.EvidenceStatusGeneralUnconfirmed: "Some details could not be confirmed with available evidence.",
 }
 
 func appendSources(text string, sources []genai.Source) string {
@@ -89,62 +79,6 @@ func baseDomain(raw string) string {
 	return registrableDomain
 }
 
-func appendEvidence(text string, evidence []genai.Evidence) string {
-	labels := make([]string, 0, 3)
-	seen := make(map[string]struct{}, 3)
-	for _, item := range evidence {
-		label := ""
-		switch item.Kind {
-		case genai.EvidenceKindRuntimeContext:
-			label = "runtime context"
-		case genai.EvidenceKindChannelHistory:
-			label = "channel history"
-		}
-		if label == "" {
-			continue
-		}
-		if _, ok := seen[label]; ok {
-			continue
-		}
-		seen[label] = struct{}{}
-		labels = append(labels, label)
-	}
-	if len(labels) == 0 {
-		return text
-	}
-	return strings.TrimSpace(text) + "\n\n-# Evidence used: " + strings.Join(labels, " · ")
-}
-
-// appendEvidenceStatus renders a recognized status after all provenance footers.
-func appendEvidenceStatus(text string, status genai.EvidenceStatus, sources []genai.Source) string {
-	return appendEvidenceStatuses(text, []genai.EvidenceStatus{status}, sources)
-}
-
-// appendEvidenceStatuses renders recognized statuses after all provenance footers.
-func appendEvidenceStatuses(text string, statuses []genai.EvidenceStatus, sources []genai.Source) string {
-	text = stripEvidenceStatusFooters(text)
-	seen := make(map[genai.EvidenceStatus]struct{}, len(statuses))
-	labels := make([]string, 0, len(statuses))
-	for _, status := range statuses {
-		if status == genai.EvidenceStatusWebUnconfirmed && hasRenderableSource(sources) {
-			continue
-		}
-		label, ok := evidenceStatusText[status]
-		if !ok {
-			continue
-		}
-		if _, ok := seen[status]; ok {
-			continue
-		}
-		seen[status] = struct{}{}
-		labels = append(labels, label)
-	}
-	if len(labels) == 0 {
-		return text
-	}
-	return strings.TrimSpace(text) + "\n\n-# Evidence status: " + strings.Join(labels, " ")
-}
-
 // stripEvidenceStatusFooters removes model-provided text from the reserved status line.
 func stripEvidenceStatusFooters(text string) string {
 	lines := strings.Split(text, "\n")
@@ -156,16 +90,6 @@ func stripEvidenceStatusFooters(text string) string {
 		kept = append(kept, line)
 	}
 	return strings.TrimSpace(strings.Join(kept, "\n"))
-}
-
-// hasRenderableSource reports whether Discord can display a normalized source.
-func hasRenderableSource(sources []genai.Source) bool {
-	for _, source := range sources {
-		if _, ok := formatSourceLink(source); ok {
-			return true
-		}
-	}
-	return false
 }
 
 func sanitizeContent(content, botID string) string {

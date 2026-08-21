@@ -32,9 +32,11 @@ func TestClassifyAccuracyPolicySelectsDeterministicCapabilities(t *testing.T) {
 	}
 }
 
-func TestResolveIntentRequestUsesOnlyEllipticalFollowup(t *testing.T) {
+func TestResolveIntentRequestAddsContextForEllipticalOrShortFollowups(t *testing.T) {
 	context := IntentContext{CurrentRequest: "What about 9mm?", PreviousUserRequest: "Will AR500 steel work with 7.62?"}
 	assert.Equal(t, "Previous request: Will AR500 steel work with 7.62?\nCurrent follow-up: What about 9mm?", ResolveIntentRequest(context))
+	context.CurrentRequest = "Prices"
+	assert.Equal(t, "Previous request: Will AR500 steel work with 7.62?\nCurrent follow-up: Prices", ResolveIntentRequest(context))
 	context.CurrentRequest = "What is a good 9mm price?"
 	assert.Equal(t, context.CurrentRequest, ResolveIntentRequest(context))
 }
@@ -69,4 +71,22 @@ func TestAccuracyValidationRequiresSuccessfulRuntimeEvidence(t *testing.T) {
 		"current_time": "2026-07-16T18:30:45Z", "timezone": "UTC", "current_date": "2026-07-16", "weekday": "Thursday",
 	}}}
 	assert.Empty(t, accuracyValidationFailure("It is 18:30 UTC on 2026-07-16, a Thursday.", "What time is it?", "", policy, evidence))
+	assert.Equal(t, "runtime_time_mismatch", accuracyValidationFailure("It is 19:30 UTC.", "What time is it?", "", policy, evidence))
+}
+
+// TestAccuracyValidationAllowsOtherMomentsInSchedulingAnswers is why clock values are only
+// compared to the runtime for "what time is it" requests: prod threw away "drops at 1:00 AM
+// PDT tonight" twice and posted a mutation report instead.
+func TestAccuracyValidationAllowsOtherMomentsInSchedulingAnswers(t *testing.T) {
+	policy := AccuracyPolicy{RequiredFunctionNames: []string{runtimeContextFunctionName}, RuntimeContextRelevant: true}
+	evidence := []Evidence{{Kind: EvidenceKindRuntimeContext, Attributes: map[string]string{
+		"current_time": "2026-08-17T22:11:00Z", "timezone": "UTC", "current_date": "2026-08-17", "weekday": "Monday",
+	}}}
+	assert.Empty(t, accuracyValidationFailure("The update drops at 1:00 AM PDT, so yes, you are up until 2:00 AM tonight.",
+		"so I have to stay up to 2:00 am to play the game tonight", "", policy, evidence))
+	// Echoing a value the user supplied is never a claim about now, even on a time question.
+	assert.Empty(t, accuracyValidationFailure("You said 2:00 AM; right now it is 22:11 UTC.", "What time is it? I thought 2:00 AM.", "", policy, evidence))
+	// Unsolicited claims still need the request to mention the value.
+	assert.Equal(t, "unsolicited_runtime_claim", accuracyValidationFailure("It is 3:00 PM PDT.", "what is a good hunting gun", "", AccuracyPolicy{}, nil))
+	assert.Empty(t, accuracyValidationFailure("Sure, 3:00 PM PDT works.", "can we meet at 3:00 PM PDT", "", AccuracyPolicy{}, nil))
 }

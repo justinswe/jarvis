@@ -3,92 +3,57 @@ package discord
 import (
 	"context"
 	"sync"
-
-	"github.com/justinswe/std/errors"
 )
 
-var errThreadRequestSuperseded = errors.New("thread request superseded")
-
+// threadRequestQueue serializes requests per thread in arrival order, so every message
+// gets a reply and each reply is generated with the previous one already in history.
 type threadRequestQueue struct {
 	mu      sync.Mutex
-	threads map[string]*threadQueueState
-}
-
-type threadQueueState struct {
-	active  *queuedThreadRequest
-	pending *queuedThreadRequest
+	threads map[string][]*queuedThreadRequest
 }
 
 type queuedThreadRequest struct {
 	ctx    context.Context
-	cancel context.CancelCauseFunc
 	run    func(context.Context) error
 	result chan error
 }
 
-// Run cancels active work and keeps only the latest pending request for a thread.
+// Run enqueues one request for a thread and waits for its turn and its result.
 func (q *threadRequestQueue) Run(ctx context.Context, threadID string, run func(context.Context) error) error {
-	requestCtx, cancel := context.WithCancelCause(ctx)
-	request := &queuedThreadRequest{
-		ctx: requestCtx, cancel: cancel, run: run, result: make(chan error, 1),
-	}
+	request := &queuedThreadRequest{ctx: ctx, run: run, result: make(chan error, 1)}
 
 	q.mu.Lock()
 	if q.threads == nil {
-		q.threads = make(map[string]*threadQueueState)
+		q.threads = make(map[string][]*queuedThreadRequest)
 	}
-	state, running := q.threads[threadID]
-	if !running {
-		state = &threadQueueState{}
-		q.threads[threadID] = state
-	}
-	if state.active != nil {
-		state.active.cancel(errThreadRequestSuperseded)
-	}
-	if state.pending != nil {
-		state.pending.cancel(errThreadRequestSuperseded)
-		state.pending.result <- errThreadRequestSuperseded
-	}
-	state.pending = request
+	_, running := q.threads[threadID]
+	q.threads[threadID] = append(q.threads[threadID], request)
 	q.mu.Unlock()
 
 	if !running {
-		go q.run(threadID, state)
+		go q.run(threadID)
 	}
-	err := <-request.result
-	cancel(nil)
-	return err
+	return <-request.result
 }
 
-// run processes one thread serially until its latest pending request finishes.
-func (q *threadRequestQueue) run(threadID string, state *threadQueueState) {
+// run drains one thread's queue in order until it is empty.
+func (q *threadRequestQueue) run(threadID string) {
 	for {
 		q.mu.Lock()
-		request := state.pending
-		state.pending = nil
-		state.active = request
-		q.mu.Unlock()
-
-		err := context.Cause(request.ctx)
-		if err == nil {
-			err = request.run(request.ctx)
-		}
-		if errors.Is(context.Cause(request.ctx), errThreadRequestSuperseded) {
-			err = errThreadRequestSuperseded
-		}
-		request.result <- err
-
-		q.mu.Lock()
-		state.active = nil
-		if state.pending == nil {
+		pending := q.threads[threadID]
+		if len(pending) == 0 {
 			delete(q.threads, threadID)
 			q.mu.Unlock()
 			return
 		}
+		request := pending[0]
+		q.threads[threadID] = pending[1:]
 		q.mu.Unlock()
-	}
-}
 
-func threadRequestSuperseded(ctx context.Context) bool {
-	return errors.Is(context.Cause(ctx), errThreadRequestSuperseded)
+		err := request.ctx.Err()
+		if err == nil {
+			err = request.run(request.ctx)
+		}
+		request.result <- err
+	}
 }

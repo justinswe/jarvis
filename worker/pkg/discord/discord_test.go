@@ -540,29 +540,23 @@ func TestProcessSkipsConfigurationForUntargetedMessages(t *testing.T) {
 	assert.Zero(t, provider.calls)
 }
 
-func TestProcessKeepsOnlyLatestOverlappingThreadRequest(t *testing.T) {
+func TestProcessAnswersOverlappingThreadRequestsInOrder(t *testing.T) {
 	firstStarted := make(chan struct{})
-	firstCanceled := make(chan struct{})
 	releaseFirst := make(chan struct{})
-	latestRequest := make(chan genai.GenerateRequest, 1)
-	generator := generatorFunc(func(ctx context.Context, request genai.GenerateRequest) (genai.GenerateResponse, error) {
-		switch request.RequestID {
-		case "first":
+	var generated []string
+	var generatedMu sync.Mutex
+	generator := generatorFunc(func(_ context.Context, request genai.GenerateRequest) (genai.GenerateResponse, error) {
+		generatedMu.Lock()
+		generated = append(generated, request.RequestID)
+		generatedMu.Unlock()
+		if request.RequestID == "first" {
 			close(firstStarted)
-			<-ctx.Done()
-			close(firstCanceled)
 			<-releaseFirst
-			return genai.GenerateResponse{}, ctx.Err()
-		case "latest":
-			latestRequest <- request
-			return genai.GenerateResponse{Text: "latest answer"}, nil
-		default:
-			t.Errorf("unexpected generation for %q", request.RequestID)
-			return genai.GenerateResponse{}, nil
 		}
+		return genai.GenerateResponse{Text: request.RequestID + " answer"}, nil
 	})
 
-	var sent, added, removed []string
+	var sent []string
 	var clientMu sync.Mutex
 	client := &fakeClient{
 		channel: &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread, ID: "thread", ParentID: "parent", OwnerID: "bot"},
@@ -572,55 +566,29 @@ func TestProcessKeepsOnlyLatestOverlappingThreadRequest(t *testing.T) {
 			sent = append(sent, channelID+":"+content)
 			return &discordgo.Message{}, nil
 		},
-		addReaction: func(_ context.Context, _, messageID, _ string) error {
-			clientMu.Lock()
-			defer clientMu.Unlock()
-			added = append(added, messageID)
-			return nil
-		},
-		removeReaction: func(_ context.Context, _, messageID, _, _ string) error {
-			clientMu.Lock()
-			defer clientMu.Unlock()
-			removed = append(removed, messageID)
-			return nil
-		},
 	}
-	history := &fakeHistory{messagesFunc: func(_ context.Context, _, channelID string, _ int, before string) ([]*discordgo.Message, error) {
-		if channelID == "thread" && before == "latest" {
-			return []*discordgo.Message{message("middle", "second thought"), message("first", "first thought")}, nil
-		}
-		return nil, nil
-	}}
-	processor := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t), history: history}
+	processor := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t)}
 
 	first := targetedMessage("first", "first thought")
 	first.ChannelID = "thread"
-	middle := targetedMessage("middle", "second thought")
-	middle.ChannelID = "thread"
-	latest := targetedMessage("latest", "final question")
-	latest.ChannelID = "thread"
+	second := targetedMessage("second", "second thought")
+	second.ChannelID = "thread"
 
 	firstResult := processAsync(processor, first)
 	requireReceive(t, firstStarted)
-	middleResult := processAsync(processor, middle)
-	requireReceive(t, firstCanceled)
-	latestResult := processAsync(processor, latest)
-	assert.NoError(t, requireReceive(t, middleResult))
+	secondResult := processAsync(processor, second)
+	require.Eventually(t, func() bool { return processor.threadQueue.pendingCount("thread") == 1 }, time.Second, time.Millisecond)
 
 	close(releaseFirst)
 	assert.NoError(t, requireReceive(t, firstResult))
-	request := requireReceive(t, latestRequest)
-	assert.NoError(t, requireReceive(t, latestResult))
-	require.Len(t, request.Messages, 1)
-	assert.Contains(t, request.Messages[0].Content, "first thought")
-	assert.Contains(t, request.Messages[0].Content, "second thought")
-	assert.Contains(t, request.Messages[0].Content, "CURRENT REQUEST:\nfinal question")
+	assert.NoError(t, requireReceive(t, secondResult))
 
+	generatedMu.Lock()
+	defer generatedMu.Unlock()
 	clientMu.Lock()
 	defer clientMu.Unlock()
-	assert.Equal(t, []string{"thread:latest answer"}, sent)
-	assert.Equal(t, []string{"first", "latest"}, added)
-	assert.Equal(t, []string{"first", "latest"}, removed)
+	assert.Equal(t, []string{"first", "second"}, generated)
+	assert.Equal(t, []string{"thread:first answer", "thread:second answer"}, sent)
 }
 
 func TestProcessDoesNotQueueNonThreadMessages(t *testing.T) {
@@ -774,104 +742,23 @@ func TestAppendSourcesPreservesRepeatedDomains(t *testing.T) {
 	assert.Equal(t, "answer\n\n-# Sources consulted: [1 · example.com](https://example.com/one) · [2 · example.com](https://example.com/two)", got)
 }
 
-func TestAppendEvidenceStatusesRendersBestEffortQualifications(t *testing.T) {
-	got := appendEvidenceStatuses("answer", []genai.EvidenceStatus{
-		genai.EvidenceStatusWebUnconfirmed,
-		genai.EvidenceStatusWebUnconfirmed,
-	}, nil)
-	assert.Equal(t, "answer\n\n-# Evidence status: Current details could not be confirmed from usable web sources.", got)
-}
-
-func TestAppendEvidenceUsesCompactNonWebFooter(t *testing.T) {
-	got := appendEvidence("answer", []genai.Evidence{
-		{Kind: genai.EvidenceKindRuntimeContext},
-		{Kind: genai.EvidenceKindWeb},
-		{Kind: genai.EvidenceKindChannelHistory},
-		{Kind: genai.EvidenceKindRuntimeContext},
-	})
-	assert.Equal(t, "answer\n\n-# Evidence used: runtime context · channel history", got)
-}
-
-func TestAppendEvidenceStatusUsesOnlyRecognizedApplicationText(t *testing.T) {
-	t.Run("exact footer and single rendering", func(t *testing.T) {
-		got := appendEvidenceStatus(
-			"answer\n\n-# Evidence status: model-provided text",
-			genai.EvidenceStatusWebUnconfirmed,
-			nil,
-		)
-		assert.Equal(t, "answer\n\n-# Evidence status: Current details could not be confirmed from usable web sources.", got)
-		assert.Equal(t, 1, strings.Count(got, "-# Evidence status:"))
-	})
-
-	t.Run("unknown status", func(t *testing.T) {
-		got := appendEvidenceStatus(
-			"answer\n\n-# Evidence status: arbitrary text",
-			genai.EvidenceStatus("future-status"),
-			nil,
-		)
-		assert.Equal(t, "answer", got)
-	})
-
-	t.Run("usable source suppresses unconfirmed status", func(t *testing.T) {
-		sources := []genai.Source{{URL: "https://example.com/article"}}
-		got := appendSources("answer", sources)
-		got = appendEvidence(got, []genai.Evidence{{Kind: genai.EvidenceKindRuntimeContext}})
-		got = appendEvidenceStatus(got, genai.EvidenceStatusWebUnconfirmed, sources)
-		assert.Equal(t, "answer\n\n-# Sources consulted: [1 · example.com](https://example.com/article)\n\n-# Evidence used: runtime context", got)
-		assert.NotContains(t, got, "Evidence status")
-	})
-}
-
-func TestProcessRendersEvidenceStatusAfterRuntimeEvidence(t *testing.T) {
+// TestProcessRendersNoEvidenceFooters pins the decision to keep provenance telemetry out
+// of user-facing replies: only Sources survive as a footer.
+func TestProcessRendersNoEvidenceFooters(t *testing.T) {
 	var sent string
 	client := &fakeClient{sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
 		sent = content
 		return &discordgo.Message{}, nil
 	}}
 	generator := &fakeGenerator{response: genai.GenerateResponse{
-		Text:           "answer",
+		Text:           "answer\n\n-# Evidence status: model-invented line",
 		Evidence:       []genai.Evidence{{Kind: genai.EvidenceKindRuntimeContext}},
 		EvidenceStatus: genai.EvidenceStatusWebUnconfirmed,
+		Sources:        []genai.Source{{URL: "https://example.com/a"}},
 	}}
 	p := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t)}
 	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "What changed today?")))
-	assert.Equal(t, "answer\n\n-# Evidence used: runtime context\n\n-# Evidence status: Current details could not be confirmed from usable web sources.", sent)
-}
-
-func TestProcessPlacesEvidenceStatusOnFinalMessageChunk(t *testing.T) {
-	var sent []string
-	client := &fakeClient{
-		channel: &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread},
-		sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
-			sent = append(sent, content)
-			return &discordgo.Message{}, nil
-		},
-	}
-	generator := &fakeGenerator{response: genai.GenerateResponse{
-		Text:           strings.Repeat("a", 1980),
-		Evidence:       []genai.Evidence{{Kind: genai.EvidenceKindRuntimeContext}},
-		EvidenceStatus: genai.EvidenceStatusWebUnconfirmed,
-	}}
-	p := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t)}
-	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "What changed today?")))
-	require.Len(t, sent, 2)
-	assert.NotContains(t, sent[0], "Evidence status")
-	assert.Contains(t, sent[1], "-# Evidence used: runtime context")
-	assert.True(t, strings.HasSuffix(sent[1], "-# Evidence status: "+webUnconfirmedEvidenceStatusSentence))
-}
-
-func TestProcessPersistsEvidenceFooterInDiscordReply(t *testing.T) {
-	var sent string
-	client := &fakeClient{sendMessage: func(_ context.Context, _ string, content string) (*discordgo.Message, error) {
-		sent = content
-		return &discordgo.Message{}, nil
-	}}
-	generator := &fakeGenerator{response: genai.GenerateResponse{Text: "18:30 UTC", Evidence: []genai.Evidence{
-		{Kind: genai.EvidenceKindRuntimeContext}, {Kind: genai.EvidenceKindWeb},
-	}}}
-	p := &Processor{botID: "bot", generator: generator, client: client, configs: testProvider(t)}
-	require.NoError(t, p.Process(context.Background(), targetedMessage("m", "What time is it?")))
-	assert.Equal(t, "18:30 UTC\n\n-# Evidence used: runtime context", sent)
+	assert.Equal(t, "answer\n\n-# Sources consulted: [1 · example.com](https://example.com/a)", sent)
 }
 
 func TestSplitMessageForDiscord(t *testing.T) {

@@ -557,7 +557,7 @@ func TestNeutralOrchestrationNeverReportsFailedMutationAsSuccessful(t *testing.T
 		Config: &RequestConfig{MaxOutputTokens: 256},
 	})
 	require.NoError(t, err)
-	assert.Contains(t, got.Text, "Could not complete 1 logical mutation call(s) using `mutate`")
+	assert.Contains(t, got.Text, "I couldn't finish that (`mutate`), so nothing was changed.")
 	assert.NotContains(t, got.Text, "updated successfully")
 }
 
