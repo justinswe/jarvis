@@ -91,3 +91,24 @@ func TestRecordToleratesAnUnavailableStore(t *testing.T) {
 	nothing := &Processor{}
 	assert.NotPanics(t, func() { nothing.record(t.Context(), 14, &discordgo.Message{ID: "1"}) })
 }
+
+// TestStampGuildFillsTheSendResponseGap exists because Discord's send response omits the
+// guild, and stored history is read by guild: an unstamped reply is invisible to the model.
+func TestStampGuildFillsTheSendResponseGap(t *testing.T) {
+	sent := stampGuild("g", []*discordgo.Message{{ID: "1"}, nil, {ID: "2", GuildID: "other"}})
+
+	assert.Equal(t, "g", sent[0].GuildID)
+	assert.Equal(t, "other", sent[2].GuildID)
+}
+
+func TestWithAttachmentNoteNamesImageOnlyPosts(t *testing.T) {
+	image := &discordgo.Message{Attachments: []*discordgo.MessageAttachment{
+		{Filename: "a.png", ContentType: "image/png"}, {Filename: "n.txt", ContentType: "text/plain"},
+	}}
+	assert.Equal(t, "[image: a.png]", withAttachmentNote(image).Content)
+	assert.Empty(t, image.Content, "the original message is never mutated")
+
+	text := &discordgo.Message{Content: "hi", Attachments: image.Attachments}
+	assert.Same(t, text, withAttachmentNote(text))
+	assert.Empty(t, withAttachmentNote(&discordgo.Message{}).Content)
+}

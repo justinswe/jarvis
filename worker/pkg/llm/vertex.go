@@ -189,6 +189,7 @@ func (h *googleGenAIHost) Generate(ctx context.Context, request Request) (Respon
 	}
 	response, err := h.generate(ctx, request.Profile.ModelID, contents, config)
 	if err != nil {
+		logProbeFailure(h.provider, request.Profile.ModelID, "generate", err)
 		return Response{}, classifyGoogleGenAIError(h.provider, err)
 	}
 	return googleGenAIResponse(response, request.Profile, h.provider, h.continuationFormat)
@@ -379,7 +380,7 @@ func classifyGoogleGenAIError(provider Provider, err error) error {
 	return transportError(provider, err)
 }
 
-// logProbeFailure records the unsanitized provider rejection for one startup probe step.
+// logProbeFailure records the unsanitized provider rejection for one probe step or generate call.
 //
 // Probe failures are sanitized at the error boundary, which hides the provider message that
 // explains why a working model was rejected. Operators recover it with --log-level=-1.

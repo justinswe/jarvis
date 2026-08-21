@@ -312,9 +312,9 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 }
 
 // webSearchTool adapts handler-owned web research into a FunctionTool so the agent
-// loop treats search_web uniformly with every other function call. The application
-// owns the query; the model's arguments are ignored, and repeat calls are served from
-// the read-only result cache.
+// loop treats search_web uniformly with every other function call. The model may supply
+// a query; otherwise the application's request-derived query is used, and repeat calls
+// with the same query are served from the read-only result cache.
 type webSearchTool struct {
 	handler *Handler
 	request GenerateRequest
@@ -329,9 +329,31 @@ func (t *webSearchTool) Declaration() *llm.ToolDefinition {
 	return &definition
 }
 
-func (t *webSearchTool) Execute(ctx context.Context, _ map[string]any) (any, error) {
-	t.handler.runWebSearch(ctx, t.request, t.query, t.state)
+func (t *webSearchTool) Execute(ctx context.Context, args map[string]any) (any, error) {
+	query := modelSearchQuery(args, t.query)
+	if query != t.query && t.state.attempted {
+		// The request-derived pre-search already ran; a sharper model query gets its own
+		// call, and it replaces the cached results only when it finds sources.
+		fresh := &searchState{}
+		t.handler.runWebSearch(ctx, t.request, query, fresh)
+		if fresh.sourceAvailable() {
+			*t.state = *fresh
+		}
+		return normalizedSearchOutput(*t.state), nil
+	}
+	t.query = query
+	t.handler.runWebSearch(ctx, t.request, query, t.state)
 	return normalizedSearchOutput(*t.state), nil
+}
+
+// modelSearchQuery returns the model's query when it supplied a usable one.
+func modelSearchQuery(args map[string]any, fallback string) string {
+	query, _ := args["query"].(string)
+	query = sanitizeText(query)
+	if query == "" || len([]rune(query)) > maxResolvedIntentRunes {
+		return fallback
+	}
+	return query
 }
 
 // runRequiredFunctionRounds forces each policy-required function with a dedicated
@@ -1211,12 +1233,12 @@ func mutationOutcomes(records []portableToolRecord) (int, int, []string) {
 func mutationReportSentence(succeeded, failed int, names []string) string {
 	label := strings.Join(names, ", ")
 	if succeeded > 0 && failed > 0 {
-		return fmt.Sprintf("Completed %d logical mutation call(s) using %s; %d different logical mutation call(s) failed. No failed change was reported as successful.", succeeded, label, failed)
+		return fmt.Sprintf("I got %d of that done (%s), but %d part(s) didn't go through, so don't count on those.", succeeded, label, failed)
 	}
 	if succeeded > 0 {
-		return fmt.Sprintf("Completed %d logical mutation call(s) using %s. The action succeeded, but the model could not generate its final explanation.", succeeded, label)
+		return fmt.Sprintf("Done (%s) — though I lost my train of thought writing the reply. %d change(s) went through.", label, succeeded)
 	}
-	return fmt.Sprintf("Could not complete %d logical mutation call(s) using %s. No uncompleted change has been reported as successful.", failed, label)
+	return fmt.Sprintf("I couldn't finish that (%s), so nothing was changed. %d attempt(s) failed.", label, failed)
 }
 
 func failedToolReport(records []portableToolRecord) string {
@@ -1243,7 +1265,7 @@ func failedToolReport(records []portableToolRecord) string {
 	if len(names) == 0 {
 		return ""
 	}
-	return "Could not complete " + strings.Join(names, ", ") + ". The requested result remains unconfirmed."
+	return "I couldn't get what I needed from " + strings.Join(names, ", ") + ", so I can't give you a straight answer on that one."
 }
 
 // recoveredMutationNames reports mutation tools that succeeded at least once, keyed by
@@ -1430,9 +1452,11 @@ func searchCallOutcome(call searchCall) string {
 func searchToolDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        webSearchFunctionName,
-		Description: "Search the public web for the user's original request. The application owns the query and returns normalized sources.",
-		InputSchema: llm.JSONSchema{"type": "object", "properties": map[string]any{}},
-		Effect:      llm.ToolEffectReadOnly,
+		Description: "Search the public web and return normalized sources. Supply a specific query that resolves pronouns and short follow-ups from the conversation; omit it to search the user's request as written.",
+		InputSchema: llm.JSONSchema{"type": "object", "properties": map[string]any{
+			"query": map[string]any{"type": "string", "description": "Optional search query, at most 500 characters."},
+		}},
+		Effect: llm.ToolEffectReadOnly,
 	}
 }
 
@@ -1462,9 +1486,9 @@ func webSearchPresentationFallback(state searchState) string {
 		return webSearchDisabledFallback
 	}
 	if state.sourceAvailable() {
-		return "I found usable web sources, but I couldn't produce a reliable current summary from them."
+		return "I found some sources on that but couldn't pull a reliable answer together. Want to narrow it down?"
 	}
-	return "I couldn't confirm current details from usable web sources. I can still help with stable background or narrow the question."
+	return "I couldn't find anything current on that. I can cover the background, or you can point me somewhere more specific."
 }
 
 func (h *Handler) finalizeNeutral(text string, evidence []Evidence, search searchState, webSearchEnabled bool, policy AccuracyPolicy) GenerateResponse {

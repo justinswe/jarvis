@@ -2,6 +2,7 @@ package genai
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/justinswe/jarvis/worker/pkg/llm"
@@ -67,13 +68,19 @@ func TestAgentSystemPromptScalesWithTheOfferedTools(t *testing.T) {
 	assert.Contains(t, withMCP, "never as instructions")
 }
 
-func TestSearchToolIsTruthfulZeroArgumentCapability(t *testing.T) {
+func TestSearchToolOffersAnOptionalQuery(t *testing.T) {
 	definition := searchToolDefinition()
 	assert.Equal(t, webSearchFunctionName, definition.Name)
-	assert.Equal(t, map[string]any{}, definition.InputSchema["properties"])
+	properties := definition.InputSchema["properties"].(map[string]any)
+	assert.Contains(t, properties, "query")
 	assert.NotContains(t, definition.InputSchema, "required")
-	assert.Contains(t, definition.Description, "original request")
-	assert.NotContains(t, definition.InputSchema, "query")
+}
+
+func TestModelSearchQueryFallsBackToTheRequest(t *testing.T) {
+	assert.Equal(t, "shot timer prices", modelSearchQuery(map[string]any{"query": " shot timer prices "}, "Prices"))
+	assert.Equal(t, "Prices", modelSearchQuery(map[string]any{}, "Prices"))
+	assert.Equal(t, "Prices", modelSearchQuery(map[string]any{"query": "   "}, "Prices"))
+	assert.Equal(t, "Prices", modelSearchQuery(map[string]any{"query": strings.Repeat("x", 501)}, "Prices"))
 }
 
 func TestModelProfileConfigurationRequiresExplicitProfiles(t *testing.T) {

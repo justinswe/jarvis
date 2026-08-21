@@ -159,10 +159,21 @@ func (p *Pipeline) summarize(guildID, channelID string, characterID int64, tier 
 		}
 		return
 	}
-	extraction, usage, err := p.extract(ctx, transcript(messages))
+	newLastID := snowflakeID(messages[len(messages)-1].ID)
+	text := transcript(messages)
+	if strings.TrimSpace(text) == "" {
+		// Nothing but image-only or blank posts; a zero-text request is rejected upstream.
+		p.skipRange(ctx, channelID, characterID, newLastID, "blank transcript")
+		return
+	}
+	extraction, usage, err := p.extract(ctx, text)
 	p.recordUsage(guildID, tier, usage)
 	if err != nil {
 		app.L().Warn("Memory extraction failed", zap.String("channel_id", channelID), zap.Error(err))
+		if permanentProviderRejection(err) {
+			// A permanent rejection would otherwise be retried on every tick forever.
+			p.skipRange(ctx, channelID, characterID, newLastID, "non-retryable extraction error")
+		}
 		return
 	}
 	records := extraction.records(guildID, channelID, characterID, messages)
@@ -170,7 +181,6 @@ func (p *Pipeline) summarize(guildID, channelID string, characterID int64, tier 
 		app.L().Warn("Memory embedding failed; storing records for full-text retrieval",
 			zap.String("channel_id", channelID), zap.Error(err))
 	}
-	newLastID := snowflakeID(messages[len(messages)-1].ID)
 	if err := p.cfg.Store.CommitMemory(ctx, channelID, characterID, newLastID, records); err != nil {
 		app.L().Warn("Memory commit failed", zap.String("channel_id", channelID), zap.Error(err))
 		return
@@ -180,19 +190,24 @@ func (p *Pipeline) summarize(guildID, channelID string, characterID int64, tier 
 	p.consolidate(ctx, guildID, characterID, tier)
 }
 
+// permanentProviderRejection reports a provider error that no retry will change.
+func permanentProviderRejection(err error) bool {
+	var modelErr *llm.Error
+	return errors.As(err, &modelErr) && !modelErr.Retryable()
+}
+
+// skipRange advances the watermark past a range that can never summarize.
+func (p *Pipeline) skipRange(ctx context.Context, channelID string, characterID, lastID int64, reason string) {
+	app.L().Warn("Memory range skipped", zap.String("channel_id", channelID), zap.String("reason", reason))
+	if err := p.cfg.Store.CommitMemory(ctx, channelID, characterID, lastID, nil); err != nil {
+		app.L().Warn("Memory watermark advance failed", zap.String("channel_id", channelID), zap.Error(err))
+	}
+}
+
 // Retrieve returns the rendered memory block for prompt injection, empty when the scope
 // has no records. Failures degrade to no memory, never to a failed reply.
 func (p *Pipeline) Retrieve(ctx context.Context, guildID string, characterID int64, query string, budgetRunes int) string {
-	var embedding []float32
-	if p.cfg.Embedder != nil {
-		vectors, err := p.cfg.Embedder.Embed(ctx, []string{truncateRunes(query, 2000)})
-		if err != nil || len(vectors) != 1 {
-			app.L().Warn("Memory query embedding failed; falling back to full-text", zap.Error(err))
-		} else {
-			embedding = vectors[0]
-		}
-	}
-	records, err := p.cfg.Store.SearchMemory(ctx, guildID, characterID, embedding, query, 8)
+	records, err := p.cfg.Store.SearchMemory(ctx, guildID, characterID, p.embedOne(ctx, query), query, 8)
 	if err != nil {
 		if !errors.Is(err, store.ErrMemoryUnavailable) {
 			app.L().Warn("Memory retrieval failed", zap.String("guild_id", guildID), zap.Error(err))
@@ -312,9 +327,9 @@ func (p *Pipeline) Add(ctx context.Context, guildID string, characterID int64, c
 	})
 }
 
-// embedOne embeds one text, degrading to no vector on any failure.
+// embedOne embeds one text, degrading to no vector on blank input or any failure.
 func (p *Pipeline) embedOne(ctx context.Context, text string) []float32 {
-	if p.cfg.Embedder == nil {
+	if p.cfg.Embedder == nil || strings.TrimSpace(text) == "" {
 		return nil
 	}
 	vectors, err := p.cfg.Embedder.Embed(ctx, []string{truncateRunes(text, 2000)})

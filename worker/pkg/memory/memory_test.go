@@ -10,6 +10,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/jarvis/store"
 	"github.com/justinswe/jarvis/worker/pkg/llm"
+	"github.com/justinswe/std/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -213,6 +214,48 @@ func TestSummarizeExtractionFailureAbandonsClaim(t *testing.T) {
 	p.summarize("100", "555", 7, "")
 	assert.Empty(t, fake.records, "unparseable extraction stores nothing")
 	assert.Equal(t, int64(0), fake.lastMessageID, "watermark never advances past unsummarized turns")
+}
+
+type failingHost struct{ err error }
+
+func (h failingHost) Generate(context.Context, llm.Request) (llm.Response, error) {
+	return llm.Response{}, h.err
+}
+
+// TestSummarizeSkipsRangesThatCanNeverSummarize is why a permanent rejection advances the
+// watermark: prod retried one image-only window every ten minutes for three days.
+func TestSummarizeSkipsRangesThatCanNeverSummarize(t *testing.T) {
+	t.Run("blank transcript", func(t *testing.T) {
+		fake := &fakeMemoryStore{messages: []*discordgo.Message{storedMessage(101, "justin", ""), storedMessage(102, "Elyra", "  ")}}
+		p := New(Config{Store: fake, Registry: testRegistry(t, failingHost{err: errors.New("must not be called")})})
+
+		p.summarize("100", "555", 7, "")
+		assert.Empty(t, fake.records)
+		assert.Equal(t, int64(102), fake.lastMessageID)
+	})
+	t.Run("non-retryable provider error", func(t *testing.T) {
+		fake := testStoreWithMessages()
+		p := New(Config{Store: fake, Registry: testRegistry(t, failingHost{err: &llm.Error{Kind: llm.ErrorInvalidRequest}})})
+
+		p.summarize("100", "555", 7, "")
+		assert.Empty(t, fake.records)
+		assert.Equal(t, int64(102), fake.lastMessageID)
+	})
+	t.Run("retryable provider error keeps the range", func(t *testing.T) {
+		fake := testStoreWithMessages()
+		p := New(Config{Store: fake, Registry: testRegistry(t, failingHost{err: &llm.Error{Kind: llm.ErrorTimeout}})})
+
+		p.summarize("100", "555", 7, "")
+		assert.Equal(t, int64(0), fake.lastMessageID)
+	})
+}
+
+func TestRetrieveSkipsEmbeddingBlankQueries(t *testing.T) {
+	embedder := &fakeEmbedder{}
+	p := New(Config{Store: &fakeMemoryStore{}, Registry: testRegistry(t, extractorHost{}), Embedder: embedder})
+
+	p.Retrieve(context.Background(), "100", 7, "  ", 3000)
+	assert.Zero(t, embedder.calls)
 }
 
 func TestRetrieveRendersBudgetedBlock(t *testing.T) {
