@@ -29,7 +29,8 @@ func postgresStore(t *testing.T) *Store {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	_, err = s.db.Exec(`TRUNCATE tiers, accounts, account_guilds, subscriptions,
-		guild_configs, guild_admins, guild_mcp_servers, messages, reply_claims CASCADE`)
+		guild_configs, guild_admins, guild_mcp_servers, messages, request_outcomes,
+		reply_claims, memory_records, memory_watermarks CASCADE`)
 	require.NoError(t, err)
 	return s
 }

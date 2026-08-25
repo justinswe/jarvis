@@ -120,7 +120,7 @@ func (t memoryTool) Execute(ctx context.Context, args map[string]any) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		records, err := p.memory.List(ctx, m.GuildID, scope, 100)
+		records, err := p.memory.List(ctx, m.GuildID, m.ChannelID, scope, 100)
 		if err != nil {
 			return nil, memoryFailure(err)
 		}
@@ -140,7 +140,7 @@ func (t memoryTool) Execute(ctx context.Context, args map[string]any) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		if err := p.memory.Pin(ctx, m.GuildID, id, t.action == pinMemoryToolName); err != nil {
+		if err := p.memory.Pin(ctx, m.GuildID, m.ChannelID, id, t.action == pinMemoryToolName); err != nil {
 			return nil, memoryFailure(err)
 		}
 		return map[string]any{"status": "updated", "id": id}, nil
@@ -156,7 +156,7 @@ func (t memoryTool) Execute(ctx context.Context, args map[string]any) (any, erro
 		if strings.TrimSpace(content) == "" {
 			return nil, genai.NewExecutionError("invalid_memory", "content must be a non-empty string", nil)
 		}
-		if err := p.memory.Edit(ctx, m.GuildID, id, content); err != nil {
+		if err := p.memory.Edit(ctx, m.GuildID, m.ChannelID, id, content); err != nil {
 			return nil, memoryFailure(err)
 		}
 		return map[string]any{"status": "updated", "id": id}, nil
@@ -168,7 +168,7 @@ func (t memoryTool) Execute(ctx context.Context, args map[string]any) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		if err := p.memory.Delete(ctx, m.GuildID, id); err != nil {
+		if err := p.memory.Delete(ctx, m.GuildID, m.ChannelID, id); err != nil {
 			return nil, memoryFailure(err)
 		}
 		return map[string]any{"status": "deleted", "id": id}, nil
@@ -185,7 +185,7 @@ func (t memoryTool) Execute(ctx context.Context, args map[string]any) (any, erro
 			return nil, genai.NewExecutionError("invalid_memory", "content must be a non-empty string", nil)
 		}
 		pinned, _ := args["pinned"].(bool)
-		if err := p.memory.Add(ctx, m.GuildID, scope, content, pinned); err != nil {
+		if err := p.memory.Add(ctx, m.GuildID, m.ChannelID, m.Author.ID, scope, content, pinned); err != nil {
 			return nil, memoryFailure(err)
 		}
 		return map[string]any{"status": "stored"}, nil

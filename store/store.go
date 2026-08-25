@@ -181,8 +181,8 @@ func (s *Store) sweepLoop(interval time.Duration) {
 	}
 }
 
-// sweepOnce deletes expired messages in bounded batches, then lapsed reply claims. The
-// read side already filters expired rows, so a failed sweep costs disk, never correctness.
+// sweepOnce deletes expired messages, outcomes, and memory in bounded batches, then
+// lapsed reply claims. Reads already filter expiry, so a failed sweep costs disk only.
 func (s *Store) sweepOnce(ctx context.Context) error {
 	for {
 		result, err := s.db.ExecContext(ctx, s.q(`
@@ -198,6 +198,40 @@ func (s *Store) sweepOnce(ctx context.Context) error {
 		}
 		if deleted < sweepBatch {
 			break
+		}
+	}
+	for {
+		result, err := s.db.ExecContext(ctx, s.q(`
+			DELETE FROM request_outcomes WHERE (channel_id, message_id) IN
+			(SELECT channel_id, message_id FROM request_outcomes WHERE expires_at <= @now LIMIT ?)`),
+			sweepBatch)
+		if err != nil {
+			return errors.Wrap(err, "delete expired request outcomes")
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return errors.Wrap(err, "count expired request outcomes")
+		}
+		if deleted < sweepBatch {
+			break
+		}
+	}
+	if s.d.postgres {
+		for {
+			result, err := s.db.ExecContext(ctx, `
+				DELETE FROM memory_records WHERE id IN
+				(SELECT id FROM memory_records WHERE expires_at <> 0
+					AND expires_at <= extract(epoch from now())::bigint AND pinned = 0 LIMIT $1)`, sweepBatch)
+			if err != nil {
+				return errors.Wrap(err, "delete expired memory records")
+			}
+			deleted, err := result.RowsAffected()
+			if err != nil {
+				return errors.Wrap(err, "count expired memory records")
+			}
+			if deleted < sweepBatch {
+				break
+			}
 		}
 	}
 	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM reply_claims WHERE expires_at <= @now`))

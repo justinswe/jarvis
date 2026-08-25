@@ -33,6 +33,7 @@ go_test(
         "//store",
         "//worker/pkg/llm",
         "@com_github_bwmarrin_discordgo//:discordgo",
+        "@com_github_justinswe_std//errors",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],

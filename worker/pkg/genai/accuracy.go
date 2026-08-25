@@ -304,20 +304,24 @@ func requiresTimezoneClarification(request string, policy AccuracyPolicy) bool {
 }
 
 func historicalContext(messages []Message) string {
-	request := currentRequest(messages)
-	for i := len(messages) - 1; i >= 0; i-- {
-		if !strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
-			continue
+	var history []string
+	for i, message := range messages {
+		content := sanitizeText(message.Content)
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			if index := strings.LastIndex(content, "CURRENT REQUEST:\n"); index >= 0 {
+				if prefix := strings.TrimSpace(content[:index]); prefix != "" {
+					history = append(history, prefix)
+				}
+				if i == len(messages)-1 {
+					continue
+				}
+			}
 		}
-		content := sanitizeText(messages[i].Content)
-		if index := strings.LastIndex(content, "CURRENT REQUEST:\n"); index >= 0 {
-			return strings.TrimSpace(content[:index])
-		}
-		if content == request {
-			return ""
+		if i < len(messages)-1 && content != "" {
+			history = append(history, content)
 		}
 	}
-	return ""
+	return strings.Join(history, "\n")
 }
 
 func accuracyValidationFailure(text, request, history string, policy AccuracyPolicy, evidence []Evidence) string {

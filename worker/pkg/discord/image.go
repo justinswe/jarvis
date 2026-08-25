@@ -1,7 +1,10 @@
 package discord
 
 import (
+	"bytes"
 	"context"
+	"image/gif"
+	"image/png"
 	"io"
 	"mime"
 	"net/http"
@@ -20,7 +23,7 @@ import (
 const maxImageBytes = 7_000_000
 
 var supportedImageTypes = map[string]struct{}{
-	"image/png": {}, "image/jpeg": {}, "image/webp": {}, "image/heic": {}, "image/heif": {},
+	"image/png": {}, "image/jpeg": {}, "image/webp": {}, "image/heic": {}, "image/heif": {}, "image/gif": {},
 }
 
 func newImageHTTPClient() *http.Client {
@@ -57,15 +60,13 @@ func (p *Processor) currentImage(ctx context.Context, attachments []*discordgo.M
 	var selected *discordgo.MessageAttachment
 	var additional *discordgo.MessageAttachment
 	for _, attachment := range attachments {
-		if attachment == nil {
+		if !imageAttachmentCandidate(attachment) {
 			continue
 		}
-		if _, ok := supportedImageTypes[normalizedMIME(attachment.ContentType)]; ok {
-			if selected == nil {
-				selected = attachment
-			} else if additional == nil {
-				additional = attachment
-			}
+		if selected == nil {
+			selected = attachment
+		} else if additional == nil {
+			additional = attachment
 		}
 	}
 	if selected == nil {
@@ -81,6 +82,24 @@ func (p *Processor) currentImage(ctx context.Context, attachments []*discordgo.M
 		return image, imageNotice(additional, "one_image_limit")
 	}
 	return image, ""
+}
+
+func imageAttachmentCandidate(attachment *discordgo.MessageAttachment) bool {
+	if attachment == nil {
+		return false
+	}
+	if _, ok := supportedImageTypes[normalizedMIME(attachment.ContentType)]; ok {
+		return true
+	}
+	if attachment.Width > 0 && attachment.Height > 0 {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(attachment.Filename)) {
+	case ".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".gif":
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Processor) downloadImage(ctx context.Context, attachment *discordgo.MessageAttachment) (*genai.Image, string) {
@@ -116,10 +135,6 @@ func (p *Processor) downloadImage(ctx context.Context, attachment *discordgo.Mes
 	if response.ContentLength > maxImageBytes {
 		return nil, "declared_size_exceeded"
 	}
-	contentType := normalizedMIME(response.Header.Get("Content-Type"))
-	if _, ok := supportedImageTypes[contentType]; !ok || contentType != normalizedMIME(attachment.ContentType) {
-		return nil, "mime_mismatch"
-	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxImageBytes+1))
 	if err != nil {
 		return nil, "download_failed"
@@ -127,7 +142,136 @@ func (p *Processor) downloadImage(ctx context.Context, attachment *discordgo.Mes
 	if len(data) > maxImageBytes {
 		return nil, "streamed_size_exceeded"
 	}
+	contentType := sniffImageMIME(data)
+	if _, ok := supportedImageTypes[contentType]; !ok {
+		return nil, "mime_mismatch"
+	}
+	if contentType == "image/gif" {
+		data, err = firstGIFFrame(data)
+		if err != nil {
+			return nil, "decode_failed"
+		}
+		contentType = "image/png"
+	}
 	return &genai.Image{Data: data, MIMEType: contentType}, ""
+}
+
+func sniffImageMIME(data []byte) string {
+	detected := normalizedMIME(http.DetectContentType(data))
+	if _, ok := supportedImageTypes[detected]; ok {
+		return detected
+	}
+	if len(data) >= 12 && string(data[4:8]) == "ftyp" {
+		switch string(data[8:12]) {
+		case "heic", "heix", "hevc", "hevx":
+			return "image/heic"
+		case "mif1", "msf1":
+			return "image/heif"
+		}
+	}
+	return ""
+}
+
+func firstGIFFrame(data []byte) ([]byte, error) {
+	frame, err := gif.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	var converted bytes.Buffer
+	if err := png.Encode(&converted, frame); err != nil {
+		return nil, err
+	}
+	return converted.Bytes(), nil
+}
+
+func visualFollowup(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || len(strings.Fields(lower)) > 16 {
+		return false
+	}
+	for _, phrase := range []string{
+		"this image", "that image", "the image", "this photo", "that photo", "the photo",
+		"this picture", "that picture", "the picture", "what it says", "what does it say",
+		"read it", "where is this", "where was this", "what is this", "what's this",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func imageResearchRequested(text string) bool {
+	lower := strings.ToLower(text)
+	for _, phrase := range []string{"search", "look up", "verify", "identify", "where is", "where was", "price", "cost", "buy"} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Processor) previousImage(ctx context.Context, current *discordgo.Message, sections []contextSection) (*genai.Image, string) {
+	for _, candidate := range priorImageCandidates(current, sections) {
+		message := candidate
+		if len(message.Attachments) == 0 && strings.Contains(message.Content, "[image:") {
+			fetched, err := p.client.Message(ctx, message.ChannelID, message.ID)
+			if err != nil || fetched == nil {
+				return nil, "IMAGE ATTACHMENT NOTICE: The previous image is no longer available. Ask the user to attach it again."
+			}
+			message = fetched
+		}
+		if len(message.Attachments) == 0 {
+			continue
+		}
+		return p.currentImage(ctx, message.Attachments)
+	}
+	return nil, ""
+}
+
+func priorImageCandidates(current *discordgo.Message, sections []contextSection) []*discordgo.Message {
+	seen := make(map[string]struct{})
+	var candidates []*discordgo.Message
+	add := func(message *discordgo.Message) {
+		if message == nil || message.ID == "" || message.ChannelID == "" {
+			return
+		}
+		if _, ok := seen[message.ID]; ok {
+			return
+		}
+		seen[message.ID] = struct{}{}
+		candidates = append(candidates, message)
+	}
+	if current != nil && current.MessageReference != nil {
+		found := false
+		for _, section := range sections {
+			for _, message := range section.messages {
+				if message != nil && message.ID == current.MessageReference.MessageID {
+					add(message)
+					found = true
+				}
+			}
+		}
+		if !found {
+			channelID := current.MessageReference.ChannelID
+			if channelID == "" {
+				channelID = current.ChannelID
+			}
+			add(&discordgo.Message{ID: current.MessageReference.MessageID, ChannelID: channelID, Content: "[image: referenced attachment]"})
+		}
+	}
+	for _, section := range sections {
+		if section.label == "PARENT CHANNEL" {
+			continue
+		}
+		for i := len(section.messages) - 1; i >= 0; i-- {
+			message := section.messages[i]
+			if message != nil && (len(message.Attachments) > 0 || strings.Contains(message.Content, "[image:")) {
+				add(message)
+			}
+		}
+	}
+	return candidates
 }
 
 func normalizedMIME(value string) string {

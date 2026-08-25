@@ -40,6 +40,12 @@ type Recorder interface {
 	Record(ctx context.Context, message *discordgo.Message, retentionDays int) error
 }
 
+// OutcomeRecorder persists terminal request metadata without conversation content.
+type OutcomeRecorder interface {
+	StartRequest(ctx context.Context, guildID, channelID, messageID string, retentionDays int) error
+	FinishRequest(ctx context.Context, outcome store.RequestOutcome) error
+}
+
 // Admission is the outcome of one guild rate-limit check.
 type Admission struct {
 	Allowed    bool
@@ -63,6 +69,7 @@ type Limiter interface {
 // the reply exists, past any copy that could still arrive.
 type ReplyClaimer interface {
 	ClaimReply(ctx context.Context, channelID, messageID string) (bool, error)
+	RenewReply(ctx context.Context, channelID, messageID string) error
 	HoldReply(ctx context.Context, channelID, messageID string) error
 }
 
@@ -70,12 +77,12 @@ type ReplyClaimer interface {
 // Implemented by *memory.Pipeline.
 type MemoryEngine interface {
 	NoteTurn(ctx context.Context, turn memory.Turn)
-	Retrieve(ctx context.Context, guildID string, characterID int64, query string, budgetRunes int) string
-	List(ctx context.Context, guildID string, characterID int64, limit int) ([]store.MemoryRecord, error)
-	Pin(ctx context.Context, guildID string, id int64, pinned bool) error
-	Edit(ctx context.Context, guildID string, id int64, content string) error
-	Delete(ctx context.Context, guildID string, id int64) error
-	Add(ctx context.Context, guildID string, characterID int64, content string, pinned bool) error
+	Retrieve(ctx context.Context, guildID, channelID, callerID string, characterID int64, query string, budgetRunes int) string
+	List(ctx context.Context, guildID, channelID string, characterID int64, limit int) ([]store.MemoryRecord, error)
+	Pin(ctx context.Context, guildID, channelID string, id int64, pinned bool) error
+	Edit(ctx context.Context, guildID, channelID string, id int64, content string) error
+	Delete(ctx context.Context, guildID, channelID string, id int64) error
+	Add(ctx context.Context, guildID, channelID, subjectUserID string, characterID int64, content string, pinned bool) error
 }
 
 // Client contains the Discord REST operations used while processing a message.
@@ -108,9 +115,13 @@ type Processor struct {
 	limiter            Limiter
 	// recorder is nil when no store is configured; messages then simply are not kept.
 	recorder Recorder
+	outcomes OutcomeRecorder
 	// replies is nil when no shared store is configured. Nothing then deduplicates
 	// replies, which is why more than one Gateway connection requires a store driver.
 	replies ReplyClaimer
+	// replyClaimRenewInterval is derived from the queue acknowledgement wait. It stays
+	// below the store lease so long generations retain ownership.
+	replyClaimRenewInterval time.Duration
 	// characters is nil when no store is configured; every channel then runs in
 	// assistant mode and no character tools are offered.
 	characters CharacterStore
@@ -142,7 +153,10 @@ type ProcessorConfig struct {
 	ImageHTTPClient    *http.Client
 	Limiter            Limiter
 	Recorder           Recorder
+	OutcomeRecorder    OutcomeRecorder
 	ReplyClaimer       ReplyClaimer
+	// ReplyClaimTTL is the shared-store lease configured by the worker. Zero uses 30s.
+	ReplyClaimTTL time.Duration
 	// Characters enables roleplay characters; nil keeps every channel in assistant mode.
 	Characters CharacterStore
 	// Memory enables persistent-memory retrieval and the memory book; nil disables both.
@@ -180,6 +194,9 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 	if cfg.MemoryContextRunes <= 0 {
 		cfg.MemoryContextRunes = 3000
 	}
+	if cfg.ReplyClaimTTL <= 0 {
+		cfg.ReplyClaimTTL = 30 * time.Second
+	}
 	session, err := discordgo.New("Bot " + cfg.DiscordBotToken)
 	if err != nil {
 		return nil, errors.Wrap(err, "create Discord REST client")
@@ -202,9 +219,10 @@ func NewProcessorWithConfig(ctx context.Context, cfg ProcessorConfig) (*Processo
 		client: restClient{session: session}, botID: user.ID, generator: cfg.Generator, configs: cfg.Configs,
 		history: cfg.History, manager: cfg.ConfigManager, models: cfg.ModelRegistry, webSearchProviders: append([]string(nil), cfg.WebSearchProviders...),
 		rootUsers: rootUsers, version: cfg.Version, imageClient: imageClient,
-		limiter: cfg.Limiter, recorder: cfg.Recorder, replies: cfg.ReplyClaimer,
-		characters: cfg.Characters,
-		memory:     cfg.Memory, memoryContextRunes: cfg.MemoryContextRunes,
+		limiter: cfg.Limiter, recorder: cfg.Recorder, outcomes: cfg.OutcomeRecorder, replies: cfg.ReplyClaimer,
+		replyClaimRenewInterval: claimRenewInterval(cfg.ReplyClaimTTL),
+		characters:              cfg.Characters,
+		memory:                  cfg.Memory, memoryContextRunes: cfg.MemoryContextRunes,
 		mcp: cfg.MCP, defaultMCPServers: append([]config.MCPServer(nil), cfg.DefaultMCPServers...),
 	}
 	if cfg.MCP != nil {

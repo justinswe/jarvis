@@ -148,7 +148,8 @@ func (h *Handler) Generate(ctx context.Context, req GenerateRequest) (result Gen
 	policy := h.policyForResolvedRequest(req, config, intentRequest)
 	trace.searchRequired = policy.WebSearchRequired
 	trace.searchTrigger = classifySearchTrigger(intentRequest, policy, config.WebSearchEnabled)
-	searchAvailable := config.WebSearchEnabled && len(h.webSearchers) > 0
+	searchAvailable := config.WebSearchEnabled && len(h.webSearchers) > 0 &&
+		!(policy.RuntimeContextRelevant && !policy.WebSearchRequired)
 	trace.searchAvailable = searchAvailable
 	if requiresTimezoneClarification(currentRequest(req.Messages), policy) {
 		return GenerateResponse{Text: timezoneClarificationFallback}, nil
@@ -332,13 +333,15 @@ func (t *webSearchTool) Declaration() *llm.ToolDefinition {
 func (t *webSearchTool) Execute(ctx context.Context, args map[string]any) (any, error) {
 	query := modelSearchQuery(args, t.query)
 	if query != t.query && t.state.attempted {
-		// The request-derived pre-search already ran; a sharper model query gets its own
-		// call, and it replaces the cached results only when it finds sources.
+		if t.state.queries >= maxSearchQueries {
+			return normalizedSearchOutput(*t.state), nil
+		}
+		// A sharper model query gets one bounded refinement. Its calls remain in the
+		// aggregate diagnostics even when the original result set remains better.
 		fresh := &searchState{}
 		t.handler.runWebSearch(ctx, t.request, query, fresh)
-		if fresh.sourceAvailable() {
-			*t.state = *fresh
-		}
+		mergeSearchState(t.state, *fresh)
+		t.query = query
 		return normalizedSearchOutput(*t.state), nil
 	}
 	t.query = query
@@ -1321,6 +1324,10 @@ func (h *Handler) executeNeutralTools(
 			results = append(results, failedNeutralTool(call, toolErrorUnsupported, "function is unavailable"))
 			continue
 		}
+		if invalidToolPlaceholder(call.Arguments) {
+			results = append(results, failedNeutralTool(call, "invalid_placeholder", "replace placeholder values with concrete identifiers from the request context"))
+			continue
+		}
 		declaration := tool.Declaration()
 		output, executeErr := tool.Execute(ctx, call.Arguments)
 		if executeErr != nil {
@@ -1352,6 +1359,27 @@ func (h *Handler) executeNeutralTools(
 	return results, evidence
 }
 
+func invalidToolPlaceholder(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		normalized := strings.ToUpper(strings.Trim(strings.TrimSpace(typed), "<>{}[]"))
+		return normalized == "CURRENT_MESSAGE_ID" || normalized == "MESSAGE_ID" || normalized == "CHANNEL_ID" || normalized == "GUILD_ID"
+	case map[string]any:
+		for _, item := range typed {
+			if invalidToolPlaceholder(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if invalidToolPlaceholder(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func failedNeutralTool(call llm.ToolCall, code, message string) llm.ToolResult {
 	return llm.ToolResult{CallID: call.ID, Name: call.Name, Error: &llm.ToolResultError{Code: code, Message: message}}
 }
@@ -1363,6 +1391,7 @@ func neutralToolCacheKey(call llm.ToolCall) string {
 
 type searchState struct {
 	attempted          bool
+	queries            int
 	response           websearch.Response
 	resultProvider     websearch.Provider
 	err                error
@@ -1386,6 +1415,7 @@ func (h *Handler) runWebSearch(ctx context.Context, req GenerateRequest, query s
 		return
 	}
 	state.attempted = true
+	state.queries = 1
 	primary := h.searchCall(ctx, req, h.webSearchers[0], query, attemptInitial, 1)
 	state.calls = append(state.calls, primary)
 	best := primary
@@ -1408,6 +1438,27 @@ func (h *Handler) runWebSearch(ctx context.Context, req GenerateRequest, query s
 	state.sourceAvailability = sourceAvailabilityUnavailable
 	if state.sourceAvailable() {
 		state.sourceAvailability = sourceAvailabilityAvailable
+	}
+}
+
+func mergeSearchState(current *searchState, candidate searchState) {
+	current.attempted = current.attempted || candidate.attempted
+	current.queries += candidate.queries
+	current.calls = append(current.calls, candidate.calls...)
+	current.recoveryAttempted = current.recoveryAttempted || candidate.recoveryAttempted
+	if candidate.recoveryResult != "" {
+		current.recoveryResult = candidate.recoveryResult
+	}
+	currentBest := searchCall{provider: current.resultProvider, response: current.response, err: current.err}
+	candidateBest := searchCall{provider: candidate.resultProvider, response: candidate.response, err: candidate.err}
+	if betterSearchCall(candidateBest, currentBest) {
+		current.response = candidate.response
+		current.resultProvider = candidate.resultProvider
+		current.err = candidate.err
+	}
+	current.sourceAvailability = sourceAvailabilityUnavailable
+	if current.sourceAvailable() {
+		current.sourceAvailability = sourceAvailabilityAvailable
 	}
 }
 
@@ -1741,7 +1792,7 @@ func (h *Handler) logNeutralTerminal(
 		zap.Bool("fallback_attempted", trace.fallbackAttempted), zap.Bool("fallback_succeeded", trace.fallbackSucceeded),
 		zap.String("fallback_reason", trace.fallbackReason), zap.String("fallback_from_profile", trace.fallbackFrom), zap.String("fallback_to_profile", trace.fallbackTo),
 		zap.Int("presentation_repair_count", trace.presentationRepairs), zap.String("presentation_validation_reason", trace.presentationValidation),
-		zap.Int("application_search_invocation_count", boolInt(search.attempted)), zap.Int("web_search_provider_call_count", len(search.calls)),
+		zap.Int("application_search_invocation_count", search.queries), zap.Int("web_search_provider_call_count", len(search.calls)),
 		zap.String("primary_search_provider", searchProviderAt(search.calls, 0)), zap.String("recovery_search_provider", searchProviderAt(search.calls, 1)),
 		zap.Bool("source_available", search.sourceAvailable()), zap.String("source_availability", sourceAvailability(search)),
 		zap.String("search_outcome", neutralSearchResult(trace, search)), zap.String("search_recovery_outcome", search.recoveryResult),
@@ -1792,7 +1843,7 @@ func (h *Handler) observeNeutralGeneration(trace neutralOrchestrationTrace, sear
 	h.observeGeneration(generationDiagnostics{
 		searchRequired:         trace.searchRequired,
 		searchAttempted:        search.attempted,
-		searchInvocationCount:  boolInt(search.attempted),
+		searchInvocationCount:  search.queries,
 		searchProviderCalls:    len(search.calls),
 		searchTrigger:          trace.searchTrigger,
 		searchResult:           neutralSearchResult(trace, search),

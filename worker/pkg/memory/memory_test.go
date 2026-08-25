@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -76,13 +77,13 @@ func (f *fakeMemoryStore) MessagesAfter(_ context.Context, _, _ string, afterID 
 	return result, nil
 }
 
-func (f *fakeMemoryStore) SearchMemory(_ context.Context, _ string, _ int64, _ []float32, _ string, _ int) ([]store.MemoryRecord, error) {
+func (f *fakeMemoryStore) SearchMemory(_ context.Context, _, _ string, _ int64, _ []float32, _ string, _ int) ([]store.MemoryRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]store.MemoryRecord(nil), f.records...), nil
 }
 
-func (f *fakeMemoryStore) EvictableMemories(context.Context, string, int64, int, int) ([]store.MemoryRecord, error) {
+func (f *fakeMemoryStore) EvictableMemories(context.Context, string, string, int64, int, int) ([]store.MemoryRecord, error) {
 	return nil, nil
 }
 func (f *fakeMemoryStore) ReplaceMemoriesWithDigest(context.Context, []int64, store.MemoryRecord) error {
@@ -91,14 +92,16 @@ func (f *fakeMemoryStore) ReplaceMemoriesWithDigest(context.Context, []int64, st
 func (f *fakeMemoryStore) StaleMemoryWatermarks(context.Context, time.Duration, int) ([]store.MemoryWatermark, error) {
 	return nil, nil
 }
-func (f *fakeMemoryStore) ListMemories(_ context.Context, _ string, _ int64, _ int) ([]store.MemoryRecord, error) {
+func (f *fakeMemoryStore) ListMemories(_ context.Context, _, _ string, _ int64, _ int) ([]store.MemoryRecord, error) {
 	return append([]store.MemoryRecord(nil), f.records...), nil
 }
-func (f *fakeMemoryStore) SetMemoryPinned(context.Context, string, int64, bool) error { return nil }
-func (f *fakeMemoryStore) EditMemory(context.Context, string, int64, string, []float32) error {
+func (f *fakeMemoryStore) SetMemoryPinned(context.Context, string, string, int64, bool) error {
 	return nil
 }
-func (f *fakeMemoryStore) DeleteMemory(context.Context, string, int64) error { return nil }
+func (f *fakeMemoryStore) EditMemory(context.Context, string, string, int64, string, []float32) error {
+	return nil
+}
+func (f *fakeMemoryStore) DeleteMemory(context.Context, string, string, int64) error { return nil }
 func (f *fakeMemoryStore) AddMemory(_ context.Context, record store.MemoryRecord) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -254,7 +257,7 @@ func TestRetrieveSkipsEmbeddingBlankQueries(t *testing.T) {
 	embedder := &fakeEmbedder{}
 	p := New(Config{Store: &fakeMemoryStore{}, Registry: testRegistry(t, extractorHost{}), Embedder: embedder})
 
-	p.Retrieve(context.Background(), "100", 7, "  ", 3000)
+	p.Retrieve(context.Background(), "100", "555", "300", 7, "  ", 3000)
 	assert.Zero(t, embedder.calls)
 }
 
@@ -266,19 +269,19 @@ func TestRetrieveRendersBudgetedBlock(t *testing.T) {
 	embedder := &fakeEmbedder{}
 	p := New(Config{Store: fake, Registry: testRegistry(t, extractorHost{}), Embedder: embedder})
 
-	block := p.Retrieve(context.Background(), "100", 7, "what about the harbor?", 3000)
+	block := p.Retrieve(context.Background(), "100", "555", "300", 7, "what about the harbor?", 3000)
 	assert.Contains(t, block, "- [pinned] Justin owes Elyra ten crowns.")
 	assert.Contains(t, block, "- location:harbor: The harbor is fogbound.")
 	assert.Equal(t, 1, embedder.calls)
 
 	// Tight budgets truncate whole lines, never mid-record.
-	tight := p.Retrieve(context.Background(), "100", 7, "query", 45)
+	tight := p.Retrieve(context.Background(), "100", "555", "300", 7, "query", 45)
 	assert.Contains(t, tight, "[pinned]")
 	assert.NotContains(t, tight, "harbor is fogbound")
 
 	// Empty scope renders nothing.
 	empty := New(Config{Store: &fakeMemoryStore{}, Registry: testRegistry(t, extractorHost{})})
-	assert.Empty(t, empty.Retrieve(context.Background(), "100", 7, "query", 3000))
+	assert.Empty(t, empty.Retrieve(context.Background(), "100", "555", "300", 7, "query", 3000))
 }
 
 func TestNoteTurnTriggersOnThreshold(t *testing.T) {
@@ -294,4 +297,27 @@ func TestNoteTurnTriggersOnThreshold(t *testing.T) {
 		defer fake.mu.Unlock()
 		return len(fake.records) > 0
 	}, 5*time.Second, 10*time.Millisecond, "threshold reached: async pass runs")
+}
+
+func TestAssistantTranscriptAndExtractionExcludeAssistantClaims(t *testing.T) {
+	messages := []*discordgo.Message{
+		{ID: "101", Timestamp: time.Now(), Author: &discordgo.User{ID: "300", Username: "alice"}, Content: "I prefer tea."},
+		{ID: "102", Timestamp: time.Now(), Author: &discordgo.User{ID: "999", Username: "chow", Bot: true}, Content: "Alice is hostile."},
+	}
+	text := transcript(messages, false)
+	assert.Contains(t, text, "author_id=300")
+	assert.NotContains(t, text, "Alice is hostile")
+
+	response := `{"summary":"The assistant made a claim.","records":[` +
+		`{"kind":"entity","subject_user_id":"300","entity_key":"user:300:preference:tea","content":"Alice prefers tea.","importance":0.8},` +
+		`{"kind":"entity","subject_user_id":"999","entity_key":"character:chow","content":"Chow is defiant.","importance":1}` +
+		`]}`
+	pipeline := New(Config{Store: &fakeMemoryStore{}, Registry: testRegistry(t, extractorHost{response: response})})
+	extracted, _, err := pipeline.extract(context.Background(), text, false)
+	require.NoError(t, err)
+	records := extracted.records("100", "555", 0, messages)
+	require.Len(t, records, 1)
+	assert.Equal(t, "300", records[0].SubjectUserID)
+	assert.Equal(t, "user", records[0].OriginRole)
+	assert.True(t, strings.Contains(records[0].EntityKey, "preference:tea"))
 }

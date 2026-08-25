@@ -3,6 +3,10 @@ package discord
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/gif"
+	"image/png"
 	"io"
 	"net/http"
 	"strings"
@@ -204,19 +208,21 @@ func TestBuildPromptUsesConfiguredHistoryLimits(t *testing.T) {
 }
 
 func TestBuildPromptLoadsCurrentImageOnly(t *testing.T) {
+	pngBytes := []byte("\x89PNG\r\n\x1a\nimage")
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"image/png"}},
-			Body: io.NopCloser(bytes.NewReader([]byte("png"))), Request: request}, nil
+			Body: io.NopCloser(bytes.NewReader(pngBytes)), Request: request}, nil
 	})}
 	processor := &Processor{botID: "bot", client: &fakeClient{}, imageClient: client}
 	m := targetedMessage("m", "describe this")
-	m.Attachments = []*discordgo.MessageAttachment{{Filename: "photo.png", ContentType: "image/png", Size: 3,
+	m.Attachments = []*discordgo.MessageAttachment{{Filename: "photo.png", ContentType: "application/octet-stream", Size: len(pngBytes),
 		URL: "https://cdn.discordapp.com/attachments/a/b/photo.png"}}
 	messages, err := processor.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, m, testSettings())
 	require.NoError(t, err)
 	require.Len(t, messages, 1)
 	require.NotNil(t, messages[0].Image)
-	assert.Equal(t, []byte("png"), messages[0].Image.Data)
+	assert.Equal(t, pngBytes, messages[0].Image.Data, "the decoded bytes, not a stale declared MIME string, decide the type")
+	assert.Equal(t, "image/png", messages[0].Image.MIMEType)
 }
 
 func TestBuildPromptContinuesWithSafeImageFailureNotice(t *testing.T) {
@@ -228,7 +234,7 @@ func TestBuildPromptContinuesWithSafeImageFailureNotice(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, messages[0].Image)
 	assert.Contains(t, messages[0].Content, "IMAGE ATTACHMENT NOTICE: badname.gif")
-	assert.Contains(t, messages[0].Content, "unsupported_format")
+	assert.Contains(t, messages[0].Content, "url_not_allowed")
 	assert.NotContains(t, messages[0].Content, "example.com")
 }
 
@@ -241,6 +247,19 @@ func TestAllowedImageURL(t *testing.T) {
 	request, err := http.NewRequest(http.MethodGet, "https://cdn.discordapp.com.evil.test/a", nil)
 	require.NoError(t, err)
 	assert.False(t, allowedImageURL(request.URL))
+}
+
+func TestFirstGIFFrameConvertsToPNG(t *testing.T) {
+	frame := image.NewPaletted(image.Rect(0, 0, 1, 1), color.Palette{color.Black, color.White})
+	frame.SetColorIndex(0, 0, 1)
+	var source bytes.Buffer
+	require.NoError(t, gif.Encode(&source, frame, nil))
+
+	converted, err := firstGIFFrame(source.Bytes())
+	require.NoError(t, err)
+	decoded, err := png.Decode(bytes.NewReader(converted))
+	require.NoError(t, err)
+	assert.Equal(t, color.RGBAModel.Convert(color.White), color.RGBAModel.Convert(decoded.At(0, 0)))
 }
 
 func TestBuildPromptIncludesConfiguredParentChannelMessages(t *testing.T) {
@@ -262,8 +281,13 @@ func TestBuildPromptIncludesConfiguredParentChannelMessages(t *testing.T) {
 	settings.ParentMessages = 2
 	got, err := p.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "parent"}, m, settings)
 	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Contains(t, got[0].Content, "PARENT CHANNEL:\n[timestamp unavailable] alice: old parent\n[timestamp unavailable] alice: new parent")
+	require.Len(t, got, 4)
+	assert.Equal(t, []string{"user", "user", "user", "user"}, []string{got[0].Role, got[1].Role, got[2].Role, got[3].Role})
+	assert.Contains(t, got[0].Content, "THREAD HISTORY")
+	assert.Contains(t, got[1].Content, "PARENT CHANNEL")
+	assert.Contains(t, got[1].Content, "old parent")
+	assert.Contains(t, got[2].Content, "new parent")
+	assert.Equal(t, "CURRENT REQUEST:\nquestion", got[3].Content)
 }
 
 func TestBuildPromptUsesPartialDatabaseHistoryWithoutDiscordFallback(t *testing.T) {
@@ -276,11 +300,46 @@ func TestBuildPromptUsesPartialDatabaseHistoryWithoutDiscordFallback(t *testing.
 	processor := &Processor{botID: "bot", client: client, history: history}
 	got, err := processor.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, targetedMessage("2", "question"), testSettings())
 	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Contains(t, got[0].Content, incompleteContextNotice)
+	require.Len(t, got, 2)
+	assert.Contains(t, got[1].Content, incompleteContextNotice)
 	assert.Contains(t, got[0].Content, "stored context")
 	assert.Equal(t, 1, history.calls)
 	assert.Zero(t, discordCalls)
+}
+
+func TestBuildPromptPreservesConversationRoles(t *testing.T) {
+	user := message("1", "first question")
+	user.ChannelID = "channel"
+	bot := message("2", "first answer")
+	bot.ChannelID = "channel"
+	bot.Author = &discordgo.User{ID: "bot", Username: "Chow", Bot: true}
+	history := &fakeHistory{messages: []*discordgo.Message{bot, user}}
+	processor := &Processor{botID: "bot", client: &fakeClient{}, history: history}
+
+	messages, err := processor.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, targetedMessage("3", "follow up"), testSettings())
+	require.NoError(t, err)
+	require.Len(t, messages, 3)
+	assert.Equal(t, []string{"user", "assistant", "user"}, []string{messages[0].Role, messages[1].Role, messages[2].Role})
+	assert.Contains(t, messages[0].Content, "author_id=u")
+	assert.Equal(t, "CURRENT REQUEST:\nfollow up", messages[2].Content)
+}
+
+func TestBuildPromptRefetchesPreviousImageForVisualFollowup(t *testing.T) {
+	pngBytes := []byte("\x89PNG\r\n\x1a\nimage")
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(pngBytes)), Request: request}, nil
+	})}
+	stored := message("1", "[image: sign.png]")
+	stored.ChannelID = "channel"
+	client := &fakeClient{referenced: &discordgo.Message{ID: "1", ChannelID: "channel", Attachments: []*discordgo.MessageAttachment{{
+		Filename: "sign.png", ContentType: "image/jpeg", Size: len(pngBytes), URL: "https://cdn.discordapp.com/attachments/a/b/sign.png",
+	}}}}
+	processor := &Processor{botID: "bot", client: client, history: &fakeHistory{messages: []*discordgo.Message{stored}}, imageClient: httpClient}
+
+	messages, err := processor.buildPrompt(context.Background(), &discordgo.Channel{Type: discordgo.ChannelTypeGuildText}, targetedMessage("2", "what does it say?"), testSettings())
+	require.NoError(t, err)
+	require.NotNil(t, messages[len(messages)-1].Image)
+	assert.Equal(t, "image/png", messages[len(messages)-1].Image.MIMEType)
 }
 
 func TestSearchCurrentChannelPagesStoredHistoryWithoutDiscordFallback(t *testing.T) {
@@ -774,7 +833,7 @@ func TestSanitizeAndPrefix(t *testing.T) {
 	assert.Equal(t, "hello", stripBotPrefix("Jarvis: hello"))
 }
 
-func TestPreviousSameAuthorRequestRejectsInterveningUser(t *testing.T) {
+func TestPreviousSameAuthorRequestSurvivesInterveningUser(t *testing.T) {
 	sections := []contextSection{{label: "CHANNEL HISTORY", messages: []*discordgo.Message{
 		{Author: &discordgo.User{ID: "agamemnon"}, Content: "Will AR500 steel work with 7.62?"},
 		{Author: &discordgo.User{ID: "bot", Bot: true}, Content: "Use appropriate target safety."},
@@ -782,7 +841,7 @@ func TestPreviousSameAuthorRequestRejectsInterveningUser(t *testing.T) {
 	assert.Equal(t, "Will AR500 steel work with 7.62?", previousSameAuthorRequest(sections, "agamemnon"))
 
 	sections[0].messages = append(sections[0].messages, &discordgo.Message{Author: &discordgo.User{ID: "other"}, Content: "What is a good ammo price?"})
-	assert.Empty(t, previousSameAuthorRequest(sections, "agamemnon"))
+	assert.Equal(t, "Will AR500 steel work with 7.62?", previousSameAuthorRequest(sections, "agamemnon"))
 }
 
 func TestTargetHelpers(t *testing.T) {
