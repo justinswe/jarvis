@@ -1,0 +1,29 @@
+load(":toolchain.bzl", "buf_toolchain")
+
+package(default_visibility = ["//visibility:private"])
+
+# Linux buf toolchains so lint/breaking targets analyze when the only
+# execution platform is linux (--config=bb / --config=rbe). The darwin host
+# toolchains keep coming from @rules_buf_toolchains. See toolchain.bzl.
+[
+    [
+        buf_toolchain(
+            name = cmd + "_linux_x86_64_impl",
+            cli = "@" + cmd.replace("-", "_") + "_linux_x86_64//file",
+        ),
+        toolchain(
+            name = cmd + "_linux_x86_64_toolchain",
+            exec_compatible_with = [
+                "@platforms//os:linux",
+                "@platforms//cpu:x86_64",
+            ],
+            toolchain = ":" + cmd + "_linux_x86_64_impl",
+            toolchain_type = "@rules_buf//tools/" + cmd + ":toolchain_type",
+        ),
+    ]
+    for cmd in [
+        "buf",
+        "protoc-gen-buf-lint",
+        "protoc-gen-buf-breaking",
+    ]
+]

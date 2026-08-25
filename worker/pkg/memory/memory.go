@@ -26,14 +26,14 @@ type Store interface {
 	ClaimMemoryWatermark(ctx context.Context, channelID string, characterID int64, ttl time.Duration) (int64, bool, error)
 	CommitMemory(ctx context.Context, channelID string, characterID, lastMessageID int64, records []store.MemoryRecord) error
 	MessagesAfter(ctx context.Context, guildID, channelID string, afterID int64, limit int) ([]*discordgo.Message, error)
-	SearchMemory(ctx context.Context, guildID string, characterID int64, embedding []float32, query string, k int) ([]store.MemoryRecord, error)
-	EvictableMemories(ctx context.Context, guildID string, characterID int64, keep, batch int) ([]store.MemoryRecord, error)
+	SearchMemory(ctx context.Context, guildID, channelID string, characterID int64, embedding []float32, query string, k int) ([]store.MemoryRecord, error)
+	EvictableMemories(ctx context.Context, guildID, channelID string, characterID int64, keep, batch int) ([]store.MemoryRecord, error)
 	ReplaceMemoriesWithDigest(ctx context.Context, ids []int64, digest store.MemoryRecord) error
 	StaleMemoryWatermarks(ctx context.Context, olderThan time.Duration, limit int) ([]store.MemoryWatermark, error)
-	ListMemories(ctx context.Context, guildID string, characterID int64, limit int) ([]store.MemoryRecord, error)
-	SetMemoryPinned(ctx context.Context, guildID string, id int64, pinned bool) error
-	EditMemory(ctx context.Context, guildID string, id int64, content string, embedding []float32) error
-	DeleteMemory(ctx context.Context, guildID string, id int64) error
+	ListMemories(ctx context.Context, guildID, channelID string, characterID int64, limit int) ([]store.MemoryRecord, error)
+	SetMemoryPinned(ctx context.Context, guildID, channelID string, id int64, pinned bool) error
+	EditMemory(ctx context.Context, guildID, channelID string, id int64, content string, embedding []float32) error
+	DeleteMemory(ctx context.Context, guildID, channelID string, id int64) error
 	AddMemory(ctx context.Context, record store.MemoryRecord) error
 }
 
@@ -160,13 +160,14 @@ func (p *Pipeline) summarize(guildID, channelID string, characterID int64, tier 
 		return
 	}
 	newLastID := snowflakeID(messages[len(messages)-1].ID)
-	text := transcript(messages)
+	roleplay := characterID != 0
+	text := transcript(messages, roleplay)
 	if strings.TrimSpace(text) == "" {
 		// Nothing but image-only or blank posts; a zero-text request is rejected upstream.
 		p.skipRange(ctx, channelID, characterID, newLastID, "blank transcript")
 		return
 	}
-	extraction, usage, err := p.extract(ctx, text)
+	extraction, usage, err := p.extract(ctx, text, roleplay)
 	p.recordUsage(guildID, tier, usage)
 	if err != nil {
 		app.L().Warn("Memory extraction failed", zap.String("channel_id", channelID), zap.Error(err))
@@ -187,7 +188,7 @@ func (p *Pipeline) summarize(guildID, channelID string, characterID int64, tier 
 	}
 	app.L().Info("Memory summarized", zap.String("guild_id", guildID), zap.String("channel_id", channelID),
 		zap.Int64("character_id", characterID), zap.Int("messages", len(messages)), zap.Int("records", len(records)))
-	p.consolidate(ctx, guildID, characterID, tier)
+	p.consolidate(ctx, guildID, channelID, characterID, tier)
 }
 
 // permanentProviderRejection reports a provider error that no retry will change.
@@ -206,8 +207,8 @@ func (p *Pipeline) skipRange(ctx context.Context, channelID string, characterID,
 
 // Retrieve returns the rendered memory block for prompt injection, empty when the scope
 // has no records. Failures degrade to no memory, never to a failed reply.
-func (p *Pipeline) Retrieve(ctx context.Context, guildID string, characterID int64, query string, budgetRunes int) string {
-	records, err := p.cfg.Store.SearchMemory(ctx, guildID, characterID, p.embedOne(ctx, query), query, 8)
+func (p *Pipeline) Retrieve(ctx context.Context, guildID, channelID, callerID string, characterID int64, query string, budgetRunes int) string {
+	records, err := p.cfg.Store.SearchMemory(ctx, guildID, channelID, characterID, p.embedOne(ctx, query), query, 8)
 	if err != nil {
 		if !errors.Is(err, store.ErrMemoryUnavailable) {
 			app.L().Warn("Memory retrieval failed", zap.String("guild_id", guildID), zap.Error(err))
@@ -230,6 +231,9 @@ func renderRecords(records []store.MemoryRecord, budgetRunes int) string {
 		}
 		if record.EntityKey != "" {
 			line += record.EntityKey + ": "
+		}
+		if record.SubjectUserID != "" {
+			line += "[subject_user_id=" + record.SubjectUserID + "] "
 		}
 		line += strings.ReplaceAll(record.Content, "\n", " ") + "\n"
 		if b.Len()+len(line) > budgetRunes {
@@ -263,8 +267,13 @@ func (p *Pipeline) embedRecords(ctx context.Context, records []store.MemoryRecor
 
 // consolidate merges the oldest low-importance records into one digest when the scope
 // outgrows its budget. Pinned and entity records are never candidates.
-func (p *Pipeline) consolidate(ctx context.Context, guildID string, characterID int64, tier string) {
-	evictable, err := p.cfg.Store.EvictableMemories(ctx, guildID, characterID, p.cfg.MaxRecords, 50)
+func (p *Pipeline) consolidate(ctx context.Context, guildID, channelID string, characterID int64, tier string) {
+	// Assistant memories remain individually attributed. Folding multiple users into a
+	// free-form digest would discard provenance and reintroduce cross-user confusion.
+	if characterID == 0 {
+		return
+	}
+	evictable, err := p.cfg.Store.EvictableMemories(ctx, guildID, channelID, characterID, p.cfg.MaxRecords, 50)
 	if err != nil || len(evictable) == 0 {
 		if err != nil {
 			app.L().Warn("Memory consolidation scan failed", zap.Error(err))
@@ -284,8 +293,8 @@ func (p *Pipeline) consolidate(ctx context.Context, guildID string, characterID 
 		return
 	}
 	digests := []store.MemoryRecord{{
-		GuildID: guildID, CharacterID: characterID, Kind: store.MemoryKindSummary,
-		Content: strings.TrimSpace(digestText), Importance: 0.3,
+		GuildID: guildID, ChannelID: channelID, CharacterID: characterID, Kind: store.MemoryKindSummary,
+		OriginRole: "conversation", Content: strings.TrimSpace(digestText), Importance: 0.3,
 	}}
 	if err := p.embedRecords(ctx, digests); err != nil {
 		app.L().Warn("Digest embedding failed; storing for full-text retrieval", zap.Error(err))
@@ -299,29 +308,30 @@ func (p *Pipeline) consolidate(ctx context.Context, guildID string, characterID 
 }
 
 // List reads a scope's memory book, pinned first.
-func (p *Pipeline) List(ctx context.Context, guildID string, characterID int64, limit int) ([]store.MemoryRecord, error) {
-	return p.cfg.Store.ListMemories(ctx, guildID, characterID, limit)
+func (p *Pipeline) List(ctx context.Context, guildID, channelID string, characterID int64, limit int) ([]store.MemoryRecord, error) {
+	return p.cfg.Store.ListMemories(ctx, guildID, channelID, characterID, limit)
 }
 
 // Pin marks or unmarks one record as permanent; pinned records are never evicted.
-func (p *Pipeline) Pin(ctx context.Context, guildID string, id int64, pinned bool) error {
-	return p.cfg.Store.SetMemoryPinned(ctx, guildID, id, pinned)
+func (p *Pipeline) Pin(ctx context.Context, guildID, channelID string, id int64, pinned bool) error {
+	return p.cfg.Store.SetMemoryPinned(ctx, guildID, channelID, id, pinned)
 }
 
 // Edit rewrites one record's content and re-embeds it.
-func (p *Pipeline) Edit(ctx context.Context, guildID string, id int64, content string) error {
-	return p.cfg.Store.EditMemory(ctx, guildID, id, content, p.embedOne(ctx, content))
+func (p *Pipeline) Edit(ctx context.Context, guildID, channelID string, id int64, content string) error {
+	return p.cfg.Store.EditMemory(ctx, guildID, channelID, id, content, p.embedOne(ctx, content))
 }
 
 // Delete removes one record permanently.
-func (p *Pipeline) Delete(ctx context.Context, guildID string, id int64) error {
-	return p.cfg.Store.DeleteMemory(ctx, guildID, id)
+func (p *Pipeline) Delete(ctx context.Context, guildID, channelID string, id int64) error {
+	return p.cfg.Store.DeleteMemory(ctx, guildID, channelID, id)
 }
 
 // Add writes one user-authored record.
-func (p *Pipeline) Add(ctx context.Context, guildID string, characterID int64, content string, pinned bool) error {
+func (p *Pipeline) Add(ctx context.Context, guildID, channelID, subjectUserID string, characterID int64, content string, pinned bool) error {
 	return p.cfg.Store.AddMemory(ctx, store.MemoryRecord{
-		GuildID: guildID, CharacterID: characterID, Kind: store.MemoryKindEvent,
+		GuildID: guildID, ChannelID: channelID, SubjectUserID: subjectUserID,
+		CharacterID: characterID, OriginRole: "user", Kind: store.MemoryKindEvent,
 		Content: strings.TrimSpace(content), Pinned: pinned, Importance: 0.8,
 		Embedding: p.embedOne(ctx, content),
 	})
@@ -350,17 +360,25 @@ func (p *Pipeline) recordUsage(guildID, tier string, usage *genai.UsageReport) {
 
 // transcript renders messages in the same "[timestamp] Name: text" shape the prompt
 // context uses.
-func transcript(messages []*discordgo.Message) string {
+func transcript(messages []*discordgo.Message, includeAssistant bool) string {
 	var b strings.Builder
 	for _, m := range messages {
 		if m == nil || m.Author == nil || strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		if m.Author.Bot && !includeAssistant {
 			continue
 		}
 		name := m.Author.GlobalName
 		if name == "" {
 			name = m.Author.Username
 		}
-		b.WriteString("[" + m.Timestamp.UTC().Format(time.RFC3339) + "] " + name + ": " + m.Content + "\n")
+		role := "user"
+		if m.Author.Bot {
+			role = "assistant"
+		}
+		b.WriteString("[" + m.Timestamp.UTC().Format(time.RFC3339) + "] role=" + role +
+			" author_id=" + m.Author.ID + " name=" + name + ": " + m.Content + "\n")
 	}
 	return b.String()
 }

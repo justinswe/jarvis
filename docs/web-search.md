@@ -35,7 +35,10 @@ Search is not a model profile. Remove `WEB_SEARCH_MODEL_PROFILE` and configure H
 
 ## Request isolation
 
-The provider query is owned by the application. A model may decide whether to invoke the internal zero-argument `search_web` function for optional Search, but it cannot supply or rewrite the query.
+The application supplies the resolved user request as the initial query. A model-selected
+`search_web` call may supply one specific rewrite to resolve pronouns or sharpen an elliptical
+follow-up; Jarvis permits at most one distinct refinement and otherwise serves the accumulated
+result from the bounded search state.
 
 Jarvis sends only the sanitized current request. For an elliptical follow-up, it may include the immediately preceding bounded user request. It never sends guild prompts, Discord channel-search results, runtime evidence, broader conversation history, credentials, application-tool results, or prior Search results to a provider.
 
@@ -87,7 +90,15 @@ Required Search runs after required runtime, channel-history, and configuration 
 3. Use the second configured provider for recovery. With one provider, retry it once.
 4. Stop after the recovery call and select the better single-provider result without merging responses.
 
-Cancellation or expiration of the overall request context prevents recovery from starting. Each logical Search therefore makes at most two sequential provider calls, regardless of whether Search was application-required or model-selected.
+Cancellation or expiration of the overall request context prevents recovery from starting. Each
+query therefore makes at most two sequential provider calls. One request may make the original
+query plus one distinct refinement, for an absolute maximum of two queries and four provider calls.
+Provider-call diagnostics accumulate across both queries, while the better usable result set is
+retained for presentation.
+
+Runtime-only requests do not receive the web-search tool unless the request independently requires
+public-web evidence. Image turns likewise keep Search off unless the user explicitly asks to
+search, verify, identify, locate, price, or buy the pictured item.
 
 No tool is replayed during Search recovery or presentation repair. Completed mutations are cached by logical call identity and remain completed exactly once.
 
@@ -99,7 +110,7 @@ Raw queries, normalized result JSON, and snippets are never used as terminal fal
 
 ## Diagnostics and privacy
 
-Jarvis records one logical Search invocation separately from zero, one, or two provider HTTP calls. Model-call counts exclude HTTP Search calls. Provider-call logs include the provider position, returned and accepted counts, missing/invalid/duplicate/snippet-less counts, response-body byte count, HTTP status, typed error kind, retry-after duration, latency, parser outcome, recovery outcome, and final source availability.
+Jarvis records the query count separately from the aggregate provider HTTP-call count. Model-call counts exclude HTTP Search calls. Provider-call logs include the provider position, returned and accepted counts, missing/invalid/duplicate/snippet-less counts, response-body byte count, HTTP status, typed error kind, retry-after duration, latency, parser outcome, recovery outcome, and final source availability.
 
 Production logs never include queries, prompts, snippets, response bodies, complete URLs, headers, API keys, or provider error messages. The terminal observer runs exactly once on every orchestration path.
 

@@ -46,6 +46,22 @@ func stampGuild(guildID string, messages []*discordgo.Message) []*discordgo.Mess
 	return messages
 }
 
+// stampReplyReferences links stored bot messages to the request they answer.
+func stampReplyReferences(request *discordgo.Message, replies []*discordgo.Message) []*discordgo.Message {
+	if request == nil {
+		return replies
+	}
+	for _, reply := range replies {
+		if reply == nil {
+			continue
+		}
+		reply.MessageReference = &discordgo.MessageReference{
+			GuildID: request.GuildID, ChannelID: request.ChannelID, MessageID: request.ID,
+		}
+	}
+	return replies
+}
+
 // withAttachmentNote returns a copy whose blank content names its image attachments, so
 // an image-only post still shows up in stored history.
 func withAttachmentNote(message *discordgo.Message) *discordgo.Message {

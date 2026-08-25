@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/std/errors"
@@ -16,12 +17,22 @@ type fakeReplyClaimer struct {
 	channels []string
 	messages []string
 	held     []string
+	renewed  []string
+	renew    func(context.Context, string, string) error
 }
 
 func (c *fakeReplyClaimer) ClaimReply(_ context.Context, channelID, messageID string) (bool, error) {
 	c.channels = append(c.channels, channelID)
 	c.messages = append(c.messages, messageID)
 	return c.won, c.err
+}
+
+func (c *fakeReplyClaimer) RenewReply(ctx context.Context, channelID, messageID string) error {
+	if c.renew != nil {
+		return c.renew(ctx, channelID, messageID)
+	}
+	c.renewed = append(c.renewed, messageID)
+	return nil
 }
 
 func (c *fakeReplyClaimer) HoldReply(_ context.Context, _, messageID string) error {
@@ -39,7 +50,9 @@ func replyMessage() *discordgo.MessageCreate {
 func TestClaimReplyAdmitsWhenNoStoreIsConfigured(t *testing.T) {
 	processor := &Processor{}
 
-	assert.True(t, processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage()),
+	claimed, err := processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage())
+	assert.NoError(t, err)
+	assert.True(t, claimed,
 		"a single-site deployment has nobody to coordinate with")
 }
 
@@ -47,7 +60,9 @@ func TestClaimReplyPassesTheDiscordIdentifiers(t *testing.T) {
 	claimer := &fakeReplyClaimer{won: true}
 	processor := &Processor{replies: claimer}
 
-	assert.True(t, processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage()))
+	claimed, err := processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage())
+	assert.NoError(t, err)
+	assert.True(t, claimed)
 	assert.Equal(t, []string{"channel"}, claimer.channels)
 	assert.Equal(t, []string{"123456789012345678"}, claimer.messages)
 }
@@ -55,15 +70,43 @@ func TestClaimReplyPassesTheDiscordIdentifiers(t *testing.T) {
 func TestClaimReplyStopsTheLoser(t *testing.T) {
 	processor := &Processor{replies: &fakeReplyClaimer{won: false}}
 
-	assert.False(t, processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage()),
+	claimed, err := processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage())
+	assert.NoError(t, err)
+	assert.False(t, claimed,
 		"the other site is already answering this message")
 }
 
-func TestClaimReplyAdmitsWhenTheStoreFails(t *testing.T) {
+func TestClaimReplyFailsClosedWhenTheStoreFails(t *testing.T) {
 	processor := &Processor{replies: &fakeReplyClaimer{err: errors.New("throttled")}}
 
-	assert.True(t, processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage()),
-		"a duplicate reply beats no reply at all")
+	claimed, err := processor.claimReply(t.Context(), &discordgo.Channel{}, replyMessage())
+	assert.Error(t, err)
+	assert.False(t, claimed, "an uncoordinated reply can duplicate a public answer")
+}
+
+func TestMaintainReplyClaimCancelsGenerationWhenRenewalFails(t *testing.T) {
+	renewed := make(chan struct{}, 1)
+	claimer := &fakeReplyClaimer{renew: func(context.Context, string, string) error {
+		renewed <- struct{}{}
+		return errors.New("lease lost")
+	}}
+	processor := &Processor{replies: claimer, replyClaimRenewInterval: time.Millisecond}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	stop := processor.maintainReplyClaim(ctx, cancel, replyMessage())
+	defer stop()
+
+	select {
+	case <-renewed:
+	case <-time.After(time.Second):
+		t.Fatal("reply claim was not renewed")
+	}
+	<-ctx.Done()
+	assert.ErrorContains(t, context.Cause(ctx), "maintain Discord reply claim")
+}
+
+func TestClaimRenewIntervalStaysInsideLease(t *testing.T) {
+	assert.Equal(t, 2*time.Second, claimRenewInterval(6*time.Second))
+	assert.Equal(t, 10*time.Second, claimRenewInterval(time.Minute))
 }
 
 // TestHoldReplyExtendsTheAnsweredClaim covers the window the short claim leaves open: a

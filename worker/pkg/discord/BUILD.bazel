@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "discord",
     srcs = [
+        "calculator.go",
         "character_tools.go",
         "configuration.go",
         "context.go",
@@ -11,6 +12,7 @@ go_library(
         "mcp.go",
         "memory_tools.go",
         "message.go",
+        "outcomes.go",
         "queue.go",
         "reaction.go",
         "record.go",
@@ -44,12 +46,14 @@ go_library(
 go_test(
     name = "discord_test",
     srcs = [
+        "calculator_test.go",
         "character_tools_test.go",
         "configuration_test.go",
         "discord_test.go",
         "e2e_test.go",
         "limiter_test.go",
         "mcp_test.go",
+        "outcomes_test.go",
         "queue_test.go",
         "reaction_test.go",
         "record_test.go",

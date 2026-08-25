@@ -2,16 +2,36 @@ package discord
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/justinswe/std/app"
+	"github.com/justinswe/std/errors"
 	"go.uber.org/zap"
 )
 
 // replyHoldTimeout bounds the extension, which runs after the user already has their
 // answer. It is short for the same reason the reaction cleanup is: nothing waits on it.
-const replyHoldTimeout = 5 * time.Second
+const (
+	replyHoldTimeout          = 5 * time.Second
+	defaultClaimRenewInterval = 10 * time.Second
+	maximumClaimRenewInterval = 10 * time.Second
+)
+
+func claimRenewInterval(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return defaultClaimRenewInterval
+	}
+	interval := ttl / 3
+	if interval > maximumClaimRenewInterval {
+		return maximumClaimRenewInterval
+	}
+	if interval <= 0 {
+		return defaultClaimRenewInterval
+	}
+	return interval
+}
 
 // claimReply reports whether this worker should answer the message.
 //
@@ -20,23 +40,57 @@ const replyHoldTimeout = 5 * time.Second
 // generation. Both the admin command and the AI reply sit behind it: each one posts to
 // Discord, and each must happen exactly once.
 //
-// A claim it cannot reach admits the request, matching how every other shared dependency
-// on this path degrades. The cost of that choice is a possible duplicate reply while the
-// store is unavailable, which is better than answering nobody.
-func (p *Processor) claimReply(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate) bool {
+// A claim it cannot reach rejects the attempt. Posting without ownership can produce
+// multiple public replies, so the queue must retry after the shared store recovers.
+func (p *Processor) claimReply(ctx context.Context, channel *discordgo.Channel, m *discordgo.MessageCreate) (bool, error) {
 	if p.replies == nil {
-		return true
+		return true, nil
 	}
 	won, err := p.replies.ClaimReply(ctx, m.ChannelID, m.ID)
 	if err != nil {
-		app.L().Warn("Reply claim unavailable; answering anyway",
+		app.L().Warn("Reply claim unavailable; refusing uncoordinated reply",
 			append(discordRequestFields(channel, m), zap.Error(err))...)
-		return true
+		return false, errors.Wrap(err, "claim Discord reply")
 	}
 	if !won {
 		app.L().Debug("Another worker claimed this reply", discordRequestFields(channel, m)...)
 	}
-	return won
+	return won, nil
+}
+
+func (p *Processor) maintainReplyClaim(ctx context.Context, cancel context.CancelCauseFunc, m *discordgo.MessageCreate) func() {
+	if p.replies == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	interval := p.replyClaimRenewInterval
+	if interval <= 0 {
+		interval = defaultClaimRenewInterval
+	}
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := p.replies.RenewReply(ctx, m.ChannelID, m.ID); err != nil {
+					cancel(errors.Wrap(err, "maintain Discord reply claim"))
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+		<-stopped
+	}
 }
 
 // holdReply extends this worker's claim now that the message has been answered.

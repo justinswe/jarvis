@@ -312,7 +312,6 @@ func TestNeutralOrchestrationDoesNotReplayMutationDuringSemanticRepairAndFallbac
 		"the fallback provider gets the portable envelope, not native tool history")
 }
 
-
 func TestNeutralOrchestrationUsesPrimaryForToolsBeforePresentation(t *testing.T) {
 	for _, provider := range []llm.Provider{llm.ProviderGoogleAI, llm.ProviderVertex, llm.ProviderOpenRouter} {
 		t.Run(string(provider), func(t *testing.T) {
@@ -1012,6 +1011,45 @@ func TestSearchRecoversEveryProviderError(t *testing.T) {
 			assert.Equal(t, searchResultSourcesAvailable, state.recoveryResult)
 		})
 	}
+}
+
+func TestWebSearchToolCapsAndAccumulatesRefinements(t *testing.T) {
+	searcher := &fakeWebSearcher{provider: websearch.ProviderSerper, responses: []websearch.Response{
+		searchResponse("first.example"), searchResponse("second.example"), searchResponse("third.example"),
+	}}
+	handler := &Handler{webSearchers: []webSearcher{searcher}}
+	state := &searchState{sourceAvailability: sourceAvailabilityNotUsed}
+	tool := &webSearchTool{handler: handler, query: "first query", state: state}
+
+	_, err := tool.Execute(context.Background(), map[string]any{"query": "first query"})
+	require.NoError(t, err)
+	_, err = tool.Execute(context.Background(), map[string]any{"query": "second query"})
+	require.NoError(t, err)
+	_, err = tool.Execute(context.Background(), map[string]any{"query": "third query"})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"first query", "second query"}, searcher.queries)
+	assert.Equal(t, 2, state.queries)
+	assert.Len(t, state.calls, 2)
+}
+
+func TestExecuteNeutralToolsRejectsIdentifierPlaceholders(t *testing.T) {
+	executed := 0
+	tool := fakeTool{name: "get_message", decl: &llm.ToolDefinition{
+		Name: "get_message", InputSchema: llm.JSONSchema{"type": "object"}, Effect: llm.ToolEffectReadOnly,
+	}, exec: func(context.Context, map[string]any) (any, error) {
+		executed++
+		return map[string]any{"ok": true}, nil
+	}}
+	handler := &Handler{}
+	results, _ := handler.executeNeutralTools(context.Background(), GenerateRequest{}, []llm.ToolCall{{
+		ID: "call", Name: "get_message", Arguments: map[string]any{"message_id": "CURRENT_MESSAGE_ID"},
+	}}, map[string]FunctionTool{"get_message": tool}, map[string]llm.ToolResult{}, map[string]struct{}{})
+
+	assert.Zero(t, executed)
+	require.Len(t, results, 1)
+	require.NotNil(t, results[0].Error)
+	assert.Equal(t, "invalid_placeholder", results[0].Error.Code)
 }
 
 func TestSearchDoesNotRecoverAfterRequestContextEnds(t *testing.T) {

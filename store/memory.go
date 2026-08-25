@@ -27,20 +27,25 @@ const (
 // MemoryRecord is one durable memory: a rolling summary, an event, or a piece of
 // entity/relationship/plot state keyed by EntityKey.
 type MemoryRecord struct {
-	ID           int64
-	GuildID      string
-	CharacterID  int64
-	ChannelID    string
-	Kind         string
-	EntityKey    string
-	Content      string
-	Pinned       bool
-	Importance   float64
-	Embedding    []float32
-	SourceFromID int64
-	SourceToID   int64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID               int64
+	GuildID          string
+	CharacterID      int64
+	ChannelID        string
+	SubjectUserID    string
+	OriginRole       string
+	Kind             string
+	EntityKey        string
+	Content          string
+	Pinned           bool
+	Importance       float64
+	Embedding        []float32
+	SourceFromID     int64
+	SourceToID       int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ExpiresAt        time.Time
+	QuarantinedAt    time.Time
+	QuarantineReason string
 }
 
 // MemoryWatermark is one channel/character summarization cursor.
@@ -172,28 +177,40 @@ func insertMemoryRecord(ctx context.Context, tx *sql.Tx, record MemoryRecord) er
 	if err != nil {
 		return err
 	}
+	subjectUserID, err := optionalSnowflake(record.SubjectUserID)
+	if err != nil {
+		return err
+	}
 	conflict := ""
 	switch {
 	case record.EntityKey != "":
-		conflict = ` ON CONFLICT (guild_id, character_id, entity_key) WHERE deleted_at = 0 AND entity_key <> ''
+		conflict = ` ON CONFLICT (guild_id, channel_id, character_id, subject_user_id, entity_key) WHERE deleted_at = 0 AND quarantined_at = 0 AND entity_key <> ''
 			DO UPDATE SET content = excluded.content, importance = excluded.importance,
 				embedding = excluded.embedding, kind = excluded.kind,
+				origin_role = excluded.origin_role, expires_at = excluded.expires_at,
 				source_from_id = excluded.source_from_id, source_to_id = excluded.source_to_id,
 				updated_at = excluded.updated_at`
 	case record.Kind == MemoryKindSummary && record.SourceToID != 0:
-		conflict = ` ON CONFLICT (guild_id, character_id, channel_id, source_to_id) WHERE kind = 'summary' AND source_to_id <> 0
+		conflict = ` ON CONFLICT (guild_id, character_id, channel_id, source_to_id) WHERE deleted_at = 0 AND quarantined_at = 0 AND kind = 'summary' AND source_to_id <> 0
 			DO NOTHING`
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memory_records (guild_id, character_id, channel_id, kind, entity_key,
+		INSERT INTO memory_records (guild_id, character_id, channel_id, subject_user_id, origin_role, kind, entity_key,
 			content, pinned, importance, embedding, source_from_id, source_to_id,
-			created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, `+vectorParameter("$9")+`, $10, $11,
-			extract(epoch from now())::bigint, extract(epoch from now())::bigint)`+conflict,
-		gid, record.CharacterID, channelID, record.Kind, record.EntityKey,
-		record.Content, boolInt(record.Pinned), record.Importance, formatVector(record.Embedding),
-		record.SourceFromID, record.SourceToID)
+			created_at, updated_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, `+vectorParameter("$11")+`, $12, $13,
+			extract(epoch from now())::bigint, extract(epoch from now())::bigint, $14)`+conflict,
+		gid, record.CharacterID, channelID, subjectUserID, record.OriginRole,
+		record.Kind, record.EntityKey, record.Content, boolInt(record.Pinned), record.Importance,
+		formatVector(record.Embedding), record.SourceFromID, record.SourceToID, memoryExpiry(record.ExpiresAt))
 	return errors.Wrap(err, "write memory record")
+}
+
+func memoryExpiry(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UTC().Unix()
 }
 
 // AddMemory writes one user- or pipeline-authored record outside a summarization pass.
@@ -212,13 +229,14 @@ func (s *Store) AddMemory(ctx context.Context, record MemoryRecord) error {
 	return errors.Wrap(tx.Commit(), "commit memory record")
 }
 
-const memoryColumns = `id, guild_id, character_id, channel_id, kind, entity_key, content,
-	pinned, importance, source_from_id, source_to_id, created_at, updated_at`
+const memoryColumns = `id, guild_id, character_id, channel_id, subject_user_id, origin_role,
+	kind, entity_key, content, pinned, importance, source_from_id, source_to_id, created_at,
+	updated_at, expires_at, quarantined_at, quarantine_reason`
 
 // SearchMemory performs the hybrid retrieval: every pinned record, the vector
 // neighborhood of the query when an embedding is supplied, a full-text fallback
 // otherwise, and the newest rolling summary. The caller deduplicates and budgets.
-func (s *Store) SearchMemory(ctx context.Context, guildID string, characterID int64, embedding []float32, query string, k int) ([]MemoryRecord, error) {
+func (s *Store) SearchMemory(ctx context.Context, guildID, channelID string, characterID int64, embedding []float32, query string, k int) ([]MemoryRecord, error) {
 	if err := s.requireMemory(); err != nil {
 		return nil, err
 	}
@@ -226,7 +244,12 @@ func (s *Store) SearchMemory(ctx context.Context, guildID string, characterID in
 	if err != nil {
 		return nil, err
 	}
-	scope := ` FROM memory_records WHERE guild_id = $1 AND character_id = $2 AND deleted_at = 0`
+	cid, err := snowflake(channelID)
+	if err != nil {
+		return nil, err
+	}
+	scope := ` FROM memory_records WHERE guild_id = $1 AND channel_id = $2 AND character_id = $3
+		AND deleted_at = 0 AND quarantined_at = 0 AND (expires_at = 0 OR expires_at > extract(epoch from now())::bigint)`
 	var results []MemoryRecord
 	appendQuery := func(sqlText string, args ...any) error {
 		rows, err := s.db.QueryContext(ctx, sqlText, args...)
@@ -243,29 +266,29 @@ func (s *Store) SearchMemory(ctx context.Context, guildID string, characterID in
 		}
 		return errors.Wrap(rows.Err(), "read memory records")
 	}
-	if err := appendQuery(`SELECT `+memoryColumns+scope+` AND pinned = 1 ORDER BY updated_at DESC LIMIT 100`, gid, characterID); err != nil {
+	if err := appendQuery(`SELECT `+memoryColumns+scope+` AND pinned = 1 ORDER BY updated_at DESC LIMIT 100`, gid, cid, characterID); err != nil {
 		return nil, err
 	}
 	if len(embedding) > 0 {
 		if err := appendQuery(`SELECT `+memoryColumns+scope+` AND embedding IS NOT NULL
-			ORDER BY embedding <=> $3::vector LIMIT $4`, gid, characterID, formatVector(embedding), k); err != nil {
+			ORDER BY embedding <=> $4::vector LIMIT $5`, gid, cid, characterID, formatVector(embedding), k); err != nil {
 			return nil, err
 		}
 	} else if strings.TrimSpace(query) != "" {
-		if err := appendQuery(`SELECT `+memoryColumns+scope+` AND tsv @@ plainto_tsquery('english', $3)
-			ORDER BY ts_rank(tsv, plainto_tsquery('english', $3)) DESC LIMIT $4`, gid, characterID, query, k); err != nil {
+		if err := appendQuery(`SELECT `+memoryColumns+scope+` AND tsv @@ plainto_tsquery('english', $4)
+			ORDER BY ts_rank(tsv, plainto_tsquery('english', $4)) DESC LIMIT $5`, gid, cid, characterID, query, k); err != nil {
 			return nil, err
 		}
 	}
 	if err := appendQuery(`SELECT `+memoryColumns+scope+` AND kind = 'summary'
-		ORDER BY source_to_id DESC LIMIT 1`, gid, characterID); err != nil {
+		ORDER BY source_to_id DESC LIMIT 1`, gid, cid, characterID); err != nil {
 		return nil, err
 	}
 	return dedupeMemoryRecords(results), nil
 }
 
 // ListMemories returns a scope's records for the memory book, pinned first, newest next.
-func (s *Store) ListMemories(ctx context.Context, guildID string, characterID int64, limit int) ([]MemoryRecord, error) {
+func (s *Store) ListMemories(ctx context.Context, guildID, channelID string, characterID int64, limit int) ([]MemoryRecord, error) {
 	if err := s.requireMemory(); err != nil {
 		return nil, err
 	}
@@ -273,10 +296,16 @@ func (s *Store) ListMemories(ctx context.Context, guildID string, characterID in
 	if err != nil {
 		return nil, err
 	}
+	cid, err := snowflake(channelID)
+	if err != nil {
+		return nil, err
+	}
 	var results []MemoryRecord
 	rows, err := s.db.QueryContext(ctx, `SELECT `+memoryColumns+`
-		FROM memory_records WHERE guild_id = $1 AND character_id = $2 AND deleted_at = 0
-		ORDER BY pinned DESC, updated_at DESC LIMIT $3`, gid, characterID, limit)
+		FROM memory_records WHERE guild_id = $1 AND channel_id = $2 AND character_id = $3
+			AND deleted_at = 0 AND quarantined_at = 0
+			AND (expires_at = 0 OR expires_at > extract(epoch from now())::bigint)
+		ORDER BY pinned DESC, updated_at DESC LIMIT $4`, gid, cid, characterID, limit)
 	if err != nil {
 		return nil, errors.Wrap(err, "list memory records")
 	}
@@ -292,17 +321,21 @@ func (s *Store) ListMemories(ctx context.Context, guildID string, characterID in
 }
 
 // SetMemoryPinned pins or unpins one record. Pinned records are never evicted.
-func (s *Store) SetMemoryPinned(ctx context.Context, guildID string, id int64, pinned bool) error {
-	return s.updateMemory(ctx, guildID, id, `pinned = $3`, boolInt(pinned))
+func (s *Store) SetMemoryPinned(ctx context.Context, guildID, channelID string, id int64, pinned bool) error {
+	assignment := `pinned = $4`
+	if pinned {
+		assignment += `, expires_at = 0`
+	}
+	return s.updateMemory(ctx, guildID, channelID, id, assignment, boolInt(pinned))
 }
 
 // EditMemory rewrites one record's content and, when supplied, its embedding.
-func (s *Store) EditMemory(ctx context.Context, guildID string, id int64, content string, embedding []float32) error {
-	return s.updateMemory(ctx, guildID, id, `content = $3, embedding = `+vectorParameter("$4"), content, formatVector(embedding))
+func (s *Store) EditMemory(ctx context.Context, guildID, channelID string, id int64, content string, embedding []float32) error {
+	return s.updateMemory(ctx, guildID, channelID, id, `content = $4, embedding = `+vectorParameter("$5"), content, formatVector(embedding))
 }
 
 // DeleteMemory removes one record permanently.
-func (s *Store) DeleteMemory(ctx context.Context, guildID string, id int64) error {
+func (s *Store) DeleteMemory(ctx context.Context, guildID, channelID string, id int64) error {
 	if err := s.requireMemory(); err != nil {
 		return err
 	}
@@ -310,14 +343,18 @@ func (s *Store) DeleteMemory(ctx context.Context, guildID string, id int64) erro
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM memory_records WHERE guild_id = $1 AND id = $2`, gid, id)
+	cid, err := snowflake(channelID)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM memory_records WHERE guild_id = $1 AND channel_id = $2 AND id = $3`, gid, cid, id)
 	if err != nil {
 		return errors.Wrap(err, "delete memory record")
 	}
 	return memoryRowError(result)
 }
 
-func (s *Store) updateMemory(ctx context.Context, guildID string, id int64, assignment string, args ...any) error {
+func (s *Store) updateMemory(ctx context.Context, guildID, channelID string, id int64, assignment string, args ...any) error {
 	if err := s.requireMemory(); err != nil {
 		return err
 	}
@@ -325,10 +362,14 @@ func (s *Store) updateMemory(ctx context.Context, guildID string, id int64, assi
 	if err != nil {
 		return err
 	}
+	cid, err := snowflake(channelID)
+	if err != nil {
+		return err
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE memory_records SET `+assignment+`,
 		updated_at = extract(epoch from now())::bigint
-		WHERE guild_id = $1 AND id = $2 AND deleted_at = 0`,
-		append([]any{gid, id}, args...)...)
+		WHERE guild_id = $1 AND channel_id = $2 AND id = $3 AND deleted_at = 0 AND quarantined_at = 0`,
+		append([]any{gid, cid, id}, args...)...)
 	if err != nil {
 		return errors.Wrap(err, "update memory record")
 	}
@@ -351,7 +392,7 @@ func memoryRowError(result sql.Result) error {
 
 // EvictableMemories returns the oldest, least important unpinned non-entity records
 // beyond the keep budget, for consolidation into a digest.
-func (s *Store) EvictableMemories(ctx context.Context, guildID string, characterID int64, keep, batch int) ([]MemoryRecord, error) {
+func (s *Store) EvictableMemories(ctx context.Context, guildID, channelID string, characterID int64, keep, batch int) ([]MemoryRecord, error) {
 	if err := s.requireMemory(); err != nil {
 		return nil, err
 	}
@@ -359,10 +400,16 @@ func (s *Store) EvictableMemories(ctx context.Context, guildID string, character
 	if err != nil {
 		return nil, err
 	}
+	cid, err := snowflake(channelID)
+	if err != nil {
+		return nil, err
+	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_records
-		WHERE guild_id = $1 AND character_id = $2 AND deleted_at = 0 AND pinned = 0 AND entity_key = ''`,
-		gid, characterID).Scan(&count); err != nil {
+		WHERE guild_id = $1 AND channel_id = $2 AND character_id = $3
+			AND deleted_at = 0 AND quarantined_at = 0 AND pinned = 0 AND entity_key = ''
+			AND (expires_at = 0 OR expires_at > extract(epoch from now())::bigint)`,
+		gid, cid, characterID).Scan(&count); err != nil {
 		return nil, errors.Wrap(err, "count memory records")
 	}
 	if count <= keep {
@@ -370,8 +417,10 @@ func (s *Store) EvictableMemories(ctx context.Context, guildID string, character
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+memoryColumns+`
 		FROM memory_records
-		WHERE guild_id = $1 AND character_id = $2 AND deleted_at = 0 AND pinned = 0 AND entity_key = ''
-		ORDER BY importance ASC, updated_at ASC LIMIT $3`, gid, characterID, batch)
+		WHERE guild_id = $1 AND channel_id = $2 AND character_id = $3
+			AND deleted_at = 0 AND quarantined_at = 0 AND pinned = 0 AND entity_key = ''
+			AND (expires_at = 0 OR expires_at > extract(epoch from now())::bigint)
+		ORDER BY importance ASC, updated_at ASC LIMIT $4`, gid, cid, characterID, batch)
 	if err != nil {
 		return nil, errors.Wrap(err, "query evictable memory records")
 	}
@@ -454,18 +503,26 @@ func (s *Store) StaleMemoryWatermarks(ctx context.Context, olderThan time.Durati
 
 func scanMemoryRecord(rows *sql.Rows) (MemoryRecord, error) {
 	var record MemoryRecord
-	var gid, channelID, createdAt, updatedAt int64
+	var gid, channelID, subjectUserID, createdAt, updatedAt, expiresAt, quarantinedAt int64
 	var pinned int
-	if err := rows.Scan(&record.ID, &gid, &record.CharacterID, &channelID, &record.Kind,
+	if err := rows.Scan(&record.ID, &gid, &record.CharacterID, &channelID, &subjectUserID, &record.OriginRole, &record.Kind,
 		&record.EntityKey, &record.Content, &pinned, &record.Importance,
-		&record.SourceFromID, &record.SourceToID, &createdAt, &updatedAt); err != nil {
+		&record.SourceFromID, &record.SourceToID, &createdAt, &updatedAt, &expiresAt,
+		&quarantinedAt, &record.QuarantineReason); err != nil {
 		return MemoryRecord{}, errors.Wrap(err, "decode memory record")
 	}
 	record.GuildID = strconv.FormatInt(gid, 10)
 	record.ChannelID = formatOptionalID(channelID)
+	record.SubjectUserID = formatOptionalID(subjectUserID)
 	record.Pinned = pinned != 0
 	record.CreatedAt = time.Unix(createdAt, 0).UTC()
 	record.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	if expiresAt != 0 {
+		record.ExpiresAt = time.Unix(expiresAt, 0).UTC()
+	}
+	if quarantinedAt != 0 {
+		record.QuarantinedAt = time.Unix(quarantinedAt, 0).UTC()
+	}
 	return record, nil
 }
 

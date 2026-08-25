@@ -1,6 +1,6 @@
 module(
     name = "jarvis",
-    version = "0.11.0",
+    version = "0.11.1",
 )
 
 bazel_dep(name = "protobuf", version = "33.4", repo_name = "com_google_protobuf")
@@ -10,6 +10,33 @@ bazel_dep(name = "rules_proto", version = "7.1.0")
 buf = use_extension("@rules_buf//buf:extensions.bzl", "buf")
 buf.toolchains(version = "v1.71.0")
 use_repo(buf, "rules_buf_toolchains")
+
+# Linux buf binaries for remote execution platforms; keep the version and
+# checksums in lockstep with buf.toolchains above. Registered in //tools/buf.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "buf_linux_x86_64",
+    executable = True,
+    sha256 = "d3de2838c68a5759ca276884254bc70df4e4ad185d6ed5f65f327b6ce6363eab",
+    urls = ["https://github.com/bufbuild/buf/releases/download/v1.71.0/buf-Linux-x86_64"],
+)
+
+http_file(
+    name = "protoc_gen_buf_lint_linux_x86_64",
+    executable = True,
+    sha256 = "018abc4d811d3061fa7eadcd0d97bd32d6897f0c8f270286eba3ab66b67e7d5c",
+    urls = ["https://github.com/bufbuild/buf/releases/download/v1.71.0/protoc-gen-buf-lint-Linux-x86_64"],
+)
+
+http_file(
+    name = "protoc_gen_buf_breaking_linux_x86_64",
+    executable = True,
+    sha256 = "86df2635b2cf6a32f3d2c19bf187899650f372204c0987b935373696ef70d95f",
+    urls = ["https://github.com/bufbuild/buf/releases/download/v1.71.0/protoc-gen-buf-breaking-Linux-x86_64"],
+)
+
+register_toolchains("//tools/buf:all")
 
 include("//tools/modules:go.MODULE.bazel")
 include("//tools/modules:images.MODULE.bazel")

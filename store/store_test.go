@@ -57,10 +57,28 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 		require.NoError(t, err)
 		var version int64
 		require.NoError(t, s.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version))
-		// 0003 is Postgres-only (.pg.sql): SQLite records the version and skips the body.
-		assert.Equal(t, int64(3), version)
+		// PostgreSQL-only migrations are recorded and skipped by SQLite.
+		assert.Equal(t, int64(5), version)
 		require.NoError(t, s.Close())
 	}
+}
+
+func TestRequestOutcomeLifecycle(t *testing.T) {
+	s := memoryStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.StartRequest(ctx, "42", "10", "2000", 14))
+	require.NoError(t, s.StartRequest(ctx, "42", "10", "2000", 14), "redelivery is idempotent")
+	require.NoError(t, s.FinishRequest(ctx, RequestOutcome{
+		GuildID: "42", ChannelID: "10", MessageID: "2000", Status: RequestStatusAnswered,
+		ReplyMessageIDs: []string{"3000"}, Duration: 1250 * time.Millisecond,
+	}))
+	var status, replyIDs string
+	var durationMS int64
+	require.NoError(t, s.db.QueryRow(`SELECT status, reply_message_ids, duration_ms
+		FROM request_outcomes WHERE channel_id = 10 AND message_id = 2000`).Scan(&status, &replyIDs, &durationMS))
+	assert.Equal(t, RequestStatusAnswered, status)
+	assert.Equal(t, `["3000"]`, replyIDs)
+	assert.Equal(t, int64(1250), durationMS)
 }
 
 // TestSQLiteStateSurvivesAReopen is the single-container persistence story: a restart of
@@ -361,12 +379,16 @@ func runStoreSuite(t *testing.T, openStore func(*testing.T) *Store) {
 		s := openStore(t)
 		ctx := context.Background()
 		require.NoError(t, s.Record(ctx, plainMessage("1000", "10", "42"), 14))
+		require.NoError(t, s.StartRequest(ctx, "42", "10", "2000", 14))
 		_, err := s.db.Exec(s.q(`UPDATE messages SET expires_at = 1 WHERE message_id = ?`), 1000)
+		require.NoError(t, err)
+		_, err = s.db.Exec(s.q(`UPDATE request_outcomes SET expires_at = 1 WHERE message_id = ?`), 2000)
 		require.NoError(t, err)
 		seedClaim(t, s, 10, 999, -10)
 
 		require.NoError(t, s.sweepOnce(ctx))
 		assert.Zero(t, countRows(t, s, "messages"))
+		assert.Zero(t, countRows(t, s, "request_outcomes"))
 		assert.Zero(t, countRows(t, s, "reply_claims"))
 	})
 
@@ -381,6 +403,19 @@ func runStoreSuite(t *testing.T, openStore func(*testing.T) *Store) {
 		again, err := s.ClaimReply(ctx, "10", "2000")
 		require.NoError(t, err)
 		assert.False(t, again)
+	})
+
+	t.Run("RenewReplyRequiresLiveOwnership", func(t *testing.T) {
+		s := openStore(t)
+		ctx := context.Background()
+		won, err := s.ClaimReply(ctx, "10", "2000")
+		require.NoError(t, err)
+		require.True(t, won)
+		require.NoError(t, s.RenewReply(ctx, "10", "2000"))
+
+		_, err = s.db.Exec(s.q(`UPDATE reply_claims SET owner = ? WHERE channel_id = ? AND message_id = ?`), "other", 10, 2000)
+		require.NoError(t, err)
+		assert.ErrorContains(t, s.RenewReply(ctx, "10", "2000"), "not live or owned")
 	})
 
 	t.Run("ClaimReplyAdmitsExactlyOneOfManyConcurrentCopies", func(t *testing.T) {

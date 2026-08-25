@@ -64,6 +64,9 @@ Three details carry the design:
   claim has lapsed. Set it longer than the redelivery delay and every attempt is refused until the
   message is exhausted, turning a crash into a lost reply. The two are deliberately the same knob —
   `SetReplyClaimTTL` is called with `--mq-ack-wait` and nothing else.
+- **The worker renews its live lease throughout generation.** Renewal runs at one-third of
+  `MQ_ACK_WAIT`, capped at ten seconds, and succeeds only while the same worker still owns an
+  unexpired claim. Losing the lease cancels generation instead of allowing an unowned reply.
 - **A posted reply extends the claim past every copy that could still arrive.** A short claim alone
   is not enough: a generation can run for minutes, so a duplicate delayed past `MQ_ACK_WAIT` — held
   behind a full `--mq-max-in-flight` budget at the other site, or redelivered there after a
@@ -89,12 +92,12 @@ With `STORE_DRIVER=none` there is no claim at all, and two ingestors produce two
 message. A single-site deployment is unaffected — one Gateway connection means nothing to
 deduplicate.
 
-### The claim fails open
+### The claim fails closed
 
-If the store is unreachable the claim is treated as won and the reply is sent, matching how every
-other shared dependency on this path degrades. The consequence is that a store outage can produce
-duplicate replies while both sites are up. That is the deliberate trade: a duplicate reply beats no
-reply.
+If the store is unreachable, no worker generates or posts a reply without ownership. The queue
+retries after `MQ_ACK_WAIT`; service resumes when PostgreSQL returns. A sufficiently long outage can
+exhaust `MQ_MAX_DELIVER` and dead-letter the request, but cannot produce competing public answers.
+History recording and request-outcome recording remain best-effort after a claim has been won.
 
 ## Why Pub/Sub
 
@@ -114,20 +117,19 @@ See [pubsub.md](pubsub.md) for provisioning, IAM, and the full driver comparison
 | Failure | What happens |
 | --- | --- |
 | One site lost entirely | The other is already connected and publishing. Messages its workers held un-acknowledged are redelivered by Pub/Sub. No interruption. |
-| One worker crashes mid-message | The message is redelivered; its claim lapses after `MQ_ACK_WAIT`, so the redelivery can answer. The crash happened before the claim was extended, which is what makes that possible. |
+| One worker crashes mid-message | Renewal stops; the message is redelivered and can answer after the final live claim lapses. |
 | Both sites healthy | Every message is published twice, both copies reach a worker, and the conditional write picks one. The loser acks without generating. |
-| The PostgreSQL store lost | Claims fail open. Replies continue, possibly duplicated, until it returns. |
+| The PostgreSQL store lost | Claims and renewals fail closed. In-flight generation is canceled and deliveries retry without replying until PostgreSQL returns or delivery attempts are exhausted. |
 | A message can never succeed | Terminated after `MQ_MAX_DELIVER` attempts. On Pub/Sub it lands in the dead-letter topic; an unparseable payload is acknowledged and only logged. |
 
 ## Known ceilings
 
-1. **Thread latest-message-wins is per-process.** `worker/pkg/discord/queue.go` is an in-memory map,
-   so two messages in one thread that land at different sites are not ordered against each other.
-   This was already true of multiple replicas; active-active makes it the normal case rather than an
-   edge case. Upgrade path: Pub/Sub ordering keys on `channel_id`, noting that ordering guarantees
-   weaken with publishers in two locations.
-2. **PostgreSQL's own availability is a deployment concern.** Losing it fails claims open, as
-   above. A managed HA service, or Patroni on-premises, removes the single instance; Jarvis needs
+1. **Thread FIFO is per-process.** `worker/pkg/discord/queue.go` is an in-memory queue, so two
+   messages in one thread that land at different sites are not ordered against each other. Upgrade
+   path: Pub/Sub ordering keys on `channel_id`, noting that ordering guarantees weaken with
+   publishers in two locations.
+2. **PostgreSQL's own availability is a deployment concern.** Losing it intentionally pauses
+   replies. A managed HA service, or Patroni on-premises, removes the single instance; Jarvis needs
    only a DSN.
 3. **Pub/Sub has no publisher deduplication.** The reply claim is the only thing preventing duplicate
    answers; a defect there produces duplicates, not losses.

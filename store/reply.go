@@ -66,7 +66,7 @@ func (s *Store) ClaimReply(ctx context.Context, channelID, messageID string) (bo
 		ON CONFLICT (channel_id, message_id) DO UPDATE
 		SET owner = excluded.owner, expires_at = excluded.expires_at
 		WHERE reply_claims.expires_at <= @now`),
-		cid, mid, s.replyOwner, int64(s.replyClaimTTL/time.Second))
+		cid, mid, s.replyOwner, s.replyClaimSeconds())
 	if err != nil {
 		return false, errors.Wrap(err, "claim Discord reply")
 	}
@@ -75,6 +75,33 @@ func (s *Store) ClaimReply(ctx context.Context, channelID, messageID string) (bo
 		return false, errors.Wrap(err, "confirm Discord reply claim")
 	}
 	return claimed > 0, nil
+}
+
+// RenewReply extends this process's live generation lease without stealing ownership.
+func (s *Store) RenewReply(ctx context.Context, channelID, messageID string) error {
+	cid, mid, err := claimKey(channelID, messageID)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE reply_claims SET expires_at = @now + ?
+		WHERE channel_id = ? AND message_id = ? AND owner = ? AND expires_at > @now`),
+		s.replyClaimSeconds(), cid, mid, s.replyOwner)
+	if err != nil {
+		return errors.Wrap(err, "renew Discord reply claim")
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "confirm Discord reply claim renewal")
+	}
+	if affected == 0 {
+		return errors.New("Discord reply claim is not live or owned by this worker")
+	}
+	return nil
+}
+
+func (s *Store) replyClaimSeconds() int64 {
+	return max(1, int64(s.replyClaimTTL/time.Second))
 }
 
 // HoldReply extends a claim past the point where any duplicate could still be delivered.

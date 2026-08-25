@@ -101,6 +101,16 @@ func TestStampGuildFillsTheSendResponseGap(t *testing.T) {
 	assert.Equal(t, "other", sent[2].GuildID)
 }
 
+func TestStampReplyReferencesLinksStoredRepliesToRequest(t *testing.T) {
+	request := &discordgo.Message{ID: "request", ChannelID: "channel", GuildID: "guild"}
+	replies := stampReplyReferences(request, []*discordgo.Message{{ID: "one"}, nil, {ID: "two"}})
+
+	require.NotNil(t, replies[0].MessageReference)
+	assert.Equal(t, "request", replies[0].MessageReference.MessageID)
+	assert.Equal(t, "channel", replies[2].MessageReference.ChannelID)
+	assert.Equal(t, "guild", replies[2].MessageReference.GuildID)
+}
+
 func TestWithAttachmentNoteNamesImageOnlyPosts(t *testing.T) {
 	image := &discordgo.Message{Attachments: []*discordgo.MessageAttachment{
 		{Filename: "a.png", ContentType: "image/png"}, {Filename: "n.txt", ContentType: "text/plain"},

@@ -1,7 +1,7 @@
 # Storage: PostgreSQL and SQLite
 
-Jarvis can persist bot-involved conversation, per-guild configuration, and reply claims in one SQL
-database. Two backends run the same implementation and the same schema:
+Jarvis can persist bot-involved conversation, per-guild configuration, request outcomes, and reply
+claims in one SQL database. PostgreSQL additionally provides channel-scoped long-term memory:
 
 | Driver | For | HA |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ environment-variable mapping.
 | `--store-driver` | `STORE_DRIVER` | `none` | `none`, `postgres`, or `sqlite`. |
 | `--postgres-dsn` | `POSTGRES_DSN` | empty | Connection string, e.g. `postgres://user:pass@host:5432/jarvis?sslmode=require`. |
 | `--sqlite-path` | `SQLITE_PATH` | empty | Database file path. Put it on a volume; WAL journaling is enabled automatically. |
-| `--store-sweep-interval` | `STORE_SWEEP_INTERVAL` | `1h` | How often expired messages and lapsed reply claims are deleted. |
+| `--store-sweep-interval` | `STORE_SWEEP_INTERVAL` | `1h` | How often expired messages, outcomes, short-lived memories, and lapsed reply claims are deleted. |
 | `--mcp-encryption-key` | `MCP_ENCRYPTION_KEY` | empty | 64 hex chars (32 bytes) — the AES-256 key sealing guild MCP auth tokens at rest. Required to attach an MCP server with a token. |
 | `--message-retention-days` | `MESSAGE_RETENTION_DAYS` | `14` | Default retention for newly recorded messages. |
 | `--root-user-ids` | `ROOT_USER_IDS` | empty | Discord user IDs with cross-guild configuration access. |
@@ -31,9 +31,10 @@ incomplete in the model context and never falls back to Discord. Current-channel
 only when the store and the guild's `channel_search_enabled` setting are both enabled.
 
 Startup fails closed — the connection, migrations, and a ping must succeed before the worker
-starts. Request-time failures after startup fail open: configuration falls back to validated
-defaults, reply claims admit the request, and a failed message record costs stored context, never
-the reply.
+starts. Reply claims and their generation-time renewals also fail closed: an unowned worker never
+posts, and the queue retries after the store recovers. Configuration and history reads retain their
+documented degraded behavior; failed message or outcome recording costs observability/context, not
+an already-owned reply.
 
 ## Provisioning
 
@@ -41,13 +42,13 @@ Jarvis owns the schema. At startup it applies its embedded, versioned migrations
 (`store/migrations/`), so provisioning is only the database itself:
 
 ```sh
-# PostgreSQL 16
-docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=... postgres:16
+# PostgreSQL 16 with pgvector
+docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=... pgvector/pgvector:pg16
 # SQLite: nothing to run — the file is created on first start
 ```
 
-The PostgreSQL role needs `CREATE` on the target database for migrations, plus ordinary DML. No
-extensions are required.
+The PostgreSQL role needs `CREATE` on the target database for migrations, plus ordinary DML. The
+`vector` extension must be pre-provisioned or installable by the migration role.
 
 ## What Jarvis records
 
@@ -76,7 +77,20 @@ SQLite share. Message content is plain `TEXT`.
 | `guild_admins` | `(guild_id, user_id)` | Delegated configuration administrators. |
 | `messages` | `(channel_id, message_id)` | Recorded conversation. Inserts are `ON CONFLICT DO NOTHING`, so duplicate delivery is idempotent. `mentioned_user_ids` is a JSON array — read whole, never queried. |
 | `reply_claims` | `(channel_id, message_id)` | The multi-site reply dedup. Claims compare expiries against the **database server's clock**, never a worker's. See [failover.md](failover.md). |
+| `request_outcomes` | `(channel_id, message_id)` | Content-free operational state for targeted requests: terminal status, reply IDs, error class, duration, and retention timestamps. Redelivery updates the same row. |
+| `memory_records` (PostgreSQL) | `id` | Channel/thread- and character-scoped attributed memory. Retrieval excludes quarantined, deleted, and expired rows. Entity uniqueness includes the subject user. |
+| `memory_watermarks` (PostgreSQL) | `(channel_id, character_id)` | Durable extraction cursor and short summarization lease. |
 | `schema_migrations` | `version` | Applied migration versions. |
+
+Migration 5 quarantines all legacy unpinned memory because older rows lack trustworthy author and
+channel provenance. New assistant-mode rows come only from user-authored transcript lines and carry
+`subject_user_id` and `origin_role`; roleplay rows retain their separate story-memory policy.
+
+For a rolling upgrade, first deploy `MEMORY_ENABLED=false` on the old image and wait for that
+rollout to finish. Then deploy the image containing migration 5. Keep memory disabled until
+`//worker/pkg/memory:memory_eval` passes against the release model and a disposable PostgreSQL:
+the gate covers long-run roleplay recall plus assistant fact recall, attribution, injection cases,
+and zero false positives for questions, insults, volatile claims, and assistant hallucinations.
 
 ### Written by Jarvis and the external accounts API — `guild_mcp_servers`
 

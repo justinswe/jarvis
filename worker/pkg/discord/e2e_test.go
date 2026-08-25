@@ -94,17 +94,17 @@ func (f *fakeMemoryEngine) NoteTurn(_ context.Context, turn memory.Turn) {
 	f.turns = append(f.turns, turn)
 }
 
-func (f *fakeMemoryEngine) Retrieve(context.Context, string, int64, string, int) string {
+func (f *fakeMemoryEngine) Retrieve(context.Context, string, string, string, int64, string, int) string {
 	return f.retrieval
 }
-func (f *fakeMemoryEngine) List(context.Context, string, int64, int) ([]store.MemoryRecord, error) {
+func (f *fakeMemoryEngine) List(context.Context, string, string, int64, int) ([]store.MemoryRecord, error) {
 	return nil, nil
 }
-func (f *fakeMemoryEngine) Pin(context.Context, string, int64, bool) error    { return nil }
-func (f *fakeMemoryEngine) Edit(context.Context, string, int64, string) error { return nil }
-func (f *fakeMemoryEngine) Delete(context.Context, string, int64) error       { return nil }
-func (f *fakeMemoryEngine) Add(_ context.Context, guildID string, characterID int64, content string, pinned bool) error {
-	f.added = append(f.added, store.MemoryRecord{GuildID: guildID, CharacterID: characterID, Content: content, Pinned: pinned})
+func (f *fakeMemoryEngine) Pin(context.Context, string, string, int64, bool) error    { return nil }
+func (f *fakeMemoryEngine) Edit(context.Context, string, string, int64, string) error { return nil }
+func (f *fakeMemoryEngine) Delete(context.Context, string, string, int64) error       { return nil }
+func (f *fakeMemoryEngine) Add(_ context.Context, guildID, channelID, subjectUserID string, characterID int64, content string, pinned bool) error {
+	f.added = append(f.added, store.MemoryRecord{GuildID: guildID, ChannelID: channelID, SubjectUserID: subjectUserID, CharacterID: characterID, Content: content, Pinned: pinned})
 	return nil
 }
 
